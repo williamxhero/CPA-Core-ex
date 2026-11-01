@@ -1,0 +1,2 @@
+# Preserve the independently frozen vector bytes, including CRLF, on every host.
+internal/credentialassociation/testdata/association-v2-vectors.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
