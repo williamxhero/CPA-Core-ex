@@ -181,7 +181,7 @@ func (h *Handler) ResourceBindings(c *gin.Context) {
 	bindings := []gin.H{}
 	for _, a := range h.authManager.List() {
 		a = h.currentRuntimeSource(a)
-		if a != nil && h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
+		if a != nil {
 			bindings = append(bindings, gin.H{"scope": a.ResourceIdentity.Scope, "targets": a.ResourceIdentity.Targets, "auth_index": a.Index, "runtime_alias": a.ResourceIdentity.Targets[0].ResourceID})
 		}
 	}
