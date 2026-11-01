@@ -681,3 +681,35 @@ func TestResourcePluginOnlyTypedSaveFencing(t *testing.T) {
 	}
 	f.snapshot()
 }
+
+func TestResourcePluginConfigurationProjectsToFiles(t *testing.T) {
+	f, _ := pluginInventoryFixture(t)
+	before := f.snapshot()
+	editInventoryConfig(t, f.path, func(root *yaml.Node) {
+		qwen := testField(testField(testField(root, "plugins"), "configs"), "qwen-cliproxyapi")
+		var protocols yaml.Node
+		if err := yaml.Unmarshal([]byte("{messages: false, chat-completions: true}"), &protocols); err != nil {
+			t.Fatal(err)
+		}
+		qwen.Content = append(qwen.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "protocols"}, protocols.Content[0])
+	})
+	if err := f.handler.ReconcileResourceInventory(); err != nil {
+		t.Fatal(err)
+	}
+	after := f.snapshot()
+	changed := 0
+	for _, r := range after.Resources {
+		if r.Family == "qwen" && r.Kind == "credential" && r.ParentID == "" {
+			old := rowByID(t, before, r.ResourceID)
+			if r.CredentialVersion != old.CredentialVersion {
+				t.Fatal("non-credential plugin config changed credential authority")
+			}
+			if r.ConfigVersion == old.ConfigVersion+1 {
+				changed++
+			}
+		}
+	}
+	if changed != 2 {
+		t.Fatalf("plugin configuration was not projected to both configured and panel files: %d", changed)
+	}
+}
