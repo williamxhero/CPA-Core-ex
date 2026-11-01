@@ -1726,6 +1726,9 @@ type QuotaDescribeRequest struct {
 
 // QuotaDescribeResponse describes supported providers and capabilities of a quota provider.
 type QuotaDescribeResponse struct {
+	// ScopedHTTP guarantees quota HTTP callbacks echo the invocation host_callback_id.
+	// Hosts must refuse anonymous legacy callbacks for bounded quota operations.
+	ScopedHTTP bool `json:"scoped_http,omitempty"`
 	// SupportedProviders lists provider keys supported by this quota provider.
 	SupportedProviders []string `json:"supported_providers,omitempty"`
 	// DisplayName is a user-facing label for this quota provider.

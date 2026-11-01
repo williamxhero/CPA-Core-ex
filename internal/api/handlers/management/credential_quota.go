@@ -25,7 +25,7 @@ func (h *Handler) SetQuotaNetwork(n credentialquota.NetworkOptions) {
 	h.quotaNetwork = n
 }
 
-func (h *Handler) quotaSource(a *coreauth.Auth) resource.QuotaSource {
+func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.QuotaSource {
 	s := resource.QuotaSource{Binding: *a.ResourceIdentity, AuthIndex: a.Index, State: "unsupported", Reason: "quota_protocol_unverified", AccountProvenance: "unverified", Protocol: "unavailable", ManualDisabled: a.Disabled}
 	switch {
 	case a.SourcePluginID == "qwen-cliproxyapi":
@@ -43,6 +43,10 @@ func (h *Handler) quotaSource(a *coreauth.Auth) resource.QuotaSource {
 		if host == nil || !host.HasQuotaProviderForPlugin(a.SourcePluginID) {
 			s.State = "unsupported"
 			s.Reason = "native_plugin_unavailable"
+		} else if desc, handled, err := host.DescribeQuota(ctx, a.SourcePluginID); err != nil || !handled || !desc.ScopedHTTP {
+			s.State = "unsupported"
+			s.Reason = "quota_operation_context_unavailable"
+			s.AccountProvenance = "unverified"
 		}
 		if !credentialquota.AllowedEndpoint(h.quotaPluginEndpoint(a) + "/usage") {
 			s.State = "needs_configuration"
@@ -91,7 +95,7 @@ func (h *Handler) quotaPluginEndpoint(a *coreauth.Auth) string {
 	return strings.TrimRight(strings.TrimSpace(endpoint), "/")
 }
 
-func (h *Handler) quotaSources() ([]resource.QuotaSource, bool) {
+func (h *Handler) quotaSources(ctx context.Context) ([]resource.QuotaSource, bool) {
 	if h.resourceCatalog == nil || h.resourceModeReason() != "" {
 		return nil, false
 	}
@@ -103,7 +107,7 @@ func (h *Handler) quotaSources() ([]resource.QuotaSource, bool) {
 	bound := map[string]bool{}
 	for _, a := range h.authManager.List() {
 		if h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
-			out = append(out, h.quotaSource(a))
+			out = append(out, h.quotaSource(ctx, a))
 			for _, t := range a.ResourceIdentity.Targets {
 				bound[t.ResourceID] = true
 			}
@@ -119,7 +123,9 @@ func (h *Handler) quotaSources() ([]resource.QuotaSource, bool) {
 
 func (h *Handler) CredentialQuotaSources(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	sources, ok := h.quotaSources()
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+	sources, ok := h.quotaSources(ctx)
 	if !ok {
 		c.JSON(503, gin.H{"error": "resource_inventory_unavailable"})
 		return
@@ -174,7 +180,7 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		c.JSON(429, gin.H{"error": "query_busy"})
 		return
 	}
-	source := h.quotaSource(a)
+	source := h.quotaSource(ctx, a)
 	obs := resource.QuotaObservation{Binding: q.Binding, Protocol: source.Protocol, QueryStatus: source.State, ErrorCode: source.Reason, ObservedAtMS: time.Now().UnixMilli(), AccountProvenance: source.AccountProvenance}
 	if source.State == "ready" {
 		if source.Protocol == "codex-oauth-wham" {
@@ -200,6 +206,11 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 	if _, ok = h.selectedQuota(q); !ok {
 		c.JSON(409, gin.H{"error": "identity_changed"})
 		return
+	}
+	if obs.ProtocolVersion == 0 {
+		obs.ProtocolVersion = 1
+		obs.ReceivedAtMS = time.Now().UnixMilli()
+		obs.TimestampProvenance = "core_attempt_time"
 	}
 	c.JSON(200, obs)
 }

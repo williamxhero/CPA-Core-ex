@@ -29,12 +29,15 @@ type QuotaWindow struct {
 // QuotaObservation never includes account IDs, tokens, raw responses or gate ACKs.
 type QuotaObservation struct {
 	Binding
-	Protocol          string        `json:"protocol"`
-	QueryStatus       string        `json:"queryStatus"`
-	ErrorCode         string        `json:"errorCode,omitempty"`
-	ObservedAtMS      int64         `json:"observedAtMs"`
-	Windows           []QuotaWindow `json:"windows,omitempty"`
-	Complete          bool          `json:"complete"`
-	AccountProvenance string        `json:"accountProvenance"`
-	RecoveryEligible  bool          `json:"recoveryEligible"`
+	ProtocolVersion     int           `json:"protocolVersion"`
+	TimestampProvenance string        `json:"timestampProvenance"`
+	ReceivedAtMS        int64         `json:"receivedAtMs"`
+	Protocol            string        `json:"protocol"`
+	QueryStatus         string        `json:"queryStatus"`
+	ErrorCode           string        `json:"errorCode,omitempty"`
+	ObservedAtMS        int64         `json:"observedAtMs"`
+	Windows             []QuotaWindow `json:"windows,omitempty"`
+	Complete            bool          `json:"complete"`
+	AccountProvenance   string        `json:"accountProvenance"`
+	RecoveryEligible    bool          `json:"recoveryEligible"`
 }

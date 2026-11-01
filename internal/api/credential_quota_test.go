@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -73,24 +74,35 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 	if address == "" {
 		t.Skip("isolated process fixture only")
 	}
-	dir := t.TempDir()
+	dir := os.Getenv("QUOTA_FIXTURE_STATE_DIR")
+	if dir == "" {
+		dir = t.TempDir()
+	}
 	auth := filepath.Join(dir, "auth")
-	if err := os.Mkdir(auth, 0700); err != nil {
+	if err := os.MkdirAll(auth, 0700); err != nil {
 		t.Fatal(err)
 	}
 	for name, body := range map[string]string{
 		"codex.json":    `{"type":"codex","access_token":"QUOTA-SECRET-CANARY","account_id":"synthetic-account","disabled":true}`,
 		"opencode.json": `{"type":"opencode-go","api_key":"PLUGIN-SECRET-CANARY","disabled":true}`,
 	} {
-		if err := os.WriteFile(filepath.Join(auth, name), []byte(body), 0600); err != nil {
-			t.Fatal(err)
+		if _, exists := os.Stat(filepath.Join(auth, name)); os.IsNotExist(exists) {
+			if err := os.WriteFile(filepath.Join(auth, name), []byte(body), 0600); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  codex: [{name: intermediary, base-url: https://synthetic.invalid/v1, keys: [{api-key: API-KEY-CANARY}]}]\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    opencode-go-cliproxyapi:\n      enabled: true\n      base-url: https://opencode.ai/zen/go/v1\n      api-keys: [{name: test, value: PLUGIN-SECRET-CANARY}]\n", filepath.ToSlash(auth), filepath.ToSlash(os.Getenv("QUOTA_FIXTURE_PLUGIN_DIR")))
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(text), 0600); err != nil {
+	if _, exists := os.Stat(filepath.Join(dir, "config.yaml")); os.IsNotExist(exists) {
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actual, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := config.ParseConfigBytes([]byte(text))
+	cfg, err := config.ParseConfigBytes(actual)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,6 +247,10 @@ func TestCredentialQuotaSelectedOAuthAndFailure(t *testing.T) {
 	}
 	q := resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}
 	obs := queryQuota(t, f, q, 200)
+	doc, _ := json.Marshal(obs)
+	if !strings.Contains(string(doc), `"timestampProvenance":"upstream_http_date"`) {
+		t.Fatal("missing upstream timestamp provenance")
+	}
 	if obs.QueryStatus != "success" || !obs.Complete || !obs.RecoveryEligible || len(obs.Windows) != 2 || obs.Windows[0].RemainingFraction != 0.75 {
 		t.Fatalf("wrong windows: %+v", obs)
 	}
@@ -247,5 +263,142 @@ func TestCredentialQuotaSelectedOAuthAndFailure(t *testing.T) {
 	queryQuota(t, f, q, 409)
 	if calls.Load() != 2 {
 		t.Fatal("stale target contacted upstream")
+	}
+}
+
+func TestCredentialQuotaWindowAndTransportNegatives(t *testing.T) {
+	reset := time.Now().Add(time.Hour).Unix()
+	window := fmt.Sprintf(`{"used_percent":25,"reset_at":%d,"limit_window_seconds":18000}`, reset)
+	full := `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":` + window + `,"secondary_window":` + window + `}}`
+	for _, tc := range []struct {
+		name, body, status string
+		code               int
+		date               string
+		complete, recovery bool
+	}{
+		{name: "complete", body: full, status: "success", complete: true, recovery: true},
+		{name: "partial", body: `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":` + window + `}}`, status: "success"},
+		{name: "null", body: strings.ReplaceAll(full, `"used_percent":25`, `"used_percent":null`), status: "parse_error"},
+		{name: "nonfinite", body: strings.ReplaceAll(full, `"used_percent":25`, `"used_percent":1e999`), status: "parse_error"},
+		{name: "missing", body: `{}`, status: "parse_error"},
+		{name: "expired", body: strings.ReplaceAll(full, fmt.Sprint(reset), "1"), status: "success", complete: true},
+		{name: "badwindow", body: strings.ReplaceAll(full, `"limit_window_seconds":18000`, `"limit_window_seconds":0`), status: "parse_error"},
+		{name: "unauthorized", body: "QUOTA-SECRET-CANARY", status: "auth_error", code: 401},
+		{name: "429-not-recovery", body: "QUOTA-SECRET-CANARY", status: "rate_limited", code: 429},
+		{name: "old-origin-time", body: full, status: "parse_error", date: time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)},
+		{name: "future-origin-time", body: full, status: "parse_error", date: time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)},
+		{name: "overlimit", body: strings.Repeat("x", (2<<20)+1), status: "parse_error"},
+		{name: "redirect", body: full, status: "network_error", code: 302},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			_, n := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if tc.date != "" {
+					w.Header().Set("Date", tc.date)
+				}
+				if tc.code == 302 {
+					w.Header().Set("Location", "https://metadata.google.internal/")
+				}
+				if tc.code != 0 {
+					w.WriteHeader(tc.code)
+				}
+				fmt.Fprint(w, tc.body)
+			}))
+			f := quotaOAuthFixture(t, n)
+			s := quotaSourceFor(t, f, "codex-oauth-wham")
+			obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}, 200)
+			if obs.QueryStatus != tc.status || obs.Complete != tc.complete || obs.RecoveryEligible != tc.recovery {
+				t.Fatalf("unexpected result %+v", obs)
+			}
+			if calls.Load() != 1 {
+				t.Fatal("duplicate/fallback request")
+			}
+		})
+	}
+}
+
+func TestCredentialQuotaMetadataDNSNeverDials(t *testing.T) {
+	for _, ip := range []string{"169.254.169.254", "168.63.129.16", "64:ff9b::a9fe:a9fe", "::ffff:169.254.169.254", "2002:a9fe:a9fe::1", "fe80::1", "127.0.0.1"} {
+		t.Run(ip, func(t *testing.T) {
+			var dials atomic.Int64
+			n := credentialquota.NetworkOptions{LookupIP: func(context.Context, string) ([]net.IPAddr, error) {
+				return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP(ip)}}, nil
+			}, DialContext: func(context.Context, string, string) (net.Conn, error) {
+				dials.Add(1)
+				return nil, fmt.Errorf("unexpected dial")
+			}}
+			f := quotaOAuthFixture(t, n)
+			s := quotaSourceFor(t, f, "codex-oauth-wham")
+			obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}, 200)
+			if obs.QueryStatus != "network_error" || dials.Load() != 0 {
+				t.Fatal("DNS/metadata bypass")
+			}
+		})
+	}
+}
+
+func TestCredentialQuotaUnknownAccountAndManagementTimeout(t *testing.T) {
+	var mode atomic.Int64
+	_, n := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if mode.Load() == 1 {
+			<-r.Context().Done()
+			return
+		}
+		reset := time.Now().Add(time.Hour).Unix()
+		fmt.Fprintf(w, `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":20,"reset_at":%d,"limit_window_seconds":1},"secondary_window":{"used_percent":20,"reset_at":%d,"limit_window_seconds":1}}}`, reset, reset)
+	}))
+	dir := t.TempDir()
+	auth := filepath.Join(dir, "auth")
+	os.MkdirAll(auth, 0700)
+	os.WriteFile(filepath.Join(auth, "codex.json"), []byte(`{"type":"codex","access_token":"QUOTA-SECRET-CANARY"}`), 0600)
+	f := newInventoryHarness(t, dir)
+	f.handler.SetQuotaNetwork(n)
+	s := quotaSourceFor(t, f, "codex-oauth-wham")
+	q := resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}
+	obs := queryQuota(t, f, q, 200)
+	if obs.QueryStatus != "success" || obs.AccountProvenance != "unverified" || obs.RecoveryEligible {
+		t.Fatal("unknown account recovered")
+	}
+	mode.Store(1)
+	q.TimeoutMS = 50
+	obs = queryQuota(t, f, q, 200)
+	if obs.QueryStatus != "network_error" || obs.RecoveryEligible {
+		t.Fatal("timeout became positive evidence")
+	}
+}
+
+func TestCredentialQuotaLateResultFencedBySourceReplacement(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	_, n := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		fmt.Fprint(w, `{}`)
+	}))
+	f := quotaOAuthFixture(t, n)
+	s := quotaSourceFor(t, f, "codex-oauth-wham")
+	data, _ := json.Marshal(resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, TimeoutMS: 1000})
+	req := httptest.NewRequest("POST", "/v8/management/credential-quota/query", bytes.NewReader(data))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer test-password")
+	done := make(chan int, 1)
+	go func() { w := httptest.NewRecorder(); f.server.engine.ServeHTTP(w, req); done <- w.Code }()
+	<-entered
+	path := filepath.Join(f.authDir, "codex.json")
+	raw, _ := os.ReadFile(path)
+	raw = bytes.Replace(raw, []byte("QUOTA-SECRET-CANARY"), []byte("REPLACEMENT-CANARY"), 1)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.handler.ReconcileResourceInventory(); err != nil {
+		t.Fatal(err)
+	}
+	// Deadline releases this request without a wall-clock sleep or upstream success.
+	if code := <-done; code != 409 {
+		t.Fatalf("late result HTTP %d", code)
 	}
 }

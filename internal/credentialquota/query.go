@@ -77,6 +77,9 @@ func read(ctx context.Context, endpoint, token, account string, n NetworkOptions
 }
 
 func freshWindows(obs *resource.QuotaObservation) {
+	obs.ProtocolVersion = 1
+	obs.ReceivedAtMS = time.Now().UnixMilli()
+	obs.TimestampProvenance = "upstream_http_date"
 	obs.RecoveryEligible = obs.QueryStatus == "success" && obs.Complete && obs.AccountProvenance != "unverified"
 	for _, w := range obs.Windows {
 		reset, e := time.Parse(time.RFC3339Nano, w.ResetAt)
