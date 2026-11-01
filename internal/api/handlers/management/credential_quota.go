@@ -2,6 +2,8 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -48,9 +50,14 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 			s.Reason = "quota_operation_context_unavailable"
 			s.AccountProvenance = "unverified"
 		}
-		if !credentialquota.AllowedEndpoint(h.quotaPluginEndpoint(a) + "/usage") {
+		if s.State == "ready" && !credentialquota.AllowedEndpoint(h.quotaPluginEndpoint(ctx, a)+"/usage") {
 			s.State = "needs_configuration"
 			s.Reason = "plugin_origin_unverified"
+			s.AccountProvenance = "unverified"
+		}
+		if s.State == "ready" && len(s.Targets) > 1 && h.quotaPluginEndpoint(ctx, a) != h.quotaPluginConfigEndpoint(ctx, a) {
+			s.State = "needs_configuration"
+			s.Reason = "projection_endpoint_mismatch"
 			s.AccountProvenance = "unverified"
 		}
 	case a.SourcePluginID != "":
@@ -76,23 +83,46 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 			s.Reason = "native_oauth_required"
 		}
 	}
+	// A SECRET-FREE query-source revision, never identity or a credential digest.
+	endpoint := "https://chatgpt.com/backend-api/wham/usage"
+	if s.Protocol == "opencode-go-usage" {
+		endpoint = h.quotaPluginEndpoint(ctx, a) + "/usage"
+	}
+	if s.State != "ready" {
+		endpoint = ""
+	}
+	revision, _ := json.Marshal([]string{s.Protocol, s.State, s.Reason, s.AccountProvenance, endpoint})
+	digest := sha256.Sum256(revision)
+	s.SourceVersion = hex.EncodeToString(digest[:])
 	return s
 }
 
 // Resolve the SAME effective endpoint as the known plugin: explicit auth first,
 // current instance config second, documented native default last. Never labels.
-func (h *Handler) quotaPluginEndpoint(a *coreauth.Auth) string {
+func (h *Handler) quotaPluginEndpoint(ctx context.Context, a *coreauth.Auth) string {
 	endpoint := strings.TrimSpace(a.Attributes["base_url"])
 	if endpoint == "" {
-		h.mu.Lock()
-		cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
-		var raw map[string]any
-		_ = cfg.Raw.Decode(&raw)
-		endpoint, _ = raw["base-url"].(string)
-		h.mu.Unlock()
+		return h.quotaPluginConfigEndpoint(ctx, a)
 	}
+	return strings.TrimRight(endpoint, "/")
+}
+func (h *Handler) quotaPluginConfigEndpoint(ctx context.Context, a *coreauth.Auth) string {
+	var endpoint string
+	h.mu.Lock()
+	cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
+	var raw map[string]any
+	_ = cfg.Raw.Decode(&raw)
+	endpoint, _ = raw["base-url"].(string)
+	h.mu.Unlock()
 	if strings.TrimSpace(endpoint) == "" {
-		endpoint = "https://opencode.ai/zen/go/v1"
+		h.mu.Lock()
+		host := h.pluginHost
+		h.mu.Unlock()
+		if host != nil {
+			if desc, handled, err := host.DescribeQuota(ctx, a.SourcePluginID); err == nil && handled && desc.ScopedHTTP {
+				endpoint = desc.DefaultQuotaBaseURL
+			}
+		}
 	}
 	return strings.TrimRight(strings.TrimSpace(endpoint), "/")
 }
@@ -183,6 +213,10 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		return
 	}
 	source := h.quotaSource(ctx, a)
+	if q.SourceVersion == "" || source.SourceVersion != q.SourceVersion {
+		c.JSON(409, gin.H{"error": "source_changed"})
+		return
+	}
 	obs := resource.QuotaObservation{Binding: q.Binding, Protocol: source.Protocol, QueryStatus: source.State, ErrorCode: source.Reason, ObservedAtMS: time.Now().UnixMilli(), AccountProvenance: source.AccountProvenance}
 	if source.State == "ready" {
 		if source.Protocol == "codex-oauth-wham" {
@@ -190,7 +224,7 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		} else {
 			// Both in-process and compiled plugins use this invocation-scoped bridge.
 			// It records only this selected quota request, with no generic HTTP fallback.
-			endpoint := h.quotaPluginEndpoint(a)
+			endpoint := h.quotaPluginEndpoint(ctx, a)
 			bridge := credentialquota.NewPluginRead(strings.TrimRight(endpoint, "/")+"/usage", a.Attributes["api_key"], n)
 			scoped := pluginhost.WithQuotaHTTPClient(ctx, bridge)
 			_, handled, err := host.FetchQuotaByPlugin(scoped, a.SourcePluginID, pluginapi.QuotaFetchRequest{AuthIndex: a.Index, AuthID: a.ID, Provider: a.Provider, Metadata: a.Metadata, Attributes: a.Attributes, HTTPClient: bridge})
@@ -205,10 +239,12 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 			}
 		}
 	}
-	if _, ok = h.selectedQuota(q); !ok {
+	current, valid := h.selectedQuota(q)
+	if !valid || h.quotaSource(ctx, current).SourceVersion != q.SourceVersion {
 		c.JSON(409, gin.H{"error": "identity_changed"})
 		return
 	}
+	obs.SourceVersion = source.SourceVersion
 	if obs.ProtocolVersion == 0 {
 		obs.ProtocolVersion = 1
 		obs.ReceivedAtMS = time.Now().UnixMilli()

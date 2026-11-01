@@ -102,6 +102,14 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 		"codex.json":    `{"type":"codex","access_token":"QUOTA-SECRET-CANARY","account_id":"synthetic-account","disabled":true}`,
 		"opencode.json": `{"type":"opencode-go","api_key":"PLUGIN-SECRET-CANARY","disabled":true}`,
 	} {
+		mode := os.Getenv("QUOTA_FIXTURE_ENDPOINT_MODE")
+		if name == "opencode.json" && strings.HasPrefix(mode, "file-explicit-") {
+			base := "https://opencode.ai/inference/go/v1"
+			if mode == "file-explicit-legacy" {
+				base = "https://opencode.ai/zen/go/v1"
+			}
+			body = strings.TrimSuffix(body, "}") + `,"base_url":` + fmt.Sprintf("%q", base) + `}`
+		}
 		if _, exists := os.Stat(filepath.Join(auth, name)); os.IsNotExist(exists) {
 			if err := os.WriteFile(filepath.Join(auth, name), []byte(body), 0600); err != nil {
 				t.Fatal(err)
@@ -109,6 +117,9 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 		}
 	}
 	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  codex: [{name: intermediary, base-url: https://synthetic.invalid/v1, keys: [{api-key: API-KEY-CANARY}]}]\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    opencode-go-cliproxyapi:\n      enabled: true\n      base-url: https://opencode.ai/zen/go/v1\n      api-keys: [{name: test, value: PLUGIN-SECRET-CANARY}]\n", filepath.ToSlash(auth), filepath.ToSlash(os.Getenv("QUOTA_FIXTURE_PLUGIN_DIR")))
+	if os.Getenv("QUOTA_FIXTURE_ENDPOINT_MODE") != "" {
+		text = strings.Replace(text, "      base-url: https://opencode.ai/zen/go/v1\n", "", 1)
+	}
 	if _, exists := os.Stat(filepath.Join(dir, "config.yaml")); os.IsNotExist(exists) {
 		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(text), 0600); err != nil {
 			t.Fatal(err)
@@ -261,7 +272,7 @@ func TestCredentialQuotaSelectedOAuthAndFailure(t *testing.T) {
 	if !s.ManualDisabled || calls.Load() != 0 {
 		t.Fatal("disabled inventory must not query")
 	}
-	q := resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}
+	q := resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}
 	obs := queryQuota(t, f, q, 200)
 	doc, _ := json.Marshal(obs)
 	if !strings.Contains(string(doc), `"timestampProvenance":"upstream_http_date"`) {
@@ -275,10 +286,25 @@ func TestCredentialQuotaSelectedOAuthAndFailure(t *testing.T) {
 	if obs.QueryStatus != "auth_error" || obs.RecoveryEligible {
 		t.Fatal("auth error became evidence")
 	}
+	q.TimeoutMS = 60001
+	queryQuota(t, f, q, 400)
+	q.TimeoutMS = 0
 	q.Targets[0].CredentialVersion++
 	queryQuota(t, f, q, 409)
 	if calls.Load() != 2 {
 		t.Fatal("stale target contacted upstream")
+	}
+}
+
+func TestCredentialQuotaTLSCertificateVerificationIsRequired(t *testing.T) {
+	var calls atomic.Int64
+	_, n := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); fmt.Fprint(w, `{}`) }))
+	n.RootCAs = nil
+	f := quotaOAuthFixture(t, n)
+	s := quotaSourceFor(t, f, "codex-oauth-wham")
+	obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}, 200)
+	if obs.QueryStatus != "network_error" || calls.Load() != 0 {
+		t.Fatal("untrusted TLS reached provider request handler")
 	}
 }
 
@@ -323,7 +349,7 @@ func TestCredentialQuotaWindowAndTransportNegatives(t *testing.T) {
 			}))
 			f := quotaOAuthFixture(t, n)
 			s := quotaSourceFor(t, f, "codex-oauth-wham")
-			obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}, 200)
+			obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}, 200)
 			if obs.QueryStatus != tc.status || obs.Complete != tc.complete || obs.RecoveryEligible != tc.recovery {
 				t.Fatalf("unexpected result %+v", obs)
 			}
@@ -346,7 +372,7 @@ func TestCredentialQuotaMetadataDNSNeverDials(t *testing.T) {
 			}}
 			f := quotaOAuthFixture(t, n)
 			s := quotaSourceFor(t, f, "codex-oauth-wham")
-			obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}, 200)
+			obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}, 200)
 			if obs.QueryStatus != "network_error" || dials.Load() != 0 {
 				t.Fatal("DNS/metadata bypass")
 			}
@@ -371,7 +397,7 @@ func TestCredentialQuotaUnknownAccountAndManagementTimeout(t *testing.T) {
 	f := newInventoryHarness(t, dir)
 	f.handler.SetQuotaNetwork(n)
 	s := quotaSourceFor(t, f, "codex-oauth-wham")
-	q := resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}
+	q := resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}
 	obs := queryQuota(t, f, q, 200)
 	if obs.QueryStatus != "success" || obs.AccountProvenance != "unverified" || obs.RecoveryEligible {
 		t.Fatal("unknown account recovered")
@@ -387,7 +413,7 @@ func TestCredentialQuotaUnknownAccountAndManagementTimeout(t *testing.T) {
 func TestCredentialQuotaQwenUnverifiedNeverQueries(t *testing.T) {
 	f, calls := pluginInventoryFixture(t)
 	s := quotaSourceFor(t, f, "qwen-console")
-	obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}, 200)
+	obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}, 200)
 	if obs.QueryStatus != "needs_configuration" || obs.AccountProvenance != "unverified" || obs.RecoveryEligible || len(obs.Windows) != 0 || calls.Load() != 0 {
 		t.Fatalf("unproven console account was queried/recovered: %+v", obs)
 	}
@@ -423,7 +449,7 @@ func TestCredentialQuotaLateResultFencedBySourceReplacement(t *testing.T) {
 	}))
 	f := quotaOAuthFixture(t, n)
 	s := quotaSourceFor(t, f, "codex-oauth-wham")
-	data, _ := json.Marshal(resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, TimeoutMS: 1000})
+	data, _ := json.Marshal(resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion, TimeoutMS: 1000})
 	req := httptest.NewRequest("POST", "/v8/management/credential-quota/query", bytes.NewReader(data))
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("Authorization", "Bearer test-password")

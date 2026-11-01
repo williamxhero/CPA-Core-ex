@@ -3,6 +3,7 @@ package resource
 // QuotaSource describes query authority, independently from inference admission.
 type QuotaSource struct {
 	Binding
+	SourceVersion     string `json:"sourceVersion"`
 	AuthIndex         string `json:"auth_index,omitempty"`
 	Protocol          string `json:"protocol"`
 	State             string `json:"state"`
@@ -13,8 +14,9 @@ type QuotaSource struct {
 
 type QuotaQuery struct {
 	Binding
-	AuthIndex string `json:"auth_index"`
-	TimeoutMS int64  `json:"timeoutMs,omitempty"`
+	SourceVersion string `json:"sourceVersion"`
+	AuthIndex     string `json:"auth_index"`
+	TimeoutMS     int64  `json:"timeoutMs,omitempty"`
 }
 
 type QuotaWindow struct {
@@ -29,6 +31,7 @@ type QuotaWindow struct {
 // QuotaObservation never includes account IDs, tokens, raw responses or gate ACKs.
 type QuotaObservation struct {
 	Binding
+	SourceVersion       string        `json:"sourceVersion"`
 	ProtocolVersion     int           `json:"protocolVersion"`
 	TimestampProvenance string        `json:"timestampProvenance"`
 	ReceivedAtMS        int64         `json:"receivedAtMs"`
