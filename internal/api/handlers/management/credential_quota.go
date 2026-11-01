@@ -37,9 +37,17 @@ func (h *Handler) quotaSource(a *coreauth.Auth) resource.QuotaSource {
 		s.State = "ready"
 		s.Reason = "selected_native_plugin"
 		s.AccountProvenance = "selected_key_subscription"
-		if h.pluginHost == nil || !h.pluginHost.HasQuotaProviderForPlugin(a.SourcePluginID) {
+		h.mu.Lock()
+		host := h.pluginHost
+		h.mu.Unlock()
+		if host == nil || !host.HasQuotaProviderForPlugin(a.SourcePluginID) {
 			s.State = "unsupported"
 			s.Reason = "native_plugin_unavailable"
+		}
+		if !credentialquota.AllowedEndpoint(h.quotaPluginEndpoint(a) + "/usage") {
+			s.State = "needs_configuration"
+			s.Reason = "plugin_origin_unverified"
+			s.AccountProvenance = "unverified"
 		}
 	case a.SourcePluginID != "":
 		s.Reason = "plugin_protocol_unverified"
@@ -54,13 +62,33 @@ func (h *Handler) quotaSource(a *coreauth.Auth) resource.QuotaSource {
 			s.Protocol = "codex-oauth-wham"
 			s.State = "ready"
 			s.Reason = "selected_oauth"
-			s.AccountProvenance = "selected_oauth_account"
+			if account, _ := a.Metadata["account_id"].(string); account != "" {
+				s.AccountProvenance = "selected_oauth_account"
+			}
 		} else {
 			s.State = "needs_configuration"
 			s.Reason = "native_oauth_required"
 		}
 	}
 	return s
+}
+
+// Resolve the SAME effective endpoint as the known plugin: explicit auth first,
+// current instance config second, documented native default last. Never labels.
+func (h *Handler) quotaPluginEndpoint(a *coreauth.Auth) string {
+	endpoint := strings.TrimSpace(a.Attributes["base_url"])
+	if endpoint == "" {
+		h.mu.Lock()
+		cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
+		var raw map[string]any
+		_ = cfg.Raw.Decode(&raw)
+		endpoint, _ = raw["base-url"].(string)
+		h.mu.Unlock()
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		endpoint = "https://opencode.ai/zen/go/v1"
+	}
+	return strings.TrimRight(strings.TrimSpace(endpoint), "/")
 }
 
 func (h *Handler) quotaSources() ([]resource.QuotaSource, bool) {
@@ -154,15 +182,7 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		} else {
 			// Both in-process and compiled plugins use this invocation-scoped bridge.
 			// It records only this selected quota request, with no generic HTTP fallback.
-			endpoint := a.Attributes["base_url"]
-			if endpoint == "" {
-				h.mu.Lock()
-				cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
-				var raw map[string]any
-				_ = cfg.Raw.Decode(&raw)
-				endpoint, _ = raw["base-url"].(string)
-				h.mu.Unlock()
-			}
+			endpoint := h.quotaPluginEndpoint(a)
 			bridge := credentialquota.NewPluginRead(strings.TrimRight(endpoint, "/")+"/usage", a.Attributes["api_key"], n)
 			scoped := pluginhost.WithQuotaHTTPClient(ctx, bridge)
 			_, handled, err := host.FetchQuotaByPlugin(scoped, a.SourcePluginID, pluginapi.QuotaFetchRequest{AuthIndex: a.Index, AuthID: a.ID, Provider: a.Provider, Metadata: a.Metadata, Attributes: a.Attributes, HTTPClient: bridge})

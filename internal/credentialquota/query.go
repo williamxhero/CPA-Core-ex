@@ -30,7 +30,7 @@ type QueryTarget struct {
 	PrivateTargets []string
 }
 
-func allowed(endpoint string) bool {
+func AllowedEndpoint(endpoint string) bool {
 	u, e := url.Parse(endpoint)
 	if e != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Port() != "" {
 		return false
@@ -39,7 +39,7 @@ func allowed(endpoint string) bool {
 }
 
 func read(ctx context.Context, endpoint, token, account string, n NetworkOptions) ([]byte, string, time.Time) {
-	if !allowed(endpoint) {
+	if !AllowedEndpoint(endpoint) {
 		return nil, "needs_configuration", time.Time{}
 	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", endpoint, nil)

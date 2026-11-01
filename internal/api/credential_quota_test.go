@@ -6,12 +6,14 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialquota"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,15 @@ import (
 	"testing"
 	"time"
 )
+
+type fixtureDenyHTTP struct{}
+
+func (fixtureDenyHTTP) Do(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	return pluginapi.HTTPResponse{}, errors.New("fixture startup egress denied")
+}
+func (fixtureDenyHTTP) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	return pluginapi.HTTPStreamResponse{}, errors.New("fixture startup egress denied")
+}
 
 func TestCredentialQuotaSourcesAreReadOnlyAndHonest(t *testing.T) {
 	f, calls := pluginInventoryFixture(t)
@@ -84,7 +95,10 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := pluginhost.New()
-	host.ApplyConfig(context.Background(), cfg)
+	// Plugin initialization may refresh its model catalog. Deny all such I/O;
+	// only the separately scoped management quota invocation may reach TLS.
+	cfg.ProxyURL = "http://127.0.0.1:1"
+	host.ApplyConfig(pluginhost.WithQuotaHTTPClient(context.Background(), fixtureDenyHTTP{}), cfg)
 	t.Cleanup(host.ShutdownAll)
 	if !host.HasQuotaProviderForPlugin("opencode-go-cliproxyapi") {
 		t.Fatal("real compiled existing plugin was not loaded")
