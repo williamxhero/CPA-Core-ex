@@ -399,7 +399,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				if sess != nil {
-					if timeoutReached && len(bufferedChunks) > 0 {
+					if timeoutReached && len(bufferedChunks) > 0 && !isCodexOverloadBootstrapFailure([]byte(wsErr.Error())) {
 						e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 					} else {
 						e.invalidateUpstreamConnWithoutDisconnectNotify(sess, conn, "upstream_error", wsErr)
@@ -443,7 +443,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					failoverPending = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 				}
-				notifyDisconnect := !failoverPending && len(bufferedChunks) > 0
+				notifyDisconnect := !failoverPending && len(bufferedChunks) > 0 && !overloadFailover
 				if sess != nil {
 					if notifyDisconnect {
 						e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)
@@ -690,6 +690,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
+				// Capacity failures are terminated by the stream consumer, after it has
+				// drained accepted output. A concurrent disconnect can discard that
+				// output or win the terminal-error write race.
+				notifyDisconnect := emittedPayload && !isCodexOverloadBootstrapFailure([]byte(wsErr.Error()))
 				// The disconnect notification makes the downstream handler close the client and
 				// cancel the request context, so it must follow delivery of the error to the
 				// conductor; otherwise the cancellation can drop the error and its cooldown.
@@ -705,7 +709,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
-					if emittedPayload {
+					if notifyDisconnect {
 						sess.notifyUpstreamDisconnect(wsErr)
 					}
 					return
@@ -713,7 +717,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: wsErr})
-				if emittedPayload {
+				if notifyDisconnect {
 					sess.notifyUpstreamDisconnect(wsErr)
 				}
 				return
@@ -721,6 +725,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
+				notifyDisconnect := emittedPayload && !isCodexOverloadBootstrapFailure(terminalBody)
 				// Publish the downstream disconnect only after an in-stream error was delivered,
 				// see the upstream error branch above.
 				if sess != nil {
@@ -733,7 +738,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 					helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", errClearReplay)
 					reporter.PublishFailure(ctx, errClearReplay)
 					_ = send(cliproxyexecutor.StreamChunk{Err: errClearReplay})
-					if emittedPayload {
+					if notifyDisconnect {
 						sess.notifyUpstreamDisconnect(streamErr)
 					}
 					return
@@ -741,7 +746,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", streamErr)
 				reporter.PublishFailure(ctx, streamErr)
 				_ = send(cliproxyexecutor.StreamChunk{Err: streamErr})
-				if emittedPayload {
+				if notifyDisconnect {
 					sess.notifyUpstreamDisconnect(streamErr)
 				}
 				return
