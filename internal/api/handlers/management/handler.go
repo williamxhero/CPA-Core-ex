@@ -41,6 +41,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 type Handler struct {
 	resourceCatalog         *resourcecatalog.Catalog
 	resourceCatalogReason   string
+	resourceCatalogClosed   bool
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
@@ -210,6 +211,9 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 		return
 	}
 	h.mu.Lock()
+	if host != nil {
+		host.SetSourceIdentityBinder(h.SourceIdentityBinder())
+	}
 	if h.pluginHost != host {
 		h.pluginHost = host
 	}

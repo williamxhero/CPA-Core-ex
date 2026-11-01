@@ -222,7 +222,7 @@ type inventoryHarness struct {
 	manager            *coreauth.Manager
 }
 
-func newInventoryHarness(t *testing.T, dir string) *inventoryHarness {
+func newInventoryHarness(t *testing.T, dir string, parsers ...sdkAuth.PluginAuthParser) *inventoryHarness {
 	t.Helper()
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -259,6 +259,9 @@ func newInventoryHarness(t *testing.T, dir string) *inventoryHarness {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(parsers) > 0 {
+		w.SetPluginAuthParser(parsers[0])
 	}
 	w.SetConfig(cfg)
 	for _, auth := range w.SnapshotCoreAuths() {

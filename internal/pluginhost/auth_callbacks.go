@@ -372,12 +372,25 @@ func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (stri
 			dst = abs
 		}
 	}
+	h.mu.Lock()
+	binder := h.identityBinder
+	h.mu.Unlock()
+	writer, owned := binder.(coreauth.SourceIdentityWriter)
+	if owned {
+		var errSave error
+		data, errSave = writer.SaveAuthFile(dst, data)
+		if errSave != nil {
+			return "", fmt.Errorf("auth source publication failed: %w", errSave)
+		}
+	}
 	auths, errBuild := h.buildAuthsFromFileData(ctx, dst, data)
 	if errBuild != nil {
 		return "", errBuild
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
-		return "", fmt.Errorf("failed to write auth file: %w", errWrite)
+	if !owned {
+		if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+			return "", fmt.Errorf("failed to write auth file: %w", errWrite)
+		}
 	}
 	if errUpsert := h.upsertAuthRecordsForPath(ctx, dst, auths); errUpsert != nil {
 		return "", errUpsert
@@ -385,7 +398,15 @@ func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (stri
 	return dst, nil
 }
 
-func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []byte) ([]*coreauth.Auth, error) {
+func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []byte) (result []*coreauth.Auth, err error) {
+	defer func() {
+		if err == nil {
+			if errBind := h.BindAuths(path, data, result); errBind != nil {
+				result = nil
+				err = errBind
+			}
+		}
+	}()
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("auth path is empty")
 	}

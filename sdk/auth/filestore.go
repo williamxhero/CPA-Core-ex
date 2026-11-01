@@ -53,9 +53,10 @@ func currentPluginAuthParser() PluginAuthParser {
 
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
 type FileTokenStore struct {
-	mu      sync.Mutex
-	dirLock sync.RWMutex
-	baseDir string
+	mu             sync.Mutex
+	dirLock        sync.RWMutex
+	baseDir        string
+	identityBinder cliproxyauth.SourceIdentityBinder
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
@@ -68,6 +69,13 @@ func NewFileTokenStore() *FileTokenStore {
 func (s *FileTokenStore) SetBaseDir(dir string) {
 	s.dirLock.Lock()
 	s.baseDir = strings.TrimSpace(dir)
+	s.dirLock.Unlock()
+}
+
+// SetSourceIdentityBinder installs an instance-owned catalog validator.
+func (s *FileTokenStore) SetSourceIdentityBinder(b cliproxyauth.SourceIdentityBinder) {
+	s.dirLock.Lock()
+	s.identityBinder = b
 	s.dirLock.Unlock()
 }
 
@@ -180,6 +188,21 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		auth.FileName = auth.ID
 	}
 
+	if auth.SourcePluginID != "" && auth.Storage != nil {
+		s.dirLock.RLock()
+		binder := s.identityBinder
+		s.dirLock.RUnlock()
+		if binder != nil {
+			raw, errRead := os.ReadFile(path)
+			if errRead != nil {
+				return "", errRead
+			}
+			if errBind := binder.BindAuths(path, raw, []*cliproxyauth.Auth{auth}); errBind != nil {
+				return "", errBind
+			}
+		}
+	}
+
 	return path, nil
 }
 
@@ -242,8 +265,25 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(dir, id), nil
 }
 
-func (s *FileTokenStore) readAuthFiles(path, baseDir string) ([]*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) readAuthFiles(path, baseDir string) (out []*cliproxyauth.Auth, err error) {
+	s.dirLock.RLock()
+	binder := s.identityBinder
+	s.dirLock.RUnlock()
+	var original []byte
+	if binder != nil {
+		defer func() {
+			if err == nil {
+
+				if errBind := binder.BindAuths(path, original, out); errBind != nil {
+					out = nil
+					err = errBind
+				}
+			}
+		}()
+	}
+
 	data, err := os.ReadFile(path)
+	original = data
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
 	}

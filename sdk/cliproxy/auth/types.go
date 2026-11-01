@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	baseauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -51,6 +52,8 @@ func GetRequestInfo(ctx context.Context) *RequestInfo {
 
 // Auth encapsulates the runtime state and metadata associated with a single credential.
 type Auth struct {
+	SourcePluginID   string            `json:"-"`
+	ResourceIdentity *resource.Binding `json:"-"`
 	// ID uniquely identifies the auth record across restarts.
 	ID string `json:"id"`
 	// RegistrationEpoch tracks monotonic registration cycles across unregister/re-register.
@@ -475,6 +478,11 @@ func (a *Auth) Clone() *Auth {
 		return nil
 	}
 	copyAuth := *a
+	if a.ResourceIdentity != nil {
+		b := *a.ResourceIdentity
+		b.Targets = append([]resource.Target(nil), b.Targets...)
+		copyAuth.ResourceIdentity = &b
+	}
 	copyAuth.Quota = a.Quota.Clone()
 	if a.LastError != nil {
 		copyErr := *a.LastError

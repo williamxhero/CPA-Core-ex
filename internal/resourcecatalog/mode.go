@@ -57,7 +57,7 @@ func verifySourceMode(configPath, authDir, stateDir string) error {
 		return err
 	}
 	settings := field(f.root, "resource-catalog")
-	if scalar(settings, "enabled") != "true" || scalar(field(f.root, "plugins"), "enabled") == "true" {
+	if scalar(settings, "enabled") != "true" {
 		return ErrUnavailable
 	}
 	expectedState, err := physicalPath(statePath(configPath, scalar(settings, "state-dir")))

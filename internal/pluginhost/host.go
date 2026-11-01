@@ -73,6 +73,7 @@ type Host struct {
 	activePluginPaths        map[string]string
 	cleanupFilesPending      bool
 	runtimeConfig            *config.Config
+	identityBinder           coreauth.SourceIdentityBinder
 	authManager              *coreauth.Manager
 	modelExecutor            modelExecutor
 	modelClientIDs           map[string]struct{} // Reserved for future use; catalog-only plugins do not populate it.

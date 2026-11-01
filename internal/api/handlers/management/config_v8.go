@@ -193,7 +193,7 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		return
 	}
 	// Catalog provenance belongs to the native v8 entry, never shared v0 saves.
-	if len(parts) == 0 || parts[0] == "api-keys" {
+	if len(parts) == 0 || parts[0] == "api-keys" || parts[0] == "plugins" {
 		if err = config.ValidateResourceManagementUpdate(sourceData, data, h.cfg); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "resource_source_changed", "message": err.Error()})
 			return
