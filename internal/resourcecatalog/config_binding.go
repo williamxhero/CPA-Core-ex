@@ -18,17 +18,9 @@ func (c *Catalog) BindConfiguredAuths(auths []*coreauth.Auth) error {
 	if !c.currentLocked() {
 		return ErrUnavailable
 	}
-	source, err := readSource(c.configPath, false)
+	projected, err := c.configuredAuthsLocked()
 	if err != nil {
 		return err
-	}
-	cfg, err := config.ParseConfigBytes(source.original)
-	if err != nil {
-		return ErrUnavailable
-	}
-	projected, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, IDGenerator: synthesizer.NewStableIDGenerator()})
-	if err != nil {
-		return ErrUnavailable
 	}
 	proof := func(a *coreauth.Auth) string {
 		credentials := map[string]string{"api_key": a.Attributes["api_key"], "base_url": a.Attributes["base_url"]}
@@ -65,4 +57,33 @@ func (c *Catalog) BindConfiguredAuths(auths []*coreauth.Auth) error {
 		}
 	}
 	return nil
+}
+
+// Repeated final-send admission must not reparse and bcrypt-hash the same
+// management password. The sealed current source/version is checked BEFORE
+// consulting this immutable invocation-independent synthesis projection.
+type configuredSourceProjection struct {
+	version resource.Version
+	auths   []*coreauth.Auth
+}
+
+func (c *Catalog) configuredAuthsLocked() ([]*coreauth.Auth, error) {
+	version := c.versionLocked()
+	if p := c.configuredProjection; p != nil && p.version == version {
+		return p.auths, nil
+	}
+	source, err := readSource(c.configPath, false)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.ParseConfigBytes(source.original)
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{Config: cfg, IDGenerator: synthesizer.NewStableIDGenerator()})
+	if err != nil {
+		return nil, ErrUnavailable
+	}
+	c.configuredProjection = &configuredSourceProjection{version: version, auths: auths}
+	return auths, nil
 }
