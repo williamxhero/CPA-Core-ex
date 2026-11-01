@@ -176,6 +176,12 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	if client == nil {
 		client = &http.Client{}
 	}
+	if errGate := cliproxyexecutor.AdmitInference(ctx); errGate != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, cfg, nil, errGate
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {

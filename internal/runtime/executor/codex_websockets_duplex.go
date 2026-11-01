@@ -376,6 +376,9 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				return false
 			}
 			payload = frameCodexWebsocketRequestBody(prepared.clientBody)
+			if errGate := cliproxyexecutor.AdmitInference(streamCtx); errGate != nil {
+				return reject("inference admission unavailable or restricted")
+			}
 			metadataMu.Lock()
 			if len(pending) >= 16 {
 				metadataMu.Unlock()
@@ -497,6 +500,12 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 						metadataMu.Lock()
 						settings = responseSettings[parent]
 						metadataMu.Unlock()
+					}
+					if errGate := cliproxyexecutor.AdmitInference(streamCtx); errGate != nil {
+						if !reject("inference admission unavailable or restricted") {
+							return
+						}
+						continue
 					}
 					metadataMu.Lock()
 					unacknowledgedSteers = append(unacknowledgedSteers, codexSteerSubmission{parent: parent, eventID: gjson.GetBytes(payload, "event_id").String()})

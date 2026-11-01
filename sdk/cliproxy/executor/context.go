@@ -10,7 +10,8 @@ type requireUpstreamWebsocketContextKey struct{}
 type upstreamAttemptTrackerContextKey struct{}
 
 type upstreamAttemptTracker struct {
-	attempted atomic.Bool
+	attempted       atomic.Bool
+	admissionDenied atomic.Bool
 }
 
 // WithDownstreamWebsocket marks the current request as coming from a downstream websocket connection.

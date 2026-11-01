@@ -1729,6 +1729,8 @@ type QuotaDescribeResponse struct {
 	// ScopedHTTP guarantees quota HTTP callbacks echo the invocation host_callback_id.
 	// Hosts must refuse anonymous legacy callbacks for bounded quota operations.
 	ScopedHTTP bool `json:"scoped_http,omitempty"`
+	// ScopedInferenceHTTP guarantees each executor HTTP callback retains host admission context.
+	ScopedInferenceHTTP bool `json:"inference_scoped_http,omitempty"`
 	// DefaultQuotaBaseURL is the plugin's native default, not a selected credential
 	// or configured URL. It lets the host validate omitted-base selected requests.
 	DefaultQuotaBaseURL string `json:"default_quota_base_url,omitempty"`

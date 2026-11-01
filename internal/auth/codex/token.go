@@ -228,6 +228,9 @@ func MergeCodexCredentialsFromDisk(diskMap, incomingMetadata map[string]any) map
 // It maintains compatibility with the existing auth system while adding Codex-specific fields
 // for managing access tokens, refresh tokens, and user account information.
 type CodexTokenStorage struct {
+	// OwnedWrite wraps a local file replacement after the native file lock is held.
+	OwnedWrite func(string, map[string]any) error `json:"-"`
+
 	// IDToken is the JWT ID token containing user claims and identity information.
 	IDToken string `json:"id_token"`
 	// AccessToken is the OAuth2 access token used for authenticating API requests.
@@ -289,7 +292,7 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 				return fmt.Errorf("invalid existing credential JSON")
 			}
 			if ts.RefreshPatch != nil {
-				return WriteJSONFileAtomic(authFilePath, ts.RefreshPatch.Apply(diskMap))
+				return ts.writeOwnedFile(authFilePath, ts.RefreshPatch.Apply(diskMap))
 			}
 			merged := MergeWithDiskMap(diskMap, data)
 			if ts.ReplaceCredentials {
@@ -302,6 +305,13 @@ func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
 			data = merged
 		}
 
-		return WriteJSONFileAtomic(authFilePath, data)
+		return ts.writeOwnedFile(authFilePath, data)
 	})
+}
+
+func (ts *CodexTokenStorage) writeOwnedFile(path string, data map[string]any) error {
+	if ts.OwnedWrite != nil {
+		return ts.OwnedWrite(path, data)
+	}
+	return WriteJSONFileAtomic(path, data)
 }

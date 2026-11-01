@@ -179,6 +179,8 @@ type Manager struct {
 	selector                  Selector
 	hook                      Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
+	inferenceAdmission        atomic.Pointer[inferenceAdmissionHolder]
+	ownedAuthSave             atomic.Pointer[ownedAuthSaveHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex
 	configCooldownMu          sync.Mutex

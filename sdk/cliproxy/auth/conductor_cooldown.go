@@ -887,6 +887,9 @@ func isStaleExecutionResult(result Result, current *Auth) bool {
 
 // MarkResult records an execution result and notifies hooks.
 func (m *Manager) MarkResult(ctx context.Context, result Result) {
+	if result.Error != nil && result.Error.Code == "inference_gate_denied" {
+		return
+	}
 	if result.AuthID == "" {
 		return
 	}
@@ -1971,6 +1974,9 @@ func resultErrorFromError(err error) *Error {
 		resultErr.HTTPStatus = statusCodeFromError(err)
 	}
 	switch {
+	case cliproxyexecutor.IsInferenceAdmissionError(err):
+		resultErr.Code = "inference_gate_denied"
+		resultErr.Message = "inference admission unavailable or restricted"
 	case isStreamTruncatedError(err):
 		// Preserve the local truncation classification alongside the public
 		// 502 status so MarkResult can skip credential cooldown.

@@ -80,7 +80,7 @@ func (s *FileTokenStore) SetSourceIdentityBinder(b cliproxyauth.SourceIdentityBi
 }
 
 // Save persists token storage and metadata to the resolved auth file path.
-func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, saveErr error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
@@ -117,6 +117,26 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if auth.SourcePluginID == "" && auth.ResourceIdentity != nil {
+		s.dirLock.RLock()
+		binder := s.identityBinder
+		s.dirLock.RUnlock()
+		if owned, ok := binder.(cliproxyauth.SourceIdentityOwnedSave); ok {
+			ctx = cliproxyauth.WithSourceIdentityOwnedSave(ctx, owned)
+			if !cliproxyauth.IsCodexAuthRecord(auth) {
+				finish, errBegin := owned.BeginOwnedAuthSave(path, auth)
+				if errBegin != nil {
+					return "", errBegin
+				}
+				defer func() {
+					if errFinish := finish(auth, cliproxyauth.NativeRefreshBinding(ctx), saveErr == nil); errFinish != nil {
+						saveErr = errFinish
+					}
+				}()
+			}
+		}
+	}
 
 	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)

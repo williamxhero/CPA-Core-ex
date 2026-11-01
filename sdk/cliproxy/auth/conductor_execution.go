@@ -72,6 +72,9 @@ func markUpstreamExecutionAttempt(err error) error {
 }
 
 func markUpstreamExecutionAttemptFromContext(ctx context.Context, err error) error {
+	if err != nil && cliproxyexecutor.InferenceAdmissionDenied(ctx) {
+		return &cliproxyexecutor.InferenceAdmissionError{}
+	}
 	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) {
 		return err
 	}
@@ -625,7 +628,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
-			resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.executeGateAttempt(execCtx, executor, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -643,7 +646,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.executeGateAttempt(execCtx, executor, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -843,7 +846,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
-			resp, errExec := executor.CountTokens(execCtx, auth, execReq, execOpts)
+			resp, errExec := m.countGateAttempt(execCtx, executor, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
 			if errExec != nil {
@@ -861,7 +864,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = executor.CountTokens(execCtx, auth, execReq, execOpts)
+					resp, errExec = m.countGateAttempt(execCtx, executor, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -2298,12 +2301,12 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	credVersion := auth.CredentialVersion
 	regEpoch := auth.RegistrationEpoch
 
-	streamRes, errStream := executor.ExecuteStream(execCtx, auth, req, opts)
+	streamRes, errStream := m.streamGateAttempt(execCtx, executor, auth, req, opts)
 	if errStream != nil {
 		rerr := resultErrorFromError(errStream)
 		if rerr != nil && rerr.HTTPStatus == http.StatusNotImplemented {
 			opts.Stream = false
-			resp, errExec := executor.Execute(execCtx, auth, req, opts)
+			resp, errExec := m.executeGateAttempt(execCtx, executor, auth, req, opts)
 			rerrExec := resultErrorFromError(errExec)
 			if rerrExec != nil {
 				rerrExec.Message = sanitizeRenewalMessage(rerrExec.Message)

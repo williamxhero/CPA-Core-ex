@@ -17,6 +17,18 @@ import (
 )
 
 func (h *Handler) initializeResourceCatalog() {
+	if h.authManager != nil && h.cfg != nil && (h.cfg.ResourceCatalog.Enabled || resourcecatalog.GateFloorRequired(h.configFilePath, h.cfg.ResourceCatalog.StateDir)) {
+		h.authManager.SetInferenceAdmission(func(ctx context.Context, a *coreauth.Auth, model string) error {
+			if h.resourceCatalog == nil || a == nil {
+				return resourcecatalog.ErrUnavailable
+			}
+			current := h.currentRuntimeSource(a)
+			if current == nil {
+				return h.resourceCatalog.AdmitInference(nil, model)
+			}
+			return h.resourceCatalog.AdmitInference(current.ResourceIdentity, model)
+		})
+	}
 	h.resourceCatalogReason = h.resourceModeReason()
 	if h.resourceCatalogReason != "" {
 		return
@@ -30,6 +42,7 @@ func (h *Handler) initializeResourceCatalog() {
 		return
 	}
 	h.resourceCatalog = catalog
+	h.authManager.SetSourceIdentityOwnedSave(catalog)
 	if store, ok := h.authManager.Storage().(*sdkAuth.FileTokenStore); ok {
 		store.SetSourceIdentityBinder(catalog)
 	}
@@ -167,7 +180,8 @@ func (h *Handler) ResourceBindings(c *gin.Context) {
 	}
 	bindings := []gin.H{}
 	for _, a := range h.authManager.List() {
-		if h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
+		a = h.currentRuntimeSource(a)
+		if a != nil && h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
 			bindings = append(bindings, gin.H{"scope": a.ResourceIdentity.Scope, "targets": a.ResourceIdentity.Targets, "auth_index": a.Index, "runtime_alias": a.ResourceIdentity.Targets[0].ResourceID})
 		}
 	}
@@ -210,4 +224,33 @@ func (h *Handler) bindRuntimeIdentities() {
 		}
 		_, _ = h.authManager.Update(coreauth.WithSkipPersist(context.Background()), a)
 	}
+}
+
+// currentRuntimeSource revalidates a clone against the published source snapshot.
+// It performs no source writes or enrollment and cannot adopt changed credentials.
+// Metadata-only source publication must not leave unrelated runtime bindings at
+// an obsolete global snapshot revision until an asynchronous watcher catches up.
+func (h *Handler) currentRuntimeSource(a *coreauth.Auth) *coreauth.Auth {
+	if a == nil || h.resourceCatalog == nil {
+		return nil
+	}
+	a = a.Clone()
+	path := a.Attributes[coreauth.AttributePath]
+	if path == "" {
+		if err := h.resourceCatalog.BindConfiguredAuths([]*coreauth.Auth{a}); err != nil {
+			return nil
+		}
+	} else {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if err = h.resourceCatalog.BindAuths(path, raw, []*coreauth.Auth{a}); err != nil {
+			return nil
+		}
+	}
+	if !h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
+		return nil
+	}
+	return a
 }

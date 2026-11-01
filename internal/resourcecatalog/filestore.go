@@ -24,6 +24,8 @@ type diskRecord struct {
 	Family         string          `json:"family"`
 }
 type diskState struct {
+	Gates               *gateLedger            `json:"gates,omitempty"`
+	GateSeal            string                 `json:"gate_seal,omitempty"`
 	Format              int                    `json:"format"`
 	InstanceID          string                 `json:"instance_id"`
 	InstanceIncarnation string                 `json:"instance_incarnation"`

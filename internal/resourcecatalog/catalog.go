@@ -23,6 +23,8 @@ var (
 )
 
 type Catalog struct {
+	ownedFileReplacements map[string]string
+
 	mu                                  sync.Mutex
 	lock                                *os.File
 	closed, failed                      bool
@@ -99,6 +101,9 @@ func Open(configPath, authDir, stateDir string) (*Catalog, error) {
 		}
 	}
 	c.state = state
+	if err = c.initializeGates(); err != nil {
+		return nil, err
+	}
 	if err = c.reconcileLocked(); err != nil {
 		return nil, err
 	}
@@ -211,7 +216,7 @@ func (c *Catalog) reconcileLocked() error {
 			record = &diskRecord{Kind: r.row.Kind, Family: r.row.Family, Target: resource.Target{ResourceID: r.row.ResourceID, Incarnation: uuid.NewString(), IdentityVersion: 1, CredentialVersion: 1, ConfigVersion: 1}}
 			state.Records[r.row.ResourceID] = record
 		}
-		if (record.Deleted || (record.FileSeal != "" && record.FileSeal != fileSeal) || counts[r.row.ResourceID] > 1 || record.Kind != r.row.Kind || record.Family != r.row.Family) && !record.Blocked {
+		if (record.Deleted || (record.FileSeal != "" && record.FileSeal != fileSeal && c.ownedFileReplacements[r.row.ResourceID] != fileSeal) || counts[r.row.ResourceID] > 1 || record.Kind != r.row.Kind || record.Family != r.row.Family) && !record.Blocked {
 			record.Blocked = true
 			record.Target.Incarnation = uuid.NewString()
 			if !advance(&record.Target.IdentityVersion) {
