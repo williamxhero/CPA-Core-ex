@@ -41,6 +41,7 @@ const attemptMaxIdleTime = 2 * time.Hour
 type Handler struct {
 	resourceCatalog         *resourcecatalog.Catalog
 	resourceCatalogReason   string
+	resourceCatalogClosed   bool
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex

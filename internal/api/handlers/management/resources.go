@@ -49,8 +49,16 @@ func (h *Handler) initializeResourceCatalog() {
 
 // CloseResourceCatalog releases instance-local catalog resources at shutdown.
 func (h *Handler) CloseResourceCatalog() error {
-	if h.resourceCatalog == nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.resourceCatalog == nil || h.resourceCatalogClosed {
 		return nil
+	}
+	h.resourceCatalogClosed = true
+	if h.authManager != nil {
+		if store, ok := h.authManager.Storage().(*sdkAuth.FileTokenStore); ok {
+			store.SetSourceIdentityBinder(nil)
+		}
 	}
 	if h.pluginHost != nil {
 		h.pluginHost.SetSourceIdentityBinder(nil)

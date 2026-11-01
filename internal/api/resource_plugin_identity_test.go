@@ -713,3 +713,22 @@ func TestResourcePluginConfigurationProjectsToFiles(t *testing.T) {
 		t.Fatalf("plugin configuration was not projected to both configured and panel files: %d", changed)
 	}
 }
+
+func TestResourcePluginCatalogCloseDoesNotRemoveCredentials(t *testing.T) {
+	f, _ := pluginInventoryFixture(t)
+	f.close()
+	// Reusing a file store after catalog shutdown/opt-out must not retain a closed
+	// identity validator that silently suppresses otherwise valid credentials.
+	if err := f.manager.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		Files []json.RawMessage `json:"files"`
+	}
+	if err := json.Unmarshal(f.request("credentials", 200), &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Files) != 4 {
+		t.Fatalf("closed catalog removed file credentials on reload: %d", len(view.Files))
+	}
+}
