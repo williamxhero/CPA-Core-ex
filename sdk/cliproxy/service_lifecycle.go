@@ -98,9 +98,13 @@ func (s *Service) Run(ctx context.Context) error {
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
 		})
-		interval := 15 * time.Minute
-		s.coreManager.StartAutoRefresh(ctx, interval)
-		log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		// Catalog enrollment issues source markers. No pre-enrollment refresh
+		// snapshot may overwrite those markers while the listener comes up.
+		if cfg == nil || !cfg.ResourceCatalog.Enabled {
+			interval := 15 * time.Minute
+			s.coreManager.StartAutoRefresh(ctx, interval)
+			log.Infof("core auth auto-refresh started (interval=%s)", interval)
+		}
 	}
 
 	if !homeEnabled {
@@ -233,6 +237,11 @@ func (s *Service) Run(ctx context.Context) error {
 		s.configRuntimeMu.Unlock()
 	}
 
+	if !homeEnabled && s.coreManager != nil && cfg != nil && cfg.ResourceCatalog.Enabled {
+		interval := 15 * time.Minute
+		s.coreManager.StartAutoRefresh(ctx, interval)
+		log.Infof("core auth auto-refresh started after source enrollment (interval=%s)", interval)
+	}
 	s.registerModelRefreshCallback()
 	if !homeEnabled {
 		go s.runAntigravityModelRefresh(ctx)
