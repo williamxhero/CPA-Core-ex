@@ -100,6 +100,26 @@ func (c *Catalog) BindAuths(path string, data []byte, auths []*coreauth.Auth) er
 				return nil
 			}
 		}
+		if row.Family != "qwen" && row.Family != "opencode-go" {
+			// An unchanged path/provider is not proof that an old runtime auth
+			// contains the newly replaced native file credential.
+			candidate, errEncode := json.Marshal(a.Metadata)
+			if errEncode != nil {
+				return ErrUnavailable
+			}
+			var document yaml.Node
+			if yaml.Unmarshal(candidate, &document) != nil || len(document.Content) != 1 {
+				return ErrUnavailable
+			}
+			expectedSeal, _, errExpected := rowSeals(c.key, &sourceRow{file: f, node: f.root, marker: "resource_id", row: row})
+			actualSeal, _, errActual := rowSeals(c.key, &sourceRow{file: f, node: document.Content[0], marker: "resource_id", row: row})
+			if errExpected != nil || errActual != nil {
+				return ErrUnavailable
+			}
+			if expectedSeal != actualSeal {
+				return nil
+			}
+		}
 		if row.Family != family {
 			return nil
 		}

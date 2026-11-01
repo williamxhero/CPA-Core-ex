@@ -732,3 +732,39 @@ func TestResourcePluginCatalogCloseDoesNotRemoveCredentials(t *testing.T) {
 		t.Fatalf("closed catalog removed file credentials on reload: %d", len(view.Files))
 	}
 }
+
+func TestResourceNativeFileReplacementDoesNotRebindOldRuntime(t *testing.T) {
+	f, _ := pluginInventoryFixture(t)
+	var native resource.Row
+	for _, r := range f.snapshot().Resources {
+		if r.Family == "codex" && r.Kind == "credential" && r.ParentID == "" {
+			native = r
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(f.authDir, "native.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.ReplaceAll(string(raw), "token-secret-canary", "replacement-token-canary"))
+	if err = os.WriteFile(filepath.Join(f.authDir, "native.json"), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.handler.ReconcileResourceInventory(); err != nil {
+		t.Fatal(err)
+	}
+	current := rowByID(t, f.snapshot(), native.ResourceID)
+	if current.CredentialVersion != native.CredentialVersion+1 {
+		t.Fatal("native file replacement was not fenced")
+	}
+	var view struct{ Bindings []resource.Binding }
+	if err = json.Unmarshal(f.request("resource-bindings", 200), &view); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range view.Bindings {
+		for _, target := range b.Targets {
+			if target.ResourceID == native.ResourceID {
+				t.Fatal("new source credential authority attached to old runtime credential")
+			}
+		}
+	}
+}
