@@ -26,12 +26,15 @@ type sourceFile struct {
 }
 
 type sourceRow struct {
-	row    resource.Row
-	node   *yaml.Node
-	file   *sourceFile
-	marker string
-	fresh  bool
-	parent *sourceRow
+	row          resource.Row
+	node         *yaml.Node
+	file         *sourceFile
+	marker       string
+	plugin       bool
+	pluginConfig *yaml.Node
+	projections  []*sourceRow
+	fresh        bool
+	parent       *sourceRow
 }
 
 func field(n *yaml.Node, key string) *yaml.Node {
@@ -94,7 +97,7 @@ func manual(n *yaml.Node, parent *sourceRow, isJSON bool) (resource.ManualState,
 	return m, nil
 }
 func safeFamily(s string) string {
-	for _, f := range append(append([]string{}, families...), "antigravity", "gemini-cli", "qwen", "iflow", "kimi", "kiro", "devin") {
+	for _, f := range append(append([]string{}, families...), "antigravity", "gemini-cli", "qwen", "opencode-go", "iflow", "kimi", "kiro", "devin") {
 		if s == f {
 			return f
 		}
@@ -221,6 +224,44 @@ func sources(configPath, authDir string) ([]*sourceFile, []*sourceRow, error) {
 			}
 		}
 	}
+	if plugins := field(cfg.root, "plugins"); plugins != nil {
+		configs := field(plugins, "configs")
+		if configs != nil && configs.Kind != yaml.MappingNode {
+			return nil, nil, ErrUnavailable
+		}
+		if configs != nil {
+			for i := 0; i+1 < len(configs.Content); i += 2 {
+				id, node := configs.Content[i].Value, configs.Content[i+1]
+				family := knownPluginFamily(id)
+				parent, errPlugin := appendRow(cfg, node, "provider", family, "resource-id", nil)
+				if errPlugin != nil {
+					return nil, nil, errPlugin
+				}
+				// Plugin enablement is manual state, not absence from inventory.
+				parent.row.Manual.Disabled = scalar(plugins, "enabled") != "true" || scalar(node, "enabled") != "true"
+				if family == "unsupported" {
+					continue
+				}
+				parent.plugin = true
+				parent.pluginConfig = node
+				keys := field(node, "api-keys")
+				if keys == nil {
+					continue
+				}
+				if keys.Kind != yaml.SequenceNode {
+					return nil, nil, ErrUnavailable
+				}
+				for _, key := range keys.Content {
+					child, errKey := appendRow(cfg, key, "credential", family, "resource-id", parent)
+					if errKey != nil {
+						return nil, nil, errKey
+					}
+					child.plugin = true
+					child.pluginConfig = node
+				}
+			}
+		}
+	}
 	paths, err := authSourcePaths(authDir)
 	if err != nil {
 		return nil, nil, ErrUnavailable
@@ -231,8 +272,20 @@ func sources(configPath, authDir string) ([]*sourceFile, []*sourceRow, error) {
 			return nil, nil, errFile
 		}
 		files = append(files, f)
-		if _, errRow := appendRow(f, f.root, "credential", safeFamily(scalar(f.root, "type")), "resource_id", nil); errRow != nil {
+		_, errRow := appendRow(f, f.root, "credential", safeFamily(scalar(f.root, "type")), "resource_id", nil)
+		if errRow != nil {
 			return nil, nil, errRow
+		}
+	}
+	for _, r := range rows {
+		if !r.file.json || (r.row.Family != "qwen" && r.row.Family != "opencode-go") {
+			continue
+		}
+		r.plugin = true
+		for _, parent := range rows {
+			if parent.plugin && parent.row.Kind == "provider" && parent.row.Family == r.row.Family {
+				r.pluginConfig = parent.node
+			}
 		}
 	}
 	return files, rows, nil

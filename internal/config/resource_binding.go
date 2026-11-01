@@ -187,6 +187,13 @@ func resourceProjectionRequired(root, groups *yaml.Node) bool {
 // Deletions carry no remaining child reference. Pin the entire source document
 // so a stale view cannot delete entries that were never represented in that view.
 func resourceDocumentSourceRef(root *yaml.Node) (string, error) {
+	if configs := yamlPath(root, "plugins.configs"); configs != nil && resourceProjectionRequired(root, configs) {
+		data, err := yaml.Marshal(root)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+	}
 	for _, family := range v8KeyFamilies {
 		groups := yamlPath(root, "api-keys."+family.current)
 		if groups == nil || !resourceProjectionRequired(root, groups) {
@@ -661,6 +668,12 @@ func ValidateResourceManagementUpdate(original, updated []byte, cfg *Config) err
 		return err
 	}
 	var oldKeys, newKeys any
+	var oldPlugins, newPlugins any
+	if n := yamlPath(before.Content[0], "plugins.configs"); n != nil {
+		if err = n.Decode(&oldPlugins); err != nil {
+			return err
+		}
+	}
 	if n := yamlPath(before.Content[0], "api-keys"); n != nil {
 		if err = n.Decode(&oldKeys); err != nil {
 			return err
@@ -673,7 +686,14 @@ func ValidateResourceManagementUpdate(original, updated []byte, cfg *Config) err
 			}
 		}
 	}
-	if reflect.DeepEqual(oldKeys, newKeys) {
+	if len(proposed.Content) == 1 {
+		if n := yamlPath(proposed.Content[0], "plugins.configs"); n != nil {
+			if err = n.Decode(&newPlugins); err != nil {
+				return err
+			}
+		}
+	}
+	if reflect.DeepEqual(oldKeys, newKeys) && reflect.DeepEqual(oldPlugins, newPlugins) {
 		return nil
 	}
 	if cfg == nil || ref != cfg.ResourceCatalog.sourceDocument {
@@ -708,6 +728,22 @@ func ValidateResourceManagementUpdate(original, updated []byte, cfg *Config) err
 					for _, key := range keys.Content {
 						if child := mappingScalarValue(key, "resource-id"); child != "" {
 							result[scope{family.current, parent, "credential", child}]++
+						}
+					}
+				}
+			}
+		}
+		if plugins := yamlPath(doc.Content[0], "plugins.configs"); plugins != nil {
+			for i := 0; i+1 < len(plugins.Content); i += 2 {
+				plugin, node := plugins.Content[i].Value, plugins.Content[i+1]
+				id := mappingScalarValue(node, "resource-id")
+				if id != "" {
+					result[scope{"plugin/" + plugin, "", "provider", id}]++
+				}
+				if keys := yamlPath(node, "api-keys"); keys != nil {
+					for _, child := range keys.Content {
+						if marker := mappingScalarValue(child, "resource-id"); marker != "" {
+							result[scope{"plugin/" + plugin, id, "credential", marker}]++
 						}
 					}
 				}

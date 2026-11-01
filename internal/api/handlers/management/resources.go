@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resourcecatalog"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
@@ -28,22 +30,30 @@ func (h *Handler) initializeResourceCatalog() {
 		return
 	}
 	h.resourceCatalog = catalog
+	if store, ok := h.authManager.Storage().(*sdkAuth.FileTokenStore); ok {
+		store.SetSourceIdentityBinder(catalog)
+	}
 	// Opening an opted-in catalog can enroll markers in the source. Bind only
 	// that writer receipt after migration, without replacing runtime settings.
 	if data, errRead := os.ReadFile(h.configFilePath); errRead == nil {
 		if loaded, errParse := config.ParseConfigBytes(data); errParse == nil {
 			if _, errSnapshot := catalog.Snapshot(); errSnapshot == nil {
 				h.cfg.ResourceCatalog = loaded.ResourceCatalog
+				h.cfg.Plugins.Configs = loaded.Plugins.Configs
 			}
 		}
 	}
 	h.resourceCatalogReason = "available"
+	h.bindRuntimeIdentities()
 }
 
 // CloseResourceCatalog releases instance-local catalog resources at shutdown.
 func (h *Handler) CloseResourceCatalog() error {
 	if h.resourceCatalog == nil {
 		return nil
+	}
+	if h.pluginHost != nil {
+		h.pluginHost.SetSourceIdentityBinder(nil)
 	}
 	return h.resourceCatalog.Close()
 }
@@ -92,7 +102,11 @@ func (h *Handler) ReconcileResourceInventory() error {
 	if h.resourceCatalog == nil {
 		return nil
 	}
-	return h.resourceCatalog.Reconcile(h.resourceCatalog.Version())
+	if err := h.resourceCatalog.Reconcile(h.resourceCatalog.Version()); err != nil {
+		return err
+	}
+	h.bindRuntimeIdentities()
+	return nil
 }
 
 // resourceModeReason takes no upstream action and does not infer manual ownership.
@@ -102,7 +116,7 @@ func (h *Handler) resourceModeReason() string {
 	if h.cfg == nil || !h.cfg.ResourceCatalog.Enabled {
 		return "not_enabled"
 	}
-	if h.cfg.Home.Enabled || h.cfg.Plugins.Enabled {
+	if h.cfg.Home.Enabled {
 		return "unsupported_mode"
 	}
 	if h.authManager == nil {
@@ -129,4 +143,62 @@ func (h *Handler) resourceModeReason() string {
 		return "unsupported_storage"
 	}
 	return ""
+}
+
+// ResourceBindings exposes only current host-owned identity evidence, not auth IDs.
+func (h *Handler) ResourceBindings(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	if h.resourceCatalog == nil || h.resourceModeReason() != "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resource_inventory_unavailable"})
+		return
+	}
+	if _, err := h.resourceCatalog.Snapshot(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resource_inventory_unavailable"})
+		return
+	}
+	bindings := []gin.H{}
+	for _, a := range h.authManager.List() {
+		if h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
+			bindings = append(bindings, gin.H{"scope": a.ResourceIdentity.Scope, "targets": a.ResourceIdentity.Targets, "auth_index": a.Index, "runtime_alias": a.ResourceIdentity.Targets[0].ResourceID})
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"bindings": bindings})
+}
+
+// SourceIdentityBinder connects the instance catalog to host synthesis paths.
+func (h *Handler) SourceIdentityBinder() coreauth.SourceIdentityBinder {
+	if h.resourceCatalog == nil {
+		return nil
+	}
+	return h.resourceCatalog
+}
+
+// Source enrollment precedes identity publication, including pre-catalog boot
+// auths. This establishes identity only; it never changes manual/gate state.
+func (h *Handler) bindRuntimeIdentities() {
+	if h.resourceCatalog == nil || h.authManager == nil {
+		return
+	}
+	auths := h.authManager.List()
+	if err := h.resourceCatalog.BindConfiguredAuths(auths); err != nil {
+		return
+	}
+	for _, a := range auths {
+		if a.ResourceIdentity != nil && a.Attributes[coreauth.AttributePath] == "" {
+			_, _ = h.authManager.Update(coreauth.WithSkipPersist(context.Background()), a)
+			continue
+		}
+		path := a.Attributes[coreauth.AttributePath]
+		if path == "" {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if err = h.resourceCatalog.BindAuths(path, raw, []*coreauth.Auth{a}); err != nil {
+			continue
+		}
+		_, _ = h.authManager.Update(coreauth.WithSkipPersist(context.Background()), a)
+	}
 }

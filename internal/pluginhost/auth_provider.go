@@ -266,7 +266,11 @@ func (h *Host) callParseAuths(ctx context.Context, record capabilityRecord, req 
 		if parsed == nil {
 			return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
 		}
+		parsed.SourcePluginID = record.id
 		auths = append(auths, parsed)
+	}
+	if errBind := h.BindAuths(req.Path, req.RawJSON, auths); errBind != nil {
+		return nil, true, errBind
 	}
 	return auths, true, nil
 }
@@ -514,13 +518,36 @@ func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string
 	if h != nil {
 		authDir = h.hostConfigSummary().AuthDir
 	}
-	return pluginAuthDataToCoreAuth(data, path, fileName, authDir)
+	auth := pluginAuthDataToCoreAuth(data, path, fileName, authDir)
+	if h != nil && auth != nil {
+		if record := h.authProviderRecord(auth.Provider); record != nil {
+			auth.SourcePluginID = record.id
+		}
+	}
+	if h != nil && auth != nil {
+		h.mu.Lock()
+		binder := h.identityBinder
+		h.mu.Unlock()
+		if pts, ok := auth.Storage.(*pluginTokenStorage); ok {
+			if writer, okWriter := binder.(coreauth.SourceIdentityWriter); okWriter {
+				pts.identityWriter = writer
+			}
+		}
+		if binder != nil {
+			raw, _ := os.ReadFile(path)
+			if errBind := h.BindAuths(path, raw, []*coreauth.Auth{auth}); errBind != nil {
+				auth.ResourceIdentity = nil
+			}
+		}
+	}
+	return auth
 }
 
 type pluginTokenStorage struct {
-	provider string
-	rawJSON  []byte
-	meta     map[string]any
+	provider       string
+	rawJSON        []byte
+	meta           map[string]any
+	identityWriter coreauth.SourceIdentityWriter
 }
 
 func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
@@ -562,6 +589,18 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	}
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return fmt.Errorf("plugin token storage payload is empty")
+	}
+	if s.identityWriter != nil {
+		enrolled, errSave := s.identityWriter.SaveAuthFile(path, payload)
+		if errSave != nil {
+			return errSave
+		}
+		s.rawJSON = bytes.Clone(enrolled)
+		var metadata map[string]any
+		if json.Unmarshal(enrolled, &metadata) == nil {
+			s.meta = metadata
+		}
+		return nil
 	}
 	if pluginTokenStorageFileCurrent(path, payload) {
 		return nil

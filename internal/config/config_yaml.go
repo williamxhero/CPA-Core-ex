@@ -86,6 +86,25 @@ func saveConfigPreserveComments(configFile string, cfg *Config, managementJSON, 
 		return fmt.Errorf("expected generated root mapping node")
 	}
 
+	if !legacyManagement {
+		// Native keys are still projected later. Validate only plugin changes here.
+		var current yaml.Node
+		if errDecode := yaml.Unmarshal(data, &current); errDecode != nil {
+			return errDecode
+		}
+		if plugins := yamlPath(generated.Content[0], "plugins.configs"); plugins != nil {
+			setYAMLPath(current.Content[0], "plugins.configs", deepCopyNode(plugins))
+		} else {
+			deleteYAMLPath(current.Content[0], "plugins.configs")
+		}
+		proposed, errMarshal := yaml.Marshal(&current)
+		if errMarshal != nil {
+			return errMarshal
+		}
+		if errValidate := ValidateResourceManagementUpdate(data, proposed, cfg); errValidate != nil {
+			return errValidate
+		}
+	}
 	if managementJSON {
 		if err = restoreResourceManagementReferences(generated.Content[0], cfg.ResourceCatalog.sourceRows); err != nil {
 			return err

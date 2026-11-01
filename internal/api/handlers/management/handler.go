@@ -210,6 +210,9 @@ func (h *Handler) SetPluginHost(host *pluginhost.Host) {
 		return
 	}
 	h.mu.Lock()
+	if host != nil {
+		host.SetSourceIdentityBinder(h.SourceIdentityBinder())
+	}
 	if h.pluginHost != host {
 		h.pluginHost = host
 	}

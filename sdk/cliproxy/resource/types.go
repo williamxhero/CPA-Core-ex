@@ -35,14 +35,16 @@ type RowCapabilities struct {
 type Row struct {
 	Capabilities RowCapabilities `json:"capabilities"`
 	Target
-	Kind      string      `json:"kind"`
-	Family    string      `json:"family"`
-	ParentID  string      `json:"parent_id,omitempty"`
-	Members   []string    `json:"members,omitempty"`
-	Manual    ManualState `json:"manual"`
-	Identity  string      `json:"identity"`
-	Readiness string      `json:"catalog_readiness"`
-	Routing   string      `json:"runtime_readiness"`
+	Kind           string      `json:"kind"`
+	Family         string      `json:"family"`
+	SourceBindings []Target    `json:"source_bindings,omitempty"`
+	BindingState   string      `json:"binding_state,omitempty"`
+	ParentID       string      `json:"parent_id,omitempty"`
+	Members        []string    `json:"members,omitempty"`
+	Manual         ManualState `json:"manual"`
+	Identity       string      `json:"identity"`
+	Readiness      string      `json:"catalog_readiness"`
+	Routing        string      `json:"runtime_readiness"`
 }
 
 type Snapshot struct {
@@ -61,4 +63,10 @@ type Capabilities struct {
 	Query        bool     `json:"query"`
 	PolicyLocked bool     `json:"policy_locked"`
 	Reason       string   `json:"reason"`
+}
+
+// Binding is host-issued evidence for a runtime source, never inference admission.
+type Binding struct {
+	Scope   Version  `json:"scope"`
+	Targets []Target `json:"targets"`
 }

@@ -84,7 +84,19 @@ func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) ([]
 	return synthesizeFileAuths(ctx, fullPath, data)
 }
 
-func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
+func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) (out []*coreauth.Auth, err error) {
+	if ctx != nil {
+		if binder, ok := ctx.PluginAuthParser.(coreauth.SourceIdentityBinder); ok {
+			defer func() {
+				if err == nil {
+					if errBind := binder.BindAuths(fullPath, data, out); errBind != nil {
+						out = nil
+						err = errBind
+					}
+				}
+			}()
+		}
+	}
 	if ctx == nil || len(data) == 0 {
 		return nil, nil
 	}

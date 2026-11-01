@@ -148,6 +148,9 @@ func (c *Catalog) reconcileLocked() error {
 	if err != nil {
 		return err
 	}
+	if err = bindPluginProjections(rows, c.key); err != nil {
+		return err
+	}
 	// Work on an isolated proposal; failed persistence cannot publish new versions.
 	raw, err := json.Marshal(c.state)
 	if err != nil {
@@ -299,10 +302,46 @@ func (c *Catalog) reconcileLocked() error {
 			}
 		}
 	}
+
+	for i, source := range rows {
+		row := &snapshot.Resources[i]
+		for _, related := range source.projections {
+			for _, candidate := range snapshot.Resources {
+				if candidate.ResourceID == related.row.ResourceID {
+					if row.Identity == "valid" && candidate.Identity == "valid" && row.Readiness == "ready" && candidate.Readiness == "ready" {
+						row.SourceBindings = append(row.SourceBindings, candidate.Target)
+					} else {
+						row.BindingState = "ambiguous_projection"
+						row.Readiness = "not_ready"
+					}
+				}
+			}
+		}
+	}
+	// Projection validation can make a child unavailable after source identity
+	// validation; propagate that result to its provider before publication.
+	for i := range snapshot.Resources {
+		parent := &snapshot.Resources[i]
+		if parent.Kind != "provider" {
+			continue
+		}
+		for _, child := range snapshot.Resources {
+			if child.ParentID == parent.ResourceID && child.Readiness != "ready" {
+				parent.Readiness = "not_ready"
+			}
+		}
+	}
 	if !validState(&state) {
 		return ErrUnavailable
 	}
-	if state.SourceSeal != c.state.SourceSeal {
+	recordsChanged := sealValue(c.key, state.Records) != sealValue(c.key, c.state.Records)
+	if recordsChanged && state.SourceSeal == c.state.SourceSeal {
+		if !advance(&state.Revision) {
+			return ErrUnavailable
+		}
+		snapshot.Version.Revision = state.Revision
+	}
+	if state.SourceSeal != c.state.SourceSeal || recordsChanged {
 		if err = c.publish(&state, files, rows, values); err != nil {
 			return err
 		}
@@ -345,6 +384,7 @@ func (c *Catalog) Snapshot() (resource.Snapshot, error) {
 	result := c.snapshot
 	result.Resources = append([]resource.Row{}, c.snapshot.Resources...)
 	for i := range result.Resources {
+		result.Resources[i].SourceBindings = append([]resource.Target(nil), result.Resources[i].SourceBindings...)
 		result.Resources[i].Members = append([]string(nil), result.Resources[i].Members...)
 	}
 	return result, nil

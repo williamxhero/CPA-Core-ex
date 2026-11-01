@@ -118,13 +118,27 @@ func effectiveConfigCredentials(r *sourceRow) (map[string]any, error) {
 }
 
 func rowSeals(key []byte, r *sourceRow) (string, string, error) {
-	conf := nodeValue(r.node, map[string]bool{r.marker: true, "keys": true})
+	conf := nodeValue(r.node, map[string]bool{r.marker: true, "keys": true, "api-keys": true})
+	if r.plugin {
+		ids := []string{}
+		for _, related := range r.projections {
+			ids = append(ids, related.row.ResourceID)
+		}
+		conf["host-source-bindings"] = ids
+		conf["host-binding-state"] = r.row.BindingState
+	}
 	var parent any
 	if r.parent != nil {
-		parent = nodeValue(r.parent.node, map[string]bool{"resource-id": true, "keys": true})
+		parent = nodeValue(r.parent.node, map[string]bool{"resource-id": true, "keys": true, "api-keys": true})
 	}
 	var credentials map[string]any
-	if r.file.json {
+	if r.plugin {
+		var err error
+		credentials, err = pluginCredentials(r)
+		if err != nil {
+			return "", "", err
+		}
+	} else if r.file.json {
 		credentials = nodeValue(r.node, map[string]bool{r.marker: true, "name": true, "label": true, "disabled": true, "weight": true, "excluded_models": true, "excluded-models": true, "priority": true, "prefix": true})
 	} else {
 		var err error
