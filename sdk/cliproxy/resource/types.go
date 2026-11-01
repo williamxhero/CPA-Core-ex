@@ -55,14 +55,23 @@ type Snapshot struct {
 }
 
 type Capabilities struct {
-	Scope        *Version `json:"scope,omitempty"`
-	Version      int      `json:"version"`
-	Inventory    bool     `json:"inventory"`
-	Durable      bool     `json:"durable"`
-	Gate         bool     `json:"gate"`
-	Query        bool     `json:"query"`
-	PolicyLocked bool     `json:"policy_locked"`
-	Reason       string   `json:"reason"`
+	CredentialQuery *CredentialQueryCapability `json:"credential_query,omitempty"`
+	Scope           *Version                   `json:"scope,omitempty"`
+	Version         int                        `json:"version"`
+	Inventory       bool                       `json:"inventory"`
+	Durable         bool                       `json:"durable"`
+	Gate            bool                       `json:"gate"`
+	Query           bool                       `json:"query"`
+	PolicyLocked    bool                       `json:"policy_locked"`
+	Reason          string                     `json:"reason"`
+}
+
+// CredentialQueryCapability versions the scoped operation, not generic billing
+// or universal source coverage. Its presence conveys no admission/gate ACK.
+type CredentialQueryCapability struct {
+	Version     int  `json:"version"`
+	Sources     bool `json:"sources"`
+	ScopedQuery bool `json:"scoped_query"`
 }
 
 // Binding is host-issued evidence for a runtime source, never inference admission.

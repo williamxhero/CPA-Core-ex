@@ -21,6 +21,8 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/resource-capabilities", s.mgmt.ResourceCapabilities)
 	v8.GET("/resources", s.mgmt.Resources)
 	v8.GET("/resource-bindings", s.mgmt.ResourceBindings)
+	v8.GET("/credential-quota/sources", s.mgmt.CredentialQuotaSources)
+	v8.POST("/credential-quota/query", s.mgmt.QueryCredentialQuota)
 	v8.GET("/config", s.mgmt.ConfigV8)
 	v8.PUT("/config", s.mgmt.ConfigV8)
 	v8.PATCH("/config", s.mgmt.ConfigV8)

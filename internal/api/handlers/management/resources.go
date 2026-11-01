@@ -77,6 +77,7 @@ func (h *Handler) ResourceCapabilities(c *gin.Context) {
 		caps.Durable = err == nil
 		if err == nil {
 			scope := snapshot.Version
+			caps.CredentialQuery = &resource.CredentialQueryCapability{Version: 1, Sources: true, ScopedQuery: true}
 			caps.Scope = &scope
 		}
 		if err != nil {

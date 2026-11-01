@@ -1726,6 +1726,12 @@ type QuotaDescribeRequest struct {
 
 // QuotaDescribeResponse describes supported providers and capabilities of a quota provider.
 type QuotaDescribeResponse struct {
+	// ScopedHTTP guarantees quota HTTP callbacks echo the invocation host_callback_id.
+	// Hosts must refuse anonymous legacy callbacks for bounded quota operations.
+	ScopedHTTP bool `json:"scoped_http,omitempty"`
+	// DefaultQuotaBaseURL is the plugin's native default, not a selected credential
+	// or configured URL. It lets the host validate omitted-base selected requests.
+	DefaultQuotaBaseURL string `json:"default_quota_base_url,omitempty"`
 	// SupportedProviders lists provider keys supported by this quota provider.
 	SupportedProviders []string `json:"supported_providers,omitempty"`
 	// DisplayName is a user-facing label for this quota provider.
