@@ -390,9 +390,10 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Only request-shape failures are exposed: the client can act on them and no
-// credential rotation or retry can make the request succeed. Credential, quota
-// and transport failures stay silent so the client simply reconnects and retries;
+// Request-shape failures and terminal capacity rejections are exposed. Capacity
+// errors arrive here only after internal failover is exhausted or output has
+// committed; a silent disconnect must not suggest replaying an accepted tool call.
+// Credential, quota and transport failures stay silent so the client reconnects;
 // a fresh connection carries no server-side transcript, so reconnecting already
 // implies a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
@@ -402,7 +403,36 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
+	if isResponsesCapacityError(errMsg) {
+		return true
+	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
+}
+
+func isResponsesCapacityError(errMsg *interfaces.ErrorMessage) bool {
+	if errMsg == nil || errMsg.Error == nil {
+		return false
+	}
+	switch responsesWebsocketErrorStatus(errMsg) {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable:
+	default:
+		return false
+	}
+	body := errMsg.Error.Error()
+	code := strings.ToLower(gjson.Get(body, "error.code").String())
+	switch code {
+	case "server_is_overloaded", "model_at_capacity", "model_is_at_capacity", "turn_rate_limit_exceeded":
+		return true
+	case "":
+		if gjson.Get(body, "error.type").String() == "service_unavailable_error" {
+			return true
+		}
+		message := strings.ToLower(gjson.Get(body, "error.message").String())
+		return strings.Contains(message, "model is at capacity") ||
+			(gjson.Get(body, "error.type").String() == "rate_limit_error" && strings.Contains(message, "codex is at capacity"))
+	default:
+		return false
+	}
 }
 
 func writeResponsesWebsocketTerminalError(
