@@ -59,6 +59,11 @@ func (c *hostHTTPClient) proxyContext(ctx context.Context) context.Context {
 }
 
 func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
+	if ctx != nil {
+		if quota, ok := ctx.Value(quotaHTTPKey{}).(pluginapi.HostHTTPClient); ok {
+			return quota.Do(ctx, req)
+		}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -91,6 +96,11 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 }
 
 func (c *hostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
+	if ctx != nil {
+		if _, ok := ctx.Value(quotaHTTPKey{}).(pluginapi.HostHTTPClient); ok {
+			return pluginapi.HTTPStreamResponse{}, errors.New("quota streaming refused")
+		}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
