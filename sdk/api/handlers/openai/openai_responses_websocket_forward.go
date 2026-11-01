@@ -421,8 +421,17 @@ func isResponsesCapacityError(errMsg *interfaces.ErrorMessage) bool {
 	body := errMsg.Error.Error()
 	code := strings.ToLower(gjson.Get(body, "error.code").String())
 	switch code {
-	case "server_is_overloaded", "model_at_capacity", "model_is_at_capacity", "turn_rate_limit_exceeded":
+	case "server_is_overloaded", "model_at_capacity", "model_is_at_capacity":
 		return true
+	case "turn_rate_limit_exceeded":
+		// Core treats this code as retryable admission pressure even without a
+		// message. Terminal exposure is narrower: ordinary turn limits keep the
+		// silent quota behavior unless the provider explicitly says capacity.
+		// As in Core's status classifiers, an explicit usage quota takes precedence.
+		if strings.EqualFold(strings.TrimSpace(gjson.Get(body, "error.type").String()), "usage_limit_reached") {
+			return false
+		}
+		return strings.Contains(strings.ToLower(gjson.Get(body, "error.message").String()), "at capacity")
 	case "":
 		if gjson.Get(body, "error.type").String() == "service_unavailable_error" {
 			return true

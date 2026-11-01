@@ -523,3 +523,53 @@ func TestCapacityRoutingWebsocketStatusFailureAfterOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestCapacityRoutingPlainTurnLimitKeepsQuotaTerminalSilent(t *testing.T) {
+	f := newCapacityRouteFixture(t, "ws", 1, func(string) (int, []string) {
+		return 200, []string{`{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"Too many requests. Turn limit exceeded; wait before sending another request."}}`}
+	})
+	status, body := f.request("ws", true)
+	if status != websocket.CloseAbnormalClosure || body != "" {
+		t.Fatalf("ordinary turn limit must keep the existing silent quota terminal, got status=%d body=%s", status, body)
+	}
+	f.assertAttempts("a")
+}
+
+func TestCapacityRoutingTurnLimitWithoutMessageKeepsQuotaTerminalSilent(t *testing.T) {
+	f := newCapacityRouteFixture(t, "ws", 1, func(string) (int, []string) {
+		return 200, []string{`{"type":"error","status":429,"error":{"code":"turn_rate_limit_exceeded"}}`}
+	})
+	status, body := f.request("ws", true)
+	if status != websocket.CloseAbnormalClosure || body != "" {
+		t.Fatalf("code-only turn limit must not imply capacity exposure, got status=%d body=%s", status, body)
+	}
+	f.assertAttempts("a")
+}
+
+func TestCapacityRoutingExplicitTerminalCapacitySignals(t *testing.T) {
+	for _, tc := range []struct{ name, event, marker string }{
+		{"turn_capacity_message", `{"type":"error","status":429,"error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"Codex is at capacity, please try again later"}}`, "Codex is at capacity"},
+		{"unavailable_type", `{"type":"error","error":{"type":"service_unavailable_error","message":"busy"}}`, "service_unavailable_error"},
+		{"overloaded_code", `{"type":"error","error":{"code":"server_is_overloaded","message":"busy"}}`, "server_is_overloaded"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCapacityRouteFixture(t, "ws", 1, func(string) (int, []string) { return 200, []string{tc.event} })
+			_, body := f.request("ws")
+			if !strings.Contains(body, tc.marker) {
+				t.Fatalf("explicit capacity terminal lost: %s", body)
+			}
+			f.assertAttempts("a")
+		})
+	}
+}
+
+func TestCapacityRoutingUsageQuotaWithTurnCodeKeepsSilent(t *testing.T) {
+	f := newCapacityRouteFixture(t, "ws", 1, func(string) (int, []string) {
+		return 200, []string{`{"type":"error","status":429,"error":{"type":"usage_limit_reached","code":"turn_rate_limit_exceeded","message":"Codex is at capacity; your usage quota is exhausted","resets_in_seconds":3600}}`}
+	})
+	status, body := f.request("ws", true)
+	if status != websocket.CloseAbnormalClosure || body != "" {
+		t.Fatalf("explicit usage quota must take precedence over capacity wording, got status=%d body=%s", status, body)
+	}
+	f.assertAttempts("a")
+}
