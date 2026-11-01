@@ -1019,11 +1019,35 @@ func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsRepla
 	f := newInventoryHarness(t, dir)
 	installGateFixtureExecutors(f)
 	previous := quotaSourceFor(t, f, "codex-oauth-wham")
+	if len(previous.Targets) != 1 {
+		t.Fatal("expected one issued native subject")
+	}
+	resourceID := previous.Targets[0].ResourceID
+	selectedSource := func() resource.QuotaSource {
+		t.Helper()
+		var view struct {
+			Sources []resource.QuotaSource `json:"sources"`
+		}
+		if err := json.Unmarshal(f.request("credential-quota/sources", 200), &view); err != nil {
+			t.Fatal(err)
+		}
+		selected, ok := inferenceGateSourceByIssuedResource(view.Sources, "codex-oauth-wham", resourceID)
+		if !ok {
+			t.Fatal("original issued native subject unavailable or ambiguous")
+		}
+		return selected
+	}
 	var id string
 	for _, a := range f.manager.List() {
 		if a.Index == previous.AuthIndex {
+			if filepath.Clean(a.Attributes[coreauth.AttributePath]) != filepath.Join(authDir, "oauth.json") {
+				t.Fatal("initial source is not the enrolled OAuth fixture")
+			}
 			id = a.ID
 		}
+	}
+	if id == "" {
+		t.Fatal("missing selected native auth")
 	}
 	query := func(prev resource.Binding, current resource.QuotaSource, want int) map[string]any {
 		t.Helper()
@@ -1051,7 +1075,7 @@ func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsRepla
 	if err := f.handler.ReconcileResourceInventory(); err != nil {
 		t.Fatal(err)
 	}
-	interim := quotaSourceFor(t, f, "codex-oauth-wham")
+	interim := selectedSource()
 	if interim.Scope == previous.Scope || !reflect.DeepEqual(interim.Targets, previous.Targets) {
 		t.Fatal("unrelated publication did not preserve target tuple while advancing scope")
 	}
@@ -1060,12 +1084,15 @@ func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsRepla
 			t.Fatal(err)
 		}
 	}
-	current := quotaSourceFor(t, f, "codex-oauth-wham")
+	current := selectedSource()
 	if reflect.DeepEqual(previous.Targets, current.Targets) {
 		t.Fatal("fixture did not rotate issued target versions")
 	}
 	if out := query(previous.Binding, current, 200); out["proven"] != true || out["kind"] != "native_oauth_refresh" {
 		t.Fatal("healthy no-pause rotations have no certified intent continuation")
+	}
+	if rotations.Load() != 2 {
+		t.Fatal("controlled native grants were not both executed")
 	}
 	var state resource.GateState
 	json.Unmarshal(f.request("inference-gates", 200), &state)
@@ -1075,7 +1102,45 @@ func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsRepla
 	f.close()
 	f = newInventoryHarness(t, dir)
 	installGateFixtureExecutors(f)
-	current = quotaSourceFor(t, f, "codex-oauth-wham")
+	current = selectedSource()
+	// The unrelated OAuth record must remain present. Use both real source
+	// permutations to prove subject selection is independent of map/list order.
+	var restartSources struct {
+		Sources []resource.QuotaSource `json:"sources"`
+	}
+	if err := json.Unmarshal(f.request("credential-quota/sources", 200), &restartSources); err != nil {
+		t.Fatal(err)
+	}
+	var unrelated resource.QuotaSource
+	count := 0
+	for _, candidate := range restartSources.Sources {
+		if candidate.Protocol != "codex-oauth-wham" {
+			continue
+		}
+		count++
+		if len(candidate.Targets) == 1 && candidate.Targets[0].ResourceID != resourceID {
+			unrelated = candidate
+		}
+	}
+	if count != 2 || unrelated.AuthIndex == "" {
+		t.Fatal("unrelated OAuth record was not loaded alongside selected subject")
+	}
+	for _, order := range [][]resource.QuotaSource{{current, unrelated}, {unrelated, current}} {
+		selected, ok := inferenceGateSourceByIssuedResource(order, "codex-oauth-wham", resourceID)
+		if !ok || !reflect.DeepEqual(selected, current) {
+			t.Fatal("issued-subject lookup depends on source list order")
+		}
+		if out := query(previous.Binding, selected, 200); out["proven"] != true {
+			t.Fatal("ordered source lookup lost exact selected refresh chain")
+		}
+	}
+	if _, ok := inferenceGateSourceByIssuedResource([]resource.QuotaSource{current, current}, "codex-oauth-wham", resourceID); ok {
+		t.Fatal("duplicate source subject accepted")
+	}
+	if out := query(previous.Binding, unrelated, 200); out["proven"] != false {
+		t.Fatal("selected refresh chain incorrectly certifies unrelated OAuth record")
+	}
+	t.Logf("RESTART_SELECTED_RESOURCE resource=%s unrelated_resource=%s both_orders_verified=true", resourceID, unrelated.Targets[0].ResourceID)
 	if out := query(previous.Binding, current, 200); out["proven"] != true {
 		t.Fatal("restart lost durable exact refresh chain")
 	}
@@ -1093,11 +1158,26 @@ func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsRepla
 	if _, err := f.manager.Update(coreauth.WithSkipPersist(context.Background()), a); err != nil {
 		t.Fatal(err)
 	}
-	replaced := quotaSourceFor(t, f, "codex-oauth-wham")
+	replaced := selectedSource()
 	if out := query(previous.Binding, replaced, 200); out["proven"] != false || out["kind"] != "" {
 		t.Fatal("account replacement borrowed native refresh continuity")
 	}
 	query(previous.Binding, current, 409)
+}
+
+// inferenceGateSourceByIssuedResource is test-only selection of one exact native
+// subject from genuine public API sources. Protocol labels and list order alone
+// cannot identify a selected credential after another OAuth source is loaded.
+func inferenceGateSourceByIssuedResource(sources []resource.QuotaSource, protocol, resourceID string) (resource.QuotaSource, bool) {
+	var selected resource.QuotaSource
+	count := 0
+	for _, source := range sources {
+		if source.Protocol == protocol && source.AuthIndex != "" && len(source.Targets) == 1 && source.Targets[0].ResourceID == resourceID {
+			selected = source
+			count++
+		}
+	}
+	return selected, resourceID != "" && count == 1
 }
 
 func readGateContinuity(t *testing.T, f *inventoryHarness, previous resource.Binding, current resource.QuotaSource) map[string]any {
