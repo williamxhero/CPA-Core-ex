@@ -9,6 +9,7 @@ import (
 	"reflect"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resourcecatalog"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
@@ -112,6 +113,10 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 		return
 	}
 	result, err = h.resourceCatalog.ApplyGate(op)
+	if errors.Is(err, resourcecatalog.ErrGateRevisionConflict) {
+		c.JSON(409, gin.H{"error": "gate_conflict", "conflict": "gate_revision"})
+		return
+	}
 	if errors.Is(err, resourcecatalog.ErrConflict) {
 		c.JSON(409, gin.H{"error": "gate_conflict"})
 		return
@@ -172,4 +177,59 @@ func (h *Handler) InferenceGateEligibility(c *gin.Context) {
 		}
 	}
 	c.JSON(200, gin.H{"version": 1, "scope": q.Scope, "targets": q.Targets, "auth_index": q.AuthIndex, "sourceVersion": q.SourceVersion, "ready": supported, "supported": supported, "modelScoped": false, "reason": reason, "routes": routes})
+}
+
+// InferenceGateContinuity reads certified refresh ancestry without changing intent.
+func (h *Handler) InferenceGateContinuity(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	var q struct {
+		Version       int              `json:"version"`
+		Previous      resource.Binding `json:"previous"`
+		Current       resource.Binding `json:"current"`
+		AuthIndex     string           `json:"auth_index"`
+		SourceVersion string           `json:"sourceVersion"`
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32<<10)
+	d := json.NewDecoder(c.Request.Body)
+	d.DisallowUnknownFields()
+	if d.Decode(&q) != nil || d.Decode(new(any)) != io.EOF || q.Version != 1 || !validHistoricalGateBinding(q.Previous) {
+		c.JSON(400, gin.H{"error": "invalid_query"})
+		return
+	}
+	if h.resourceCatalog == nil || h.resourceModeReason() != "" {
+		c.JSON(503, gin.H{"error": "gate_unavailable"})
+		return
+	}
+	a, ok := h.selectedQuota(resource.QuotaQuery{Binding: q.Current, AuthIndex: q.AuthIndex})
+	if !ok || q.SourceVersion == "" || h.quotaSource(c.Request.Context(), a).SourceVersion != q.SourceVersion {
+		c.JSON(409, gin.H{"error": "gate_conflict"})
+		return
+	}
+	proven, err := h.resourceCatalog.GateRefreshContinuity(q.Previous, q.Current)
+	if errors.Is(err, resourcecatalog.ErrConflict) {
+		c.JSON(409, gin.H{"error": "gate_conflict"})
+		return
+	}
+	if err != nil {
+		c.JSON(503, gin.H{"error": "gate_unavailable"})
+		return
+	}
+	reason, kind := "continuity_unproven", ""
+	if proven {
+		reason = "certified_native_refresh_chain"
+		kind = "native_oauth_refresh"
+	}
+	c.JSON(200, gin.H{"version": 1, "proven": proven, "reason": reason, "kind": kind, "scope": q.Current.Scope, "targets": q.Current.Targets, "previousTargets": q.Previous.Targets, "auth_index": q.AuthIndex, "sourceVersion": q.SourceVersion})
+}
+
+func validHistoricalGateBinding(b resource.Binding) bool {
+	if uuid.Validate(b.Scope.InstanceID) != nil || uuid.Validate(b.Scope.InstanceIncarnation) != nil || uuid.Validate(b.Scope.BootEpoch) != nil || b.Scope.Revision == 0 || len(b.Targets) == 0 || len(b.Targets) > 64 {
+		return false
+	}
+	for _, t := range b.Targets {
+		if uuid.Validate(t.ResourceID) != nil || uuid.Validate(t.Incarnation) != nil || t.IdentityVersion == 0 || t.CredentialVersion == 0 || t.ConfigVersion == 0 {
+			return false
+		}
+	}
+	return true
 }

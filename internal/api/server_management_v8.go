@@ -23,6 +23,7 @@ func (s *Server) registerManagementV8Routes() {
 	}, s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
+	v8.POST("/inference-gates/continuity", s.mgmt.InferenceGateContinuity)
 	v8.POST("/inference-gates/eligibility", s.mgmt.InferenceGateEligibility)
 	v8.GET("/inference-gates/capabilities", s.mgmt.InferenceGateCapabilities)
 	v8.GET("/inference-gates", s.mgmt.InferenceGates)

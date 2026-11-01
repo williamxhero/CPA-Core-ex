@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
+var ErrGateRevisionConflict = fmt.Errorf("%w: gate revision", ErrConflict)
+
 var ErrOperationConflict = errors.New("operation conflict")
 var ErrGateDenied = errors.New("inference gate denied")
 var gateReference = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
@@ -21,7 +24,13 @@ type gateReceipt struct {
 	Operation resource.GateOperation `json:"operation"`
 	Result    resource.GateResult    `json:"result"`
 }
+type gateRefreshEdge struct {
+	From resource.Binding  `json:"from"`
+	To   []resource.Target `json:"to"`
+}
+
 type gateLedger struct {
+	Refreshes  []gateRefreshEdge      `json:"native_refreshes,omitempty"`
 	Version    int                    `json:"version"`
 	Revision   uint64                 `json:"revision"`
 	Gates      []resource.Gate        `json:"gates"`
@@ -122,8 +131,14 @@ func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, err
 		}
 		return saved.Result, nil
 	}
-	if !c.bindingLocked(&op.Binding) || op.ExpectedRevision != c.state.Gates.Revision || c.state.Gates.Revision == ^uint64(0) {
+	if !c.bindingLocked(&op.Binding) {
 		return resource.GateResult{}, ErrConflict
+	}
+	if op.ExpectedRevision != c.state.Gates.Revision {
+		return resource.GateResult{}, ErrGateRevisionConflict
+	}
+	if c.state.Gates.Revision == ^uint64(0) {
+		return resource.GateResult{}, ErrUnavailable
 	}
 	raw, _ := json.Marshal(c.state)
 	var next diskState
@@ -243,7 +258,7 @@ func (c *Catalog) BeginOwnedAuthSave(path string, a *coreauth.Auth) (func(*corea
 		data := after.original
 		c.ownedFileReplacements = map[string]string{scalar(before.root, "resource_id"): seal(c.key, []byte(after.fileID))}
 		defer func() { c.ownedFileReplacements = nil }()
-		continuity := previous != nil && previous.Scope.InstanceID == c.state.InstanceID && previous.Scope.InstanceIncarnation == c.state.InstanceIncarnation && previous.Scope.BootEpoch == c.boot && len(previous.Targets) == 1
+		continuity := !refreshAuthorityDisagrees(before, after) && previous != nil && previous.Scope.InstanceID == c.state.InstanceID && previous.Scope.InstanceIncarnation == c.state.InstanceIncarnation && previous.Scope.BootEpoch == c.boot && len(previous.Targets) == 1
 		if continuity {
 			for _, t := range previous.Targets {
 				r := c.state.Records[t.ResourceID]
@@ -260,22 +275,19 @@ func (c *Catalog) BeginOwnedAuthSave(path string, a *coreauth.Auth) (func(*corea
 			c.failed = true
 			return err
 		}
-		if !continuity || a.ResourceIdentity == nil || len(a.ResourceIdentity.Targets) != 1 || a.ResourceIdentity.Targets[0].ResourceID != previous.Targets[0].ResourceID {
+		if !continuity || a.ResourceIdentity == nil || len(a.ResourceIdentity.Targets) != 1 || !sameRefreshAuthority(previous.Targets[0], a.ResourceIdentity.Targets[0]) {
 			return nil
 		}
 		raw, _ := json.Marshal(c.state)
 		var next diskState
 		_ = json.Unmarshal(raw, &next)
-		changed := false
 		for i, g := range next.Gates.Gates {
 			if sameGateSubjects(g.Targets, previous.Targets) {
 				next.Gates.Gates[i].Targets = append([]resource.Target(nil), a.ResourceIdentity.Targets...)
-				changed = true
 			}
 		}
-		if !changed {
-			return nil
-		}
+		// A certified rotation is also durable proof for healthy intents with no gate row.
+		next.Gates.Refreshes = append(next.Gates.Refreshes, gateRefreshEdge{From: *previous, To: append([]resource.Target(nil), a.ResourceIdentity.Targets...)})
 		if !advance(&next.Gates.Revision) {
 			c.failed = true
 			return ErrUnavailable
@@ -366,4 +378,33 @@ func (c *Catalog) GateBindingReady(b *resource.Binding) error {
 		}
 	}
 	return nil
+}
+
+// GateRefreshContinuity proves an exact host-certified native rotation chain.
+// It never infers ownership from account labels or token/key content.
+func (c *Catalog) GateRefreshContinuity(previous, current resource.Binding) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.currentLocked() || !c.gateCurrentLocked() {
+		return false, ErrUnavailable
+	}
+	if !c.bindingLocked(&current) {
+		return false, ErrConflict
+	}
+	if previous.Scope.InstanceID != c.state.InstanceID || previous.Scope.InstanceIncarnation != c.state.InstanceIncarnation || len(previous.Targets) == 0 {
+		return false, nil
+	}
+	cursor := previous.Targets
+	traversed := false
+	for _, edge := range c.state.Gates.Refreshes {
+		if edge.From.Scope.InstanceID != previous.Scope.InstanceID || edge.From.Scope.InstanceIncarnation != previous.Scope.InstanceIncarnation || !reflect.DeepEqual(edge.From.Targets, cursor) {
+			continue
+		}
+		cursor = edge.To
+		traversed = true
+		if reflect.DeepEqual(cursor, current.Targets) {
+			return traversed, nil
+		}
+	}
+	return false, nil
 }

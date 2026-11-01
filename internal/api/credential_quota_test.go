@@ -161,6 +161,7 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 	}, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, endpoint)
 	}})
+	maybeInstallExternalInferenceGateRoutes(t, f, roots, endpoint, address)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		t.Fatal(err)

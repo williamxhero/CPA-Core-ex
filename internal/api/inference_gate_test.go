@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -339,8 +340,12 @@ func TestInferenceGateNativeRefreshContinuityVersusReplacement(t *testing.T) {
 	var state resource.GateState
 	json.Unmarshal(f.request("inference-gates", 200), &state)
 	if len(state.Gates) != 1 || !reflect.DeepEqual(state.Gates[0].Targets, next.Targets) {
-		t.Fatal("host-proven refresh did not carry existing owner restriction to the new version")
+		t.Fatalf("host-proven refresh did not carry existing owner restriction: before=%+v after=%+v", source.Targets, next.Targets)
 	}
+	if out := readGateContinuity(t, f, source.Binding, next); out["proven"] != true {
+		t.Fatal("paused refresh has no certified exact continuity")
+	}
+
 	// A direct same-path credential replacement is NOT a refresh certificate.
 	a, _ := f.manager.GetByID(id)
 	a.Metadata["access_token"] = "REPLACEMENT-SYNTHETIC"
@@ -356,6 +361,11 @@ func TestInferenceGateNativeRefreshContinuityVersusReplacement(t *testing.T) {
 	if reflect.DeepEqual(state.Gates[0].Targets, replaced.Targets) || state.AllSourcesReady {
 		t.Fatal("unproven replacement inherited old account pause or silently restored traffic")
 	}
+	if out := readGateContinuity(t, f, source.Binding, replaced); out["proven"] != false {
+		t.Fatal("replacement borrowed paused refresh proof")
+	}
+	gatePost(t, f, gateOp(s, int(state.Revision), "b45cc377-3556-4f06-a2f9-e7daf8d1d106", "owner-refresh", "clear"), 409)
+
 }
 
 type gateEgressCounter struct{ calls atomic.Int32 }
@@ -633,6 +643,8 @@ func TestInferenceGateAdminBoundaryAndSafeErrors(t *testing.T) {
 		{"GET", "inference-gates", "", "", 401},
 		{"POST", "inference-gates/operations", "", "{}", 401},
 		{"POST", "inference-gates/eligibility", "", "{}", 401},
+		{"POST", "inference-gates/continuity", "", "{}", 401},
+		{"POST", "inference-gates/continuity", "test-password", `{"secret":"SECRET-CANARY-NOT-RETURNED"}`, 400},
 		{"GET", "inference-gates/operations/not-present", "test-password", "", 404},
 		{"POST", "inference-gates/operations", "test-password", `{"secret":"SECRET-CANARY-NOT-RETURNED"}`, 400},
 	} {
@@ -716,8 +728,9 @@ func (selector *gatePreferASelector) Pick(_ context.Context, _, _ string, _ core
 }
 
 func TestInferenceGateActual401RefreshRetryRechecksAfterACK(t *testing.T) {
-	for _, stream := range []bool{false, true} {
-		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
+	for _, mode := range []string{"http", "sse-setup", "sse-bootstrap"} {
+		t.Run(mode, func(t *testing.T) {
+			stream := mode != "http"
 			tokenEntered, releaseToken := make(chan struct{}), make(chan struct{})
 			defer func() {
 				select {
@@ -740,6 +753,11 @@ func TestInferenceGateActual401RefreshRetryRechecksAfterACK(t *testing.T) {
 					return
 				}
 				sends.Add(1)
+				if mode == "sse-bootstrap" {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"authentication_error\",\"code\":\"invalid_api_key\",\"message\":\"controlled bootstrap401\"}}}\n\n")
+					return
+				}
 				w.WriteHeader(401)
 				fmt.Fprint(w, `{"error":{"message":"controlled refresh required","type":"invalid_api_key"}}`)
 			}))
@@ -971,5 +989,264 @@ func TestInferenceGateActualModelPoolRetryAndFailover(t *testing.T) {
 				t.Fatalf("pool retry/failover A=%d B=%d", aSends.Load(), bSends.Load())
 			}
 		})
+	}
+}
+
+func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsReplacement(t *testing.T) {
+	var rotations atomic.Int32
+	tokenServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			t.Error("refresh escaped controlled token endpoint")
+			w.WriteHeader(404)
+			return
+		}
+		n := rotations.Add(1)
+		fmt.Fprintf(w, `{"access_token":"ROTATED-%d","refresh_token":"GRANT-%d","token_type":"Bearer","expires_in":3600}`, n, n)
+	}))
+	defer tokenServer.Close()
+	tr := tokenServer.Client().Transport.(*http.Transport).Clone()
+	tr.TLSClientConfig.ServerName = tokenServer.Certificate().DNSNames[0]
+	tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, tokenServer.Listener.Addr().String())
+	}
+	original := http.DefaultTransport
+	http.DefaultTransport = tr
+	defer func() { http.DefaultTransport = original; tr.CloseIdleConnections() }()
+	dir := t.TempDir()
+	authDir := filepath.Join(dir, "auth")
+	os.MkdirAll(authDir, 0700)
+	os.WriteFile(filepath.Join(authDir, "oauth.json"), []byte(fmt.Sprintf(`{"type":"codex","access_token":"INITIAL-SYNTHETIC","refresh_token":"INITIAL-GRANT","account_id":"synthetic-account","id_token":%q,"expired":"2099-01-01T00:00:00Z"}`, "a."+base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"controlled-issuer","sub":"controlled-subject","https://api.openai.com/auth":{"chatgpt_account_id":"synthetic-account"}}`))+".b")), 0600)
+	f := newInventoryHarness(t, dir)
+	installGateFixtureExecutors(f)
+	previous := quotaSourceFor(t, f, "codex-oauth-wham")
+	var id string
+	for _, a := range f.manager.List() {
+		if a.Index == previous.AuthIndex {
+			id = a.ID
+		}
+	}
+	query := func(prev resource.Binding, current resource.QuotaSource, want int) map[string]any {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{"version": 1, "previous": prev, "current": current.Binding, "auth_index": current.AuthIndex, "sourceVersion": current.SourceVersion})
+		req := httptest.NewRequest("POST", "/v8/management/inference-gates/continuity", bytes.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		w := httptest.NewRecorder()
+		f.server.engine.ServeHTTP(w, req)
+		if w.Code != want {
+			t.Fatalf("continuity status=%d want=%d body=%s", w.Code, want, w.Body.String())
+		}
+		if w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatal("continuity cacheable")
+		}
+		var out map[string]any
+		json.Unmarshal(w.Body.Bytes(), &out)
+		return out
+	}
+	// An unrelated publication can advance ephemeral global scope while the
+	// intent still references the same complete durable target tuple.
+	if err := os.WriteFile(filepath.Join(authDir, "unrelated.json"), []byte(`{"type":"codex","access_token":"UNRELATED-SYNTHETIC"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.handler.ReconcileResourceInventory(); err != nil {
+		t.Fatal(err)
+	}
+	interim := quotaSourceFor(t, f, "codex-oauth-wham")
+	if interim.Scope == previous.Scope || !reflect.DeepEqual(interim.Targets, previous.Targets) {
+		t.Fatal("unrelated publication did not preserve target tuple while advancing scope")
+	}
+	for range 2 {
+		if _, err := f.manager.ForceRefreshAuth(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current := quotaSourceFor(t, f, "codex-oauth-wham")
+	if reflect.DeepEqual(previous.Targets, current.Targets) {
+		t.Fatal("fixture did not rotate issued target versions")
+	}
+	if out := query(previous.Binding, current, 200); out["proven"] != true || out["kind"] != "native_oauth_refresh" {
+		t.Fatal("healthy no-pause rotations have no certified intent continuation")
+	}
+	var state resource.GateState
+	json.Unmarshal(f.request("inference-gates", 200), &state)
+	if len(state.Gates) != 0 {
+		t.Fatal("healthy continuity invented a quota pause")
+	}
+	f.close()
+	f = newInventoryHarness(t, dir)
+	installGateFixtureExecutors(f)
+	current = quotaSourceFor(t, f, "codex-oauth-wham")
+	if out := query(previous.Binding, current, 200); out["proven"] != true {
+		t.Fatal("restart lost durable exact refresh chain")
+	}
+	var a *coreauth.Auth
+	for _, candidate := range f.manager.List() {
+		if candidate.Index == current.AuthIndex {
+			a = candidate
+		}
+	}
+	a.Metadata["access_token"] = "REPLACEMENT-SYNTHETIC"
+	a.Metadata["account_id"] = "different-account"
+	if _, err := f.manager.Storage().Save(coreauth.WithAuthCreationIntent(context.Background()), a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.manager.Update(coreauth.WithSkipPersist(context.Background()), a); err != nil {
+		t.Fatal(err)
+	}
+	replaced := quotaSourceFor(t, f, "codex-oauth-wham")
+	if out := query(previous.Binding, replaced, 200); out["proven"] != false || out["kind"] != "" {
+		t.Fatal("account replacement borrowed native refresh continuity")
+	}
+	query(previous.Binding, current, 409)
+}
+
+func readGateContinuity(t *testing.T, f *inventoryHarness, previous resource.Binding, current resource.QuotaSource) map[string]any {
+	t.Helper()
+	raw, _ := json.Marshal(map[string]any{"version": 1, "previous": previous, "current": current.Binding, "auth_index": current.AuthIndex, "sourceVersion": current.SourceVersion})
+	req := httptest.NewRequest("POST", "/v8/management/inference-gates/continuity", bytes.NewReader(raw))
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer test-password")
+	w := httptest.NewRecorder()
+	f.server.engine.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("continuity status=%d", w.Code)
+	}
+	var out map[string]any
+	json.Unmarshal(w.Body.Bytes(), &out)
+	return out
+}
+
+func TestInferenceGateActualVerify501FallbackRechecksAfterACK(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var sends atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sends.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		w.WriteHeader(501)
+		fmt.Fprint(w, `{"error":{"message":"controlled stream not implemented"}}`)
+	}))
+	defer upstream.Close()
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "auth"), 0700)
+	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  openai-compatibility:\n    - name: gate-verify\n      base-url: %q\n      keys: [{api-key: SYNTHETIC-A}]\n", filepath.ToSlash(filepath.Join(dir, "auth")), upstream.URL+"/v1")
+	os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(text), 0600)
+	f := newInventoryHarness(t, dir)
+	f.manager.SetConfig(f.server.cfg)
+	a := f.manager.List()[0]
+	f.manager.RegisterExecutor(runtimeexecutor.NewOpenAICompatExecutor(a.Provider, f.server.cfg))
+	source := gateSource(t, f)
+	done := make(chan error, 1)
+	go func() { _, err := f.manager.VerifyInference(context.Background(), a.ID, "gate-model"); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(6 * time.Second):
+		t.Fatal("actual VerifyInference stream did not reach upstream")
+	}
+	gatePost(t, f, gateOp(source, 0, "cf01bd74-75a1-4311-b4a9-cc09446824d7", "owner-a", "pause"), 200)
+	close(release)
+	select {
+	case err := <-done:
+		if !coreexecutor.IsInferenceAdmissionError(err) {
+			t.Fatalf("501 fallback did not return gate denial: %T", err)
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("501 fallback did not settle")
+	}
+	if sends.Load() != 1 {
+		t.Fatalf("501 fallback reused old admission: sends=%d", sends.Load())
+	}
+}
+
+func TestInferenceGateNativeRefreshAccountDisagreementIsNotContinuity(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		t.Run(fmt.Sprintf("paused=%v", paused), func(t *testing.T) {
+			token := func(account string) string {
+				raw, _ := json.Marshal(map[string]any{"iss": "controlled-issuer", "sub": "controlled-subject", "https://api.openai.com/auth": map[string]any{"chatgpt_account_id": account}})
+				return "eyJhbGciOiJub25lIn0." + base64.RawURLEncoding.EncodeToString(raw) + ".synthetic"
+			}
+			tokenServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/oauth/token" {
+					t.Error("wrong controlled refresh path")
+					w.WriteHeader(404)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{"access_token": "ROTATED-SYNTHETIC", "refresh_token": "ROTATED-GRANT", "id_token": token("DIFFERENT-ACCOUNT"), "expires_in": 3600})
+			}))
+			defer tokenServer.Close()
+			tr := tokenServer.Client().Transport.(*http.Transport).Clone()
+			tr.TLSClientConfig.ServerName = tokenServer.Certificate().DNSNames[0]
+			tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, tokenServer.Listener.Addr().String())
+			}
+			original := http.DefaultTransport
+			http.DefaultTransport = tr
+			defer func() { http.DefaultTransport = original; tr.CloseIdleConnections() }()
+			dir := t.TempDir()
+			authDir := filepath.Join(dir, "auth")
+			os.MkdirAll(authDir, 0700)
+			raw, _ := json.Marshal(map[string]any{"type": "codex", "access_token": "INITIAL-SYNTHETIC", "refresh_token": "INITIAL-GRANT", "account_id": "ORIGINAL-ACCOUNT", "id_token": token("ORIGINAL-ACCOUNT"), "expired": "2099-01-01T00:00:00Z"})
+			os.WriteFile(filepath.Join(authDir, "oauth.json"), raw, 0600)
+			f := newInventoryHarness(t, dir)
+			installGateFixtureExecutors(f)
+			previous := quotaSourceFor(t, f, "codex-oauth-wham")
+			var id string
+			for _, a := range f.manager.List() {
+				if a.Index == previous.AuthIndex {
+					id = a.ID
+				}
+			}
+			if paused {
+				var source map[string]any
+				raw, _ = json.Marshal(previous)
+				json.Unmarshal(raw, &source)
+				gatePost(t, f, gateOp(source, 0, "b3d32b46-27db-4f7a-8e22-7d47c02acfe6", "owner-a", "pause"), 200)
+			}
+			if _, err := f.manager.ForceRefreshAuth(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			current := quotaSourceFor(t, f, "codex-oauth-wham")
+			if out := readGateContinuity(t, f, previous.Binding, current); out["proven"] != false {
+				t.Fatal("successful refresh with explicit account disagreement falsely certified continuation")
+			}
+			var state resource.GateState
+			json.Unmarshal(f.request("inference-gates", 200), &state)
+			if paused && (len(state.Gates) != 1 || state.Gates[0].Applicability != "reconciliation_required" || reflect.DeepEqual(state.Gates[0].Targets, current.Targets)) {
+				t.Fatal("old-account pause carried into different token-response account")
+			}
+		})
+	}
+}
+
+func TestInferenceGateRevisionConflictIsTypedOnlyForCurrentAuthority(t *testing.T) {
+	f := newInventoryHarness(t, t.TempDir())
+	source := gateSource(t, f)
+	gatePost(t, f, gateOp(source, 0, "8c974e88-9fc6-4ea3-983b-4dcedd0374c4", "owner-a", "pause"), 200)
+	conflict := gateOp(source, 0, "60c7983f-74b2-41e4-a21a-32575fa1a932", "owner-b", "pause")
+	raw := gatePost(t, f, conflict, 409)
+	var reply map[string]any
+	json.Unmarshal(raw, &reply)
+	if reply["error"] != "gate_conflict" || reply["conflict"] != "gate_revision" {
+		t.Fatal("current-binding revision-only conflict lacks safe typed reason")
+	}
+	f.request("inference-gates/operations/60c7983f-74b2-41e4-a21a-32575fa1a932", 404)
+	conflict["scope"] = resource.Version{}
+	raw = gatePost(t, f, conflict, 409)
+	json.Unmarshal(raw, &reply)
+	if bytes.Contains(raw, []byte("gate_revision")) {
+		t.Fatal("binding failure mislabeled revision-only")
+	}
+	var state resource.GateState
+	json.Unmarshal(f.request("inference-gates", 200), &state)
+	if state.Revision != 1 || len(state.Gates) != 1 {
+		t.Fatal("CAS rejection durably created successor operation")
 	}
 }
