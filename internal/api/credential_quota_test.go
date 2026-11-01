@@ -9,12 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialquota"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +18,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialquota"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type fixtureDenyHTTP struct{}
@@ -64,6 +65,21 @@ func TestCredentialQuotaSourcesAreReadOnlyAndHonest(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatal("GET queried upstream")
+	}
+}
+
+func TestCredentialQuotaCapabilityIsVersionedNotGateACK(t *testing.T) {
+	f := newInventoryHarness(t, t.TempDir())
+	var caps map[string]any
+	json.Unmarshal(f.request("resource-capabilities", 200), &caps)
+	capability, ok := caps["credential_query"].(map[string]any)
+	if !ok || capability["version"] != float64(1) || capability["scoped_query"] != true || caps["gate"] != false || caps["query"] != false {
+		t.Fatalf("missing distinct versioned credential query capability: %+v", caps)
+	}
+	var view map[string]any
+	json.Unmarshal(f.request("credential-quota/sources", 200), &view)
+	if view["version"] != float64(1) {
+		t.Fatal("unversioned credential query contract")
 	}
 }
 
@@ -365,6 +381,32 @@ func TestCredentialQuotaUnknownAccountAndManagementTimeout(t *testing.T) {
 	obs = queryQuota(t, f, q, 200)
 	if obs.QueryStatus != "network_error" || obs.RecoveryEligible {
 		t.Fatal("timeout became positive evidence")
+	}
+}
+
+func TestCredentialQuotaQwenUnverifiedNeverQueries(t *testing.T) {
+	f, calls := pluginInventoryFixture(t)
+	s := quotaSourceFor(t, f, "qwen-console")
+	obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex}, 200)
+	if obs.QueryStatus != "needs_configuration" || obs.AccountProvenance != "unverified" || obs.RecoveryEligible || len(obs.Windows) != 0 || calls.Load() != 0 {
+		t.Fatalf("unproven console account was queried/recovered: %+v", obs)
+	}
+}
+
+func TestCredentialQuotaMixedKeyOAuthFileNeverUsesWham(t *testing.T) {
+	dir := t.TempDir()
+	auth := filepath.Join(dir, "auth")
+	os.MkdirAll(auth, 0700)
+	os.WriteFile(filepath.Join(auth, "mixed.json"), []byte(`{"type":"codex","access_token":"OAUTH-LIKE-CANARY","api_key":"INTERMEDIARY-CANARY","base_url":"https://intermediary.invalid/v1"}`), 0600)
+	f := newInventoryHarness(t, dir)
+	var view struct {
+		Sources []resource.QuotaSource `json:"sources"`
+	}
+	json.Unmarshal(f.request("credential-quota/sources", 200), &view)
+	for _, s := range view.Sources {
+		if s.Protocol == "codex-oauth-wham" {
+			t.Fatal("mixed API-key file falsely acquired native OAuth query capability")
+		}
 	}
 }
 

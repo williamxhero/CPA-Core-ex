@@ -56,13 +56,15 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 	case a.SourcePluginID != "":
 		s.Reason = "plugin_protocol_unverified"
 	case a.Provider == "codex":
-		if strings.TrimSpace(a.Attributes["api_key"]) != "" {
+		metadataKey, _ := a.Metadata["api_key"].(string)
+		metadataBase, _ := a.Metadata["base_url"].(string)
+		if strings.TrimSpace(a.Attributes["api_key"]) != "" || strings.TrimSpace(metadataKey) != "" {
 			s.Reason = "api_key_protocol_unverified"
 			s.State = "needs_configuration"
 			break
 		}
 		token, _ := a.Metadata["access_token"].(string)
-		if token != "" && a.Attributes["base_url"] == "" {
+		if token != "" && a.Attributes["base_url"] == "" && strings.TrimSpace(metadataBase) == "" {
 			s.Protocol = "codex-oauth-wham"
 			s.State = "ready"
 			s.Reason = "selected_oauth"
@@ -114,7 +116,7 @@ func (h *Handler) quotaSources(ctx context.Context) ([]resource.QuotaSource, boo
 		}
 	}
 	for _, r := range snapshot.Resources {
-		if r.Kind == "credential" && !bound[r.ResourceID] {
+		if (r.Kind == "credential" || r.Kind == "provider" && len(r.Members) == 0) && !bound[r.ResourceID] {
 			out = append(out, resource.QuotaSource{Binding: resource.Binding{Scope: snapshot.Version, Targets: []resource.Target{r.Target}}, Protocol: "unavailable", State: "unsupported", Reason: "runtime_binding_unavailable", AccountProvenance: "unverified", ManualDisabled: r.Manual.Disabled})
 		}
 	}
@@ -130,7 +132,7 @@ func (h *Handler) CredentialQuotaSources(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "resource_inventory_unavailable"})
 		return
 	}
-	c.JSON(200, gin.H{"sources": sources})
+	c.JSON(200, gin.H{"version": 1, "sources": sources})
 }
 
 func (h *Handler) selectedQuota(q resource.QuotaQuery) (*coreauth.Auth, bool) {
