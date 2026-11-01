@@ -12,7 +12,8 @@ import (
 	"testing"
 )
 
-// This is the exact parent/consumer independently verified frozen vector file.
+// This is the LF-canonical copy of the independently verified frozen vectors.
+// JSON line endings are not part of the fixed-field binary association wire.
 //
 //go:embed testdata/association-v2-vectors.json
 var vectorJSON []byte
@@ -46,8 +47,14 @@ func vectorBase(t *testing.T) goldenFile {
 	if err := json.Unmarshal(vectorJSON, &f); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprintf("%x", sha256.Sum256(vectorJSON)) != "dd2f4c07dc8b01d92bbce66c69b088c305fe44e3fc92351ab1189ccd7d8844ef" {
-		t.Fatal("frozen vector bytes changed")
+	if bytes.Contains(vectorJSON, []byte("\r")) || fmt.Sprintf("%x", sha256.Sum256(vectorJSON)) != "d8a9a872e317580e3b61d2c80733fa32c54bfba9aab145d016258259c8f3cc16" {
+		t.Fatal("LF-canonical frozen vector fixture changed")
+	}
+	// Reversing only newline normalization must reproduce the exact original
+	// independently frozen bytes, not merely an equivalent parsed JSON object.
+	original := bytes.ReplaceAll(vectorJSON, []byte("\n"), []byte("\r\n"))
+	if fmt.Sprintf("%x", sha256.Sum256(original)) != "dd2f4c07dc8b01d92bbce66c69b088c305fe44e3fc92351ab1189ccd7d8844ef" {
+		t.Fatal("normalized fixture no longer reproduces exact frozen source")
 	}
 	return f
 }
