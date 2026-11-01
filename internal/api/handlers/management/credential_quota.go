@@ -139,7 +139,7 @@ func (h *Handler) quotaSources(ctx context.Context) ([]resource.QuotaSource, boo
 	bound := map[string]bool{}
 	for _, a := range h.authManager.List() {
 		a = h.currentRuntimeSource(a)
-		if a != nil && h.resourceCatalog.BindingCurrent(a.ResourceIdentity) {
+		if a != nil {
 			out = append(out, h.quotaSource(ctx, a))
 			for _, t := range a.ResourceIdentity.Targets {
 				bound[t.ResourceID] = true
@@ -171,7 +171,7 @@ func (h *Handler) selectedQuota(q resource.QuotaQuery) (*coreauth.Auth, bool) {
 		return nil, false
 	}
 	a := h.currentRuntimeSource(h.authByIndex(q.AuthIndex))
-	if a == nil || !h.resourceCatalog.BindingCurrent(a.ResourceIdentity) || !reflect.DeepEqual(*a.ResourceIdentity, q.Binding) {
+	if a == nil || !reflect.DeepEqual(*a.ResourceIdentity, q.Binding) {
 		return nil, false
 	}
 	return a, true

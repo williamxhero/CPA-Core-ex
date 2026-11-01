@@ -24,6 +24,7 @@ var (
 
 type Catalog struct {
 	ownedFileReplacements map[string]string
+	configuredProjection  *configuredSourceProjection
 
 	mu                                  sync.Mutex
 	lock                                *os.File
