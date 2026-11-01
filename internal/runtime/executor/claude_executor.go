@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialassociation"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
@@ -410,3 +411,19 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
 func (e *ClaudeExecutor) SupportsApplyPatch() bool { return e != nil }
+
+// CredentialAssociation reads the actual native credential/path without invoking
+// header/session resolution, refreshing OAuth, or changing business semantics.
+func (e *ClaudeExecutor) CredentialAssociation(a *cliproxyauth.Auth, q credentialassociation.Request) (bool, string) {
+	if e == nil || e.cfg != nil && e.cfg.Home.Enabled || !helps.AssociationCandidateAllowed(a) {
+		return false, "association_unsupported"
+	}
+	key, base := claudeCreds(a)
+	if claudeCredentialUsesOAuth(a, key) {
+		return false, "association_unsupported"
+	}
+	if base == "" {
+		base = "https://api.anthropic.com"
+	}
+	return helps.MatchCredentialAssociation(key, helps.ClaudeMessagesURL(base), "/v1/messages", q)
+}

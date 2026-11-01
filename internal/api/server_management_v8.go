@@ -17,7 +17,7 @@ func (s *Server) registerManagementV8Routes() {
 
 	v8 := s.engine.Group(prefix)
 	v8.Use(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, prefix+"/inference-gates") {
+		if strings.HasPrefix(c.Request.URL.Path, prefix+"/inference-gates") || c.Request.URL.Path == prefix+"/credential-quota/credential-association" {
 			c.Header("Cache-Control", "no-store")
 		}
 	}, s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
@@ -34,6 +34,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.GET("/resource-bindings", s.mgmt.ResourceBindings)
 	v8.GET("/credential-quota/sources", s.mgmt.CredentialQuotaSources)
 	v8.POST("/credential-quota/query", s.mgmt.QueryCredentialQuota)
+	v8.POST("/credential-quota/credential-association", s.mgmt.CredentialAssociation)
 	v8.GET("/config", s.mgmt.ConfigV8)
 	v8.PUT("/config", s.mgmt.ConfigV8)
 	v8.PATCH("/config", s.mgmt.ConfigV8)

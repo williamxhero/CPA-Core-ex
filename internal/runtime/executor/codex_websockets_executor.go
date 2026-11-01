@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialassociation"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -272,4 +273,13 @@ func (e *CodexWebsocketsExecutor) InterruptExecutionSession(ctx context.Context,
 	}
 	log.WithField("outcome", "forwarded").Debug("codex websockets: response.interrupt handled")
 	return nil
+}
+
+// CredentialAssociation shares the native credential/path authority of the HTTP
+// executor; both transports use the same literal responses URL construction.
+func (e *CodexAutoExecutor) CredentialAssociation(a *cliproxyauth.Auth, q credentialassociation.Request) (bool, string) {
+	if e == nil || e.httpExec == nil {
+		return false, "association_unsupported"
+	}
+	return e.httpExec.CredentialAssociation(a, q)
 }

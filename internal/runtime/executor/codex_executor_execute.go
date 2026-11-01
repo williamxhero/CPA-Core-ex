@@ -92,7 +92,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, "codex executor", body, isCompat, targetModel, baseURL)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.AppendInferencePath(baseURL, "/responses")
 	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, auth, opts.Headers)
 	if err != nil {
 		return resp, err
@@ -283,7 +283,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	body = helps.NormalizeCodexToolSchemas(body)
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, isCompat)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
+	url := helps.AppendInferencePath(baseURL, "/responses/compact")
 	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, auth, opts.Headers)
 	if err != nil {
 		return resp, err

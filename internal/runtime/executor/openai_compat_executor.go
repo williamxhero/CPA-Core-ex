@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialassociation"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -165,7 +166,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		}
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, "openai compat executor", translated, true, resolveResponsesSignatureTargetModel(baseModel, req, opts), baseURL)
 	}
-	url := strings.TrimSuffix(baseURL, "/") + endpoint
+	url := helps.AppendInferencePath(baseURL, endpoint)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -268,7 +269,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 	}
 	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := helps.AppendInferencePath(baseURL, endpointPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return resp, err
@@ -399,7 +400,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := helps.AppendInferencePath(baseURL, "/chat/completions")
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -686,7 +687,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 	}
 	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := helps.AppendInferencePath(baseURL, endpointPath)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -1267,3 +1268,13 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
 func (e *OpenAICompatExecutor) SupportsApplyPatch() bool { return e != nil }
+
+// CredentialAssociation resolves this executor's effective credential, never a
+// generic attribute approximation or a probe against the upstream deployment.
+func (e *OpenAICompatExecutor) CredentialAssociation(a *cliproxyauth.Auth, q credentialassociation.Request) (bool, string) {
+	if e == nil || e.cfg != nil && e.cfg.Home.Enabled || !helps.AssociationCandidateAllowed(a) {
+		return false, "association_unsupported"
+	}
+	base, key := e.resolveCredentials(a)
+	return helps.MatchCredentialAssociation(key, helps.AppendInferencePath(base, "/chat/completions"), "/v1/chat/completions", q)
+}

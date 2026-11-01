@@ -917,7 +917,7 @@ func (e *CodexWebsocketsExecutor) prepareCodexWebsocketStream(ctx context.Contex
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, "codex websockets executor", body, isCompat, targetModel, baseURL)
 
-	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
+	httpURL := helps.AppendInferencePath(baseURL, "/responses")
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
 	if err != nil {
 		return nil, err

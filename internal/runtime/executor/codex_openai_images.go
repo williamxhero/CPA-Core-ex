@@ -113,7 +113,7 @@ func (e *CodexExecutor) executeOpenAIImage(ctx context.Context, auth *cliproxyau
 		return resp, errBuild
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.AppendInferencePath(baseURL, "/responses")
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts))
@@ -220,7 +220,7 @@ func (e *CodexExecutor) executeOpenAIImageStream(ctx context.Context, auth *clip
 		return nil, errBuild
 	}
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.AppendInferencePath(baseURL, "/responses")
 	payloadOpts := opts
 	payloadOpts.SourceFormat = sdktranslator.FromString(codexOpenAIImageSourceFormat)
 	ctx = helps.WithPayloadFinalizer(ctx, helps.NewPayloadFinalizer(e.cfg, e.Identifier(), mainModel, "codex", "", prepared.Body, req, payloadOpts))
@@ -353,7 +353,7 @@ func (e *CodexExecutor) executeDirectOpenAIImage(ctx context.Context, auth *clip
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(body, "openai")
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := helps.AppendInferencePath(baseURL, endpointPath)
 	httpReq, body, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body, auth, opts.Headers)
 	if errCache != nil {
 		return resp, errCache
@@ -425,7 +425,7 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 	defer reporter.TrackFailure(ctx, &err)
 	reporter.SetTranslatedReasoningEffort(body, "openai")
 
-	url := strings.TrimSuffix(baseURL, "/") + endpointPath
+	url := helps.AppendInferencePath(baseURL, endpointPath)
 	httpReq, body, errCache := e.cacheHelper(ctx, sdktranslator.FromString(codexOpenAIImageSourceFormat), url, req, body, auth, opts.Headers)
 	if errCache != nil {
 		return nil, errCache
