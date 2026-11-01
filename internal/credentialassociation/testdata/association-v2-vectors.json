@@ -1,0 +1,1115 @@
+{
+  "status": "REVIEW_ONLY_NOT_FROZEN_NOT_AUTHORIZATION_PROOF",
+  "contract": "CORE-CREDENTIAL-ASSOCIATION-CONTRACT-v2-DRAFT.md",
+  "syntheticKeyUTF8": "SYNTHETIC-ASSOCIATION-VECTOR-KEY",
+  "baseRequest": {
+    "version": 1,
+    "selected": {
+      "scope": {
+        "instance_id": "11111111-1111-4111-8111-111111111111",
+        "instance_incarnation": "22222222-2222-4222-8222-222222222222",
+        "boot_epoch": "33333333-3333-4333-8333-333333333333",
+        "snapshot_revision": 9
+      },
+      "targets": [
+        {
+          "resource_id": "44444444-4444-4444-8444-444444444444",
+          "incarnation": "55555555-5555-4555-8555-555555555555",
+          "identity_version": 1,
+          "credential_version": 2,
+          "config_version": 3,
+          "membership_version": 0
+        }
+      ]
+    },
+    "auth_index": "synthetic-selected-index",
+    "sourceVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "origin": "https://synthetic.invalid:443",
+    "official": {
+      "scope": {
+        "instance_id": "11111111-1111-4111-8111-111111111111",
+        "instance_incarnation": "22222222-2222-4222-8222-222222222222",
+        "boot_epoch": "33333333-3333-4333-8333-333333333333",
+        "snapshot_revision": 9
+      },
+      "targets": [
+        {
+          "resource_id": "66666666-6666-4666-8666-666666666666",
+          "incarnation": "77777777-7777-4777-8777-777777777777",
+          "identity_version": 1,
+          "credential_version": 1,
+          "config_version": 3,
+          "membership_version": 2
+        },
+        {
+          "resource_id": "44444444-4444-4444-8444-444444444444",
+          "incarnation": "55555555-5555-4555-8555-555555555555",
+          "identity_version": 1,
+          "credential_version": 2,
+          "config_version": 3,
+          "membership_version": 0
+        }
+      ],
+      "version": 7,
+      "adapter": "newapi-token-usage-v1",
+      "endpoint": "https://synthetic.invalid/api/usage/token/",
+      "privateTargets": [
+        "10.0.0.1",
+        "10.0.0.2"
+      ],
+      "timeoutMs": 15000,
+      "newAPI": {
+        "protocolConfirmed": true,
+        "instanceVersion": "fixture-pinned-v1",
+        "auth": "inference-key-readonly-v1",
+        "userID": "",
+        "accountScope": "",
+        "nativeUnit": "newapi_quota",
+        "conversion": {
+          "confirmed": true,
+          "nativeUnit": "newapi_quota",
+          "currency": "USD",
+          "moneyPerNativeQuota": "0.000002",
+          "proofReference": "synthetic-proof",
+          "contractVersion": "v1"
+        }
+      }
+    },
+    "queryId": "88888888-8888-4888-8888-888888888888",
+    "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "base": {
+    "encodedBytes": 1106,
+    "challengeHash": "e64a0edecfd968f4754e9cb64e00c2801f1e07c2b8497522d0eb7554b94a4081",
+    "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+    "candidateMac": "ZuNRmGgS_Tmr2Ofe5tThtnIsAuUeuyVcEW8a-k_j4m0",
+    "encodedEnvelopeHex": "000000244350412d5350454339322d43524544454e5449414c2d4153534f43494154494f4e2d563200000000000000010000002431313131313131312d313131312d343131312d383131312d3131313131313131313131310000002432323232323232322d323232322d343232322d383232322d3232323232323232323232320000002433333333333333332d333333332d343333332d383333332d3333333333333333333333330000000000000009000000010000002434343434343434342d343434342d343434342d383434342d3434343434343434343434340000002435353535353535352d353535352d343535352d383535352d35353535353535353535353500000000000000010000000000000002000000000000000300000000000000000000001873796e7468657469632d73656c65637465642d696e64657800000040616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161610000001d68747470733a2f2f73796e7468657469632e696e76616c69643a3434330000002431313131313131312d313131312d343131312d383131312d3131313131313131313131310000002432323232323232322d323232322d343232322d383232322d3232323232323232323232320000002433333333333333332d333333332d343333332d383333332d3333333333333333333333330000000000000009000000020000002436363636363636362d363636362d343636362d383636362d3636363636363636363636360000002437373737373737372d373737372d343737372d383737372d37373737373737373737373700000000000000010000000000000001000000000000000300000000000000020000002434343434343434342d343434342d343434342d383434342d3434343434343434343434340000002435353535353535352d353535352d343535352d383535352d35353535353535353535353500000000000000010000000000000002000000000000000300000000000000000000000000000007000000156e65776170692d746f6b656e2d75736167652d76310000002a68747470733a2f2f73796e7468657469632e696e76616c69642f6170692f75736167652f746f6b656e2f000000020000000831302e302e302e310000000831302e302e302e320000000000003a98010100000011666978747572652d70696e6e65642d763100000019696e666572656e63652d6b65792d726561646f6e6c792d763100000000000000000000000c6e65776170695f71756f746101010000000c6e65776170695f71756f74610000000355534400000008302e3030303030320000000f73796e7468657469632d70726f6f660000000276310000002438383838383838382d383838382d343838382d383838382d38383838383838383838383800000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "encodedConfigHex": "0000002431313131313131312d313131312d343131312d383131312d3131313131313131313131310000002432323232323232322d323232322d343232322d383232322d3232323232323232323232320000002433333333333333332d333333332d343333332d383333332d3333333333333333333333330000000000000009000000020000002436363636363636362d363636362d343636362d383636362d3636363636363636363636360000002437373737373737372d373737372d343737372d383737372d37373737373737373737373700000000000000010000000000000001000000000000000300000000000000020000002434343434343434342d343434342d343434342d383434342d3434343434343434343434340000002435353535353535352d353535352d343535352d383535352d35353535353535353535353500000000000000010000000000000002000000000000000300000000000000000000000000000007000000156e65776170692d746f6b656e2d75736167652d76310000002a68747470733a2f2f73796e7468657469632e696e76616c69642f6170692f75736167652f746f6b656e2f000000020000000831302e302e302e310000000831302e302e302e320000000000003a98010100000011666978747572652d70696e6e65642d763100000019696e666572656e63652d6b65792d726561646f6e6c792d763100000000000000000000000c6e65776170695f71756f746101010000000c6e65776170695f71756f74610000000355534400000008302e3030303030320000000f73796e7468657469632d70726f6f66000000027631"
+  },
+  "wrongKeySameEnvelope": {
+    "encodedBytes": 1106,
+    "challengeHash": "e64a0edecfd968f4754e9cb64e00c2801f1e07c2b8497522d0eb7554b94a4081",
+    "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+    "candidateMac": "qu8Nqvy7yjwu7qFy0hx4G8aJn_tCtmBgA_q4jEaQMpc"
+  },
+  "vectors": [
+    {
+      "name": "alter-version",
+      "replace": [
+        {
+          "path": [
+            "version"
+          ],
+          "value": 2
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "c03461e464b9120457e73ac589f0e5312f35b85e5225c8900fc8e7fbd95df8df",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "wohyZd_e6jdONeIWvTGs-KgOaCBBLWT3yK-q6WtdTiQ",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.scope.instance_id",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "scope",
+            "instance_id"
+          ],
+          "value": "11111111-1111-4111-8111-111111111110"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "5bd459b526198a2669e4739943d3b7a5a96f1c04f1a52005b667225ce87355c1",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "QOATJ0NhcUpKrxgItj4-PPJ1GPDc7htkRg8x6U1Dyg0",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.scope.instance_incarnation",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "scope",
+            "instance_incarnation"
+          ],
+          "value": "22222222-2222-4222-8222-222222222220"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "c48d06f46fceff17065cbf81b8e4252da05230b4223f3ff814a7e1567aa0f7ea",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "LNiZGhmOiNUVz5yJkEMTv9H5VZ7hgG1d09wCdSjrrog",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.scope.boot_epoch",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "scope",
+            "boot_epoch"
+          ],
+          "value": "33333333-3333-4333-8333-333333333330"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "f5a5f81e8892bbcd441611ace6cb263b90938b1ff115a50f7da54ad25063542f",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "RmFDOSB8DtkctDsBhAsbYAbtsba_QTehFw-JtaQJDOA",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.scope.snapshot_revision",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "scope",
+            "snapshot_revision"
+          ],
+          "value": 10
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "022f4c5d9dd00969628ecb6c18c11207c674ec9b6b1f34ab7e59f4d5db47216b",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "-69MlKldJiHPuvEXYqUDRjr9Jjx9U8oa-MNGsX6s9Cs",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.targets.0.resource_id",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "targets",
+            0,
+            "resource_id"
+          ],
+          "value": "44444444-4444-4444-8444-444444444440"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "b8181ce0a0d381e05579aa06697e239649185bfaaeb5c5b8e0e5d473bab0905b",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "eqh8sFo6MWN3migqSrcY5OMx2e9ghrIt_KSy2uUAULU",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.targets.0.incarnation",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "targets",
+            0,
+            "incarnation"
+          ],
+          "value": "55555555-5555-4555-8555-555555555550"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "0b8b86f407b3e30f57ea69febd449f82ae2dd2def71c2ed34404e65aa9bd6cea",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "QapetyvOQM0c9kdCf_iQ-LKTzVm9BqGPjQPM5AvTFGM",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.targets.0.identity_version",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "targets",
+            0,
+            "identity_version"
+          ],
+          "value": 2
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "5f69e899a237011468482735e2a69f67f4d42b79b486e7456446880dd0f6be6d",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "oE25nBUwLfFvmoNQ0WVSVJrtsMH2S359te-l6x5eaTY",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.targets.0.credential_version",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "targets",
+            0,
+            "credential_version"
+          ],
+          "value": 3
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "256bf14a997a9fb5e1ecb2b4d7c7bd765d252e084dd1b556b488a964d286ff12",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "FvL9qCF2OJdPSojEBJwpZmYorPvS4gXMCZ6p5jPFzVc",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.targets.0.config_version",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "targets",
+            0,
+            "config_version"
+          ],
+          "value": 4
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "1667e6756252310a88a26e7d6c8ceabee85d0593af4e453823b7098f434101e5",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "FYj4ig3bsaDxHOCL5HDDtOAfbJRN4gOgQ0CVlhYTHOQ",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-selected.targets.0.membership_version",
+      "replace": [
+        {
+          "path": [
+            "selected",
+            "targets",
+            0,
+            "membership_version"
+          ],
+          "value": 1
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "b6cdd842e98863816012ddc7994f003dd7a323311df626a4b60cce878a1f2828",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "dPkRyBKfsJ43czL_2KgZrp8QBcTomCR0lFzJDemQ5Vc",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-auth_index",
+      "replace": [
+        {
+          "path": [
+            "auth_index"
+          ],
+          "value": "synthetic-selected-index.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "6c2f5cc319871d1623512744338439a8995254d80caee6fb3c49d212bbc249d5",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "HJwDjVVmm2Kff8Huf_FSqypHM4-3G9UBrK4x2UY0CO0",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-sourceVersion",
+      "replace": [
+        {
+          "path": [
+            "sourceVersion"
+          ],
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "d0ad7db689712a08b5088bb16a452dda8eea932c853b15b6ac421678b774d457",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "aa179LpS4BmJODh5cPx3601oC10TT7EriFhmNyX2ndA",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-origin",
+      "replace": [
+        {
+          "path": [
+            "origin"
+          ],
+          "value": "https://synthetic.invalid:443.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "04736f5dc258715669e75a1160399067ad3ef5a009a8ccaacfdd4f6a2db6b4d2",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "XCzIQtYGsnrWEfDoqeKYN-3gEAY8hijCqxkQr6rKmng",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.scope.instance_id",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "scope",
+            "instance_id"
+          ],
+          "value": "11111111-1111-4111-8111-111111111110"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "6dec4e842dc8aa2556a5ccccbaccb392c9130b3bb1c32427c35c9e4be1f3d15f",
+      "contractHash": "8b1a0d2ea0761aafee7f5d0cad0ae2e807602c53a28febf41856e98b5d82f13d",
+      "candidateMac": "NuY8UvMcfHnYpO_XksSdLmSGAaaaFJgJPk85Avf7Rm4",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.scope.instance_incarnation",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "scope",
+            "instance_incarnation"
+          ],
+          "value": "22222222-2222-4222-8222-222222222220"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "f5e3f2e95dc41adca4216954a4124eeb3c472a5d9afac79dfadfa29e84b16e44",
+      "contractHash": "76fd5dd71ba4ae1584bdac45d6dc401845df98735caecaf5f403c74522ecc40a",
+      "candidateMac": "NMMauF0AGWiUyzqhdXj7ZtP6FPQMufJ1z0Cx8nWRea8",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.scope.boot_epoch",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "scope",
+            "boot_epoch"
+          ],
+          "value": "33333333-3333-4333-8333-333333333330"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "eab654356f3252bcbea8ebf134814b90ff6fcb7932cabe6cc89bc1aa3d9c9c0a",
+      "contractHash": "23cec7886ca4acf0ddaa3e4d4bd3314212290c0a9e7f2fbacd1fc7ce54bff181",
+      "candidateMac": "GjbHjxalkmzwKei3p6s3YPue_dpndGBFlSNXBhzYH5w",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.scope.snapshot_revision",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "scope",
+            "snapshot_revision"
+          ],
+          "value": 10
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "83195ae52ce945c7f6d155e3ca6e4ab517a129f4e7f5b8ca72a0295f6a721cce",
+      "contractHash": "efcb4370068d2994c228bb305c1398d3e0ae72516e9533e55347ac5c49d9fd79",
+      "candidateMac": "egAEpmc6ntJVRaY6ywMYHW_PaYO_kKUqdBPmf2rqZoo",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.0.resource_id",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            0,
+            "resource_id"
+          ],
+          "value": "66666666-6666-4666-8666-666666666660"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "71291cc4aa16f9a8aad87be5a1110f7206e65d8ec4d0651c795b1bcc23dc9a5d",
+      "contractHash": "72b2a6cf67fb4709a6aa6808636c5e25c1b079648f1dc72469a2fa1d01f3931b",
+      "candidateMac": "Wn7KaZFxaJR1Wnc5LaC0-KNmaqGuGTvbVrU-dx4eCWI",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.0.incarnation",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            0,
+            "incarnation"
+          ],
+          "value": "77777777-7777-4777-8777-777777777770"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "bbd780f734623fbe93ba35b45e4168c34784b54400a08ff132004c75a2c8b5c4",
+      "contractHash": "776c6fac25f7980ea810fb10e93042554e8b8a667d2e583f673af8156d4c93d7",
+      "candidateMac": "sIZbNPLPgqEW1GdsFsy67TXnY6CWMPEFRNXxMdlFD7Q",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.0.identity_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            0,
+            "identity_version"
+          ],
+          "value": 2
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "bb8843255509470df31522abd4b81c16979c9647ff94daabbe79aa922c141d89",
+      "contractHash": "16afff759a576a766c23e46db2707987a71d927ba66c561f8d04ade1be2c2297",
+      "candidateMac": "kpfy1l8hqnTJfK5kdPzYEHAZL2g-AneH8OTql0wI7MQ",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.0.credential_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            0,
+            "credential_version"
+          ],
+          "value": 2
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "dec584c68092483bc042a03ba86a51c150075ee56d1a852e426c4ead58184740",
+      "contractHash": "9e74728fe237facbc57853315983a34cbabcdfe3203f7d51a96a16ae701342d9",
+      "candidateMac": "_hOJgoNoHN7AVesk7h37VBSpA-mptQwEQ8sGAJHoDQQ",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.0.config_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            0,
+            "config_version"
+          ],
+          "value": 4
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "3953d7419a929fa94f67c8f1196860e6c49fa98337f927365c3068843cf09d7e",
+      "contractHash": "e2ba5487e82def7310926b038a136f55a037d3fccab76aac3f6bc95a73725916",
+      "candidateMac": "JZXt_cexkjCbDA60_xx8_BS37589DBZHtJmsZpDqauc",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.0.membership_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            0,
+            "membership_version"
+          ],
+          "value": 3
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "224de9375c1dee2e4a11166069045ece6a1c1dba532ca86f2eb42d2b821a45bc",
+      "contractHash": "c5412359c7b0e5e5d18c2473771826509914d7927f4bc8c0e53824113a580bbf",
+      "candidateMac": "h58C-BfbUITG3JUcUbpxFxDbUfAn-HmoneqdAPMtjxg",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.1.resource_id",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            1,
+            "resource_id"
+          ],
+          "value": "44444444-4444-4444-8444-444444444440"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "4a5b6acd2d390d32fa3df759a575beb2c31f68be23f1acd2e2656721537ad551",
+      "contractHash": "d7506497c664e1f6d81625999fec3d9536f68e9e147917f7a6098eb18e199e27",
+      "candidateMac": "JvIJHbiReuiiupmsRAkGeC2ARdHlGH1GrNyAQfQsXWA",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.1.incarnation",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            1,
+            "incarnation"
+          ],
+          "value": "55555555-5555-4555-8555-555555555550"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "41a7dcafd1a0dada8d430b8c84eff348bdc38c168a200e9afe1bf7a0f5804efd",
+      "contractHash": "dd2e6d0744c3920c6359276db6e544eb379a89f08d362a005f5263976f916030",
+      "candidateMac": "OIpoXat-dTWmx4_N0wAyihQsGBqL-xRTUw-hxcfBLMI",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.1.identity_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            1,
+            "identity_version"
+          ],
+          "value": 2
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "ed68fe2f52cd57b7ae94a6d581d70628ae6947c64128ce42e4da9228737eeaad",
+      "contractHash": "e0c7dade3a996dd5aa28ca88e2fd08d63ab768cf77bdbb8f9f1d61a1295c51bf",
+      "candidateMac": "NDR1JRzSa8o6OVRHPHNDfUVfTDvcEM7q54OlLONwR_M",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.1.credential_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            1,
+            "credential_version"
+          ],
+          "value": 3
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "f390d3cca6b6efe72544ac01ad086b5b4d6242e90e166f18fdfbc7cb819a3fa4",
+      "contractHash": "792eb44ad58ca0f2ae95351db010015e784ecd48ae294a2a7061ffec0f3ef7e6",
+      "candidateMac": "rgA6ihrXl4FQy4wv2z3F7WBA-dFrjNRINbMktXGaQCc",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.1.config_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            1,
+            "config_version"
+          ],
+          "value": 4
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "54424427b9cf85b054accc947959baa65e8bda5d2d0b9c4a9e946532d4864d40",
+      "contractHash": "400e998619d7d6a7c6d4f4c3196cfca407af5b4d7a711fc297b4ffd3f06f076e",
+      "candidateMac": "GVZ3G0BV2NBa9fx8jZYxX5VMv1oepmIFUXy5bsvB0S0",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.targets.1.membership_version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets",
+            1,
+            "membership_version"
+          ],
+          "value": 1
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "ed2d6a53f6d90004764e0f162c5d37fca452e59c07752eccfe5fbc88e5abe52e",
+      "contractHash": "49dfa033fe5fc12147b192864827aba5b4ef566ce9980eb3f598a21cda5426b5",
+      "candidateMac": "sousawI5ThXC0tFrRFvAIQ6TAswb--q0e3L6bwXCp3k",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.version",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "version"
+          ],
+          "value": 8
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "9b9b07c11d9031a50818d22ac7a8c30c588d544996677e1fdcd975a13dfaa116",
+      "contractHash": "cb578e03fef39d2b058a4197e036c9ed14b02144310eb44ebfb32ffc0188380b",
+      "candidateMac": "TirPz8IjKDOemCnG2aajK299ukWkAp0h7f8BCRlhGHA",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.adapter",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "adapter"
+          ],
+          "value": "newapi-token-usage-v1.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "3d6394d13758adfea1fca5562af5bbfe15ca44d5d34b66cb3b1a7eb1e61179e3",
+      "contractHash": "49041cad70c293fe885b1d3b1aadc04dffc243c4dd6b27c9dc2ad065360a27e4",
+      "candidateMac": "O--CrCOw7RCzuvHYVRLg9iW54mtFteJ3BfRcxNdmkHs",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.endpoint",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "endpoint"
+          ],
+          "value": "https://synthetic.invalid/api/usage/token/.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "ca622a54f14baeb382ab2f56e7bdede39eedd684ed39c48f6d39802a440a81bc",
+      "contractHash": "3894f6d1be54c214796eab2dd4c0dc26c1a030ace9720db0ba4c7a79cd3d4a8e",
+      "candidateMac": "i8rlHdsUmv17DBhmfUSMqyW8TGP3bHsSQAY7Iw6rYOQ",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.privateTargets.0",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "privateTargets",
+            0
+          ],
+          "value": "10.0.0.1.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "6214c56c8f067e3047044f220a8faaf90b9ee873ca4a3e4ebc170efdb7c72b43",
+      "contractHash": "45b9b7c03d89ee56cc16d49ee76dca8b9277407d5b8444ef050fa77e7a770f34",
+      "candidateMac": "6k5Je-VI1AifIWTuNMosVFYWHNFm_f7AbJhcIgljwSk",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.privateTargets.1",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "privateTargets",
+            1
+          ],
+          "value": "10.0.0.2.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "270896b0eeb6f434a28759da9ada950e9e7c93dbee1b8d6b8e0fd51369472276",
+      "contractHash": "065c50f123f205da3d2ea417840f5f2c094ca4e1585de74dadb1a396c3c72ef4",
+      "candidateMac": "uO9oA4BUmqx5hYxpzEKCsOpE3qr5CxboI5metoU8MWY",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.timeoutMs",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "timeoutMs"
+          ],
+          "value": 15001
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "7e05657ab2367c6fd1d245421dcf49aad3ae428bc01bf798b0153b09d0e1cdb1",
+      "contractHash": "ee62dcb1c9db37ced9b67d819e16da71f7a54c834d08204ab543c0fb20e36183",
+      "candidateMac": "AVWvt2AGRlqEN-hX6vZ32s32COEMIrA6p1VTOl8i7RM",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.protocolConfirmed",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "protocolConfirmed"
+          ],
+          "value": false
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "38638fed54936265e31de83a9f1c161147d4e96c319bde73396860455a151836",
+      "contractHash": "81f2f0907cfe5b793607bf9ba2dbb54ebdca9c9875ba530af7c67baea0fd14a7",
+      "candidateMac": "A_12Jagpmz3K0cv13bUHZoM12yv7FJhl08uBCj0kLHQ",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.instanceVersion",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "instanceVersion"
+          ],
+          "value": "fixture-pinned-v1.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "8a6e5e70aeff23ff33870e44a9594e1a11274746e79350f4d06a3f63a240d7ca",
+      "contractHash": "ec9763dc6bc309fceadd85c48bb4d39480d10b67499f9b119732fc8b9abc6d7a",
+      "candidateMac": "oHtFTVK028bqlhlxvylQvzgjMbPsCs9Addd8d8ZCsDI",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.auth",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "auth"
+          ],
+          "value": "inference-key-readonly-v1.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "7079c982d0099b48ae17f4be495fb1e7d6497f7da8fa0d737c1b4a8e6ecb7174",
+      "contractHash": "d12ffe92235303dced7296025879d27d75f678808e0483f7c83f71f7efe0758a",
+      "candidateMac": "tIEfBdI2_ymGfad_teEdVV72fLD-9PNt6USCnCnXuXI",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.userID",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "userID"
+          ],
+          "value": ".altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "062491cfd10daaa559de2a90f2df30d73085cd3fd0bc1cc2efcec13548df8341",
+      "contractHash": "bf98e0f3ed437dd8d112081d72fb49046780a286f5a60d4e073ee84983ca2bfb",
+      "candidateMac": "sSRzT-Yr8HAf2d8EaVlMDnZXK781XdwZuK7-QhC0boM",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.accountScope",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "accountScope"
+          ],
+          "value": ".altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "82ec0ef53c252c6cca0119df14b56a545dc2d5362cc64140bd70c833e23d8531",
+      "contractHash": "9158fb7a8a67b3216230158fdfda7abc8cfa943525f28dfecf2e420935f24be3",
+      "candidateMac": "H6sjW7SMqDEzzb_ENqJBujQtZk8OQXb5tlIa3aPlykI",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.nativeUnit",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "nativeUnit"
+          ],
+          "value": "newapi_quota.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "239e2629009eb071b3196ccf6fb32823a06965b72f88d885a31625009e3977ee",
+      "contractHash": "c099bad6216e0c2b08d775e3e113a78c87060e8ed8ae2568255ac192b06ca77d",
+      "candidateMac": "-TxdFvETfrQXuM2dWkhh6WlrFZdEtvrYPOnGcQJrYog",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.conversion.confirmed",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "conversion",
+            "confirmed"
+          ],
+          "value": false
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "2cc710bb120c24b9a72fad6cc15581388538470833e440893343b67e451e80bf",
+      "contractHash": "4911a2aca934452659e5392f59ac92132a220fe0d6a8b3b2690d1d189a2a5e27",
+      "candidateMac": "1q9-Zqgs6Lovxfv-Fuw6lNTKZCsNzNOYRrCjvt_Rk_g",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.conversion.nativeUnit",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "conversion",
+            "nativeUnit"
+          ],
+          "value": "newapi_quota.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "fe8c61c7182ad6431254fce6be9ddf4c876bd2442f6af5029681d51367ea048f",
+      "contractHash": "cdab50ee3b6f57012e4b09ea2ed4dd40b8d386911bf60b5c06fd4c84a82e18a0",
+      "candidateMac": "CLn-6yvO5eR48ux8jr8RZAiUQXg01MdBYarNPYeZ_Ww",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.conversion.currency",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "conversion",
+            "currency"
+          ],
+          "value": "USD.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "a9dbd542ea64a9d1bc8802673b5e2afdde2c259a2984b9cf9b62a574dfa7518b",
+      "contractHash": "b7a14ba47dfcd0c01b507af83cf941957eb8b25b6f00852db992938a0f5f65d9",
+      "candidateMac": "HMxyYfpRFnoG3q_KMF3WvFG3TLbCKTnMQh2JvuMcm7k",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.conversion.moneyPerNativeQuota",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "conversion",
+            "moneyPerNativeQuota"
+          ],
+          "value": "0.000002.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "be7f36b3091d5a7c174f2414b1c4e8e6cc96899fd01c1bd453115a69dd8986d1",
+      "contractHash": "806f361abffa399864b0fd5979872efba918bebc7271aa161641dfaf1c4be41a",
+      "candidateMac": "htpFCzSMsWyHxQZrpYAxhQqSEIZ-__omGo9jSavBCh4",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.conversion.proofReference",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "conversion",
+            "proofReference"
+          ],
+          "value": "synthetic-proof.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "8ddc91444c1d9128d4b6599bb1edc1e2baf6403666d541a9be2da267b85daa05",
+      "contractHash": "024db9b70cfec3f6273502fc3214ded9a343792e233db864525f03f38a43681b",
+      "candidateMac": "a6AFgvrmI2pFcXx_sLBLV1ziqQoxTNO2uWj1ZsUsK_U",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-official.newAPI.conversion.contractVersion",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "newAPI",
+            "conversion",
+            "contractVersion"
+          ],
+          "value": "v1.altered"
+        }
+      ],
+      "encodedBytes": 1114,
+      "challengeHash": "9220317ff276dae690bb2380e6a63342cb99d13379c83f05ab4faeb28b16a05d",
+      "contractHash": "ee90b5b366b50081cdf22563a08aff47edfb7afecf8376c22defe39a07e7ab5f",
+      "candidateMac": "vDbO1tiZLqIBM9QjJU06xVJJ7E-UBW4IU8gqdjj7MQg",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-queryId",
+      "replace": [
+        {
+          "path": [
+            "queryId"
+          ],
+          "value": "88888888-8888-4888-8888-888888888880"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "54d8c8df20e1ab4adce98116c8ecb7d7968aac398c847000637317d5df89104d",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "HV4GTaIrws0mH1fHO2FEBL-4pcUEjdF0NPj9yRnGuuk",
+      "originalMacMatches": false
+    },
+    {
+      "name": "alter-nonce",
+      "replace": [
+        {
+          "path": [
+            "nonce"
+          ],
+          "value": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA"
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "5e3f4e30dbce98fb12129153cfe62f9489cda002906746318a03ffaa1d0f58c3",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "0VSqZi4m-N-6KmSRJMa4-fI23NyDYn9rdeRr08InVXc",
+      "originalMacMatches": false
+    },
+    {
+      "name": "reverse-official.targets",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "targets"
+          ],
+          "value": [
+            {
+              "resource_id": "44444444-4444-4444-8444-444444444444",
+              "incarnation": "55555555-5555-4555-8555-555555555555",
+              "identity_version": 1,
+              "credential_version": 2,
+              "config_version": 3,
+              "membership_version": 0
+            },
+            {
+              "resource_id": "66666666-6666-4666-8666-666666666666",
+              "incarnation": "77777777-7777-4777-8777-777777777777",
+              "identity_version": 1,
+              "credential_version": 0,
+              "config_version": 3,
+              "membership_version": 2
+            }
+          ]
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "7ad898e7f7c337eb764a04fa4344785bcda2edd7fabac3eb77bbebed56683a23",
+      "contractHash": "86135d23d0ad5b81bc214d150971a177d63d58252450a70c9edd934facd4cadd",
+      "candidateMac": "l2NJLbA0SyQEj-GSME5AZEaiBuC5vj_RcVy2CIGDFmc",
+      "originalMacMatches": false
+    },
+    {
+      "name": "reverse-official.privateTargets",
+      "replace": [
+        {
+          "path": [
+            "official",
+            "privateTargets"
+          ],
+          "value": [
+            "10.0.0.2",
+            "10.0.0.1"
+          ]
+        }
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "7f1295fe5eb9751629d8db9885a0da2eebcdbfd6a8ec3afa701d6e5ff3e0ab76",
+      "contractHash": "9b03acfd6b0441c25343e5be73590a36cc08b33584f0ccd23fac08aca294c978",
+      "candidateMac": "PupXECuPiXtO99Kjsmtq7tTLeeac56rwJLx-hW2lY9w",
+      "originalMacMatches": false
+    },
+    {
+      "name": "absent-official.newAPI",
+      "remove": [
+        [
+          "official",
+          "newAPI"
+        ]
+      ],
+      "encodedBytes": 969,
+      "challengeHash": "e260baffbb9c842c3e4bf7ec5f82f387c1bb613db12b3662b3a4363527d10a79",
+      "contractHash": "540bd88f40985cc0910be5b570a9aa5bf056dbe9fff297eb27ebddb54ff77cfd",
+      "candidateMac": "7CnhnlZiH-dw7UwMj1zaz4tb-RQUrr7vcrlUIpHotRo",
+      "originalMacMatches": false
+    },
+    {
+      "name": "absent-official.newAPI.conversion",
+      "remove": [
+        [
+          "official",
+          "newAPI",
+          "conversion"
+        ]
+      ],
+      "encodedBytes": 1045,
+      "challengeHash": "886b08c447baa76dc8cddb238a1c558bfa59d6fab05f581974a3a62c3c5cf159",
+      "contractHash": "1ea5443eaf49c2c10c9d006d21342db38b6f5f4d1eedd8c62337185ee6fe44dc",
+      "candidateMac": "XqxqLFjb7_mqrfajqrse4LTz17euV0MWBtOZtjbE2BE",
+      "originalMacMatches": false
+    },
+    {
+      "name": "absent-empty-optional-strings",
+      "remove": [
+        [
+          "official",
+          "newAPI",
+          "userID"
+        ],
+        [
+          "official",
+          "newAPI",
+          "accountScope"
+        ]
+      ],
+      "encodedBytes": 1106,
+      "challengeHash": "e64a0edecfd968f4754e9cb64e00c2801f1e07c2b8497522d0eb7554b94a4081",
+      "contractHash": "237a6f5e9376959338392fe1e05e013e5f9d3bfe688e0a777efe0d9f7b966a44",
+      "candidateMac": "ZuNRmGgS_Tmr2Ofe5tThtnIsAuUeuyVcEW8a-k_j4m0",
+      "originalMacMatches": true
+    }
+  ],
+  "notes": [
+    "These are codec/MAC-binding vectors, not live Core authority acceptance claims.",
+    "Altered fixed-version/protocol or malformed descriptor vectors can fail semantic validation before MAC comparison.",
+    "Recomputed MAC over caller-supplied Config never certifies Manager persisted CAS; Manager must enforce it locally.",
+    "Actual adapter enum corrected from family shorthand to NewAPITokenUsageV1; official Config is current execution projection, stored historical binding guarded locally by Manager sameAuthority/CAS.",
+    "All base scope/target counters satisfy actual Manager JS-safe ranges, including positive provider credential_version. Codec S(domain), no ASCII+NUL alternative."
+  ]
+}

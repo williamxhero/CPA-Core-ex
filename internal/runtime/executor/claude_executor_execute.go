@@ -31,7 +31,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
-	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
+	url := helps.ClaudeMessagesURL(baseURL)
 	fp := resolveClaudeFingerprintPolicy(e.cfg, auth, apiKey)
 	// Real Claude OAuth always signs CCH. An opted-in API key signs only where
 	// native does, so a third-party gateway keeps a cache-stable billing header.

@@ -99,7 +99,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompatModelAndBaseURL(ctx, "codex executor", body, isCompat, targetModel, baseURL)
 
-	url := strings.TrimSuffix(baseURL, "/") + "/responses"
+	url := helps.AppendInferencePath(baseURL, "/responses")
 	httpReq, upstreamBody, err := e.cacheHelper(ctx, from, url, req, body, auth, opts.Headers)
 	if err != nil {
 		return nil, err
