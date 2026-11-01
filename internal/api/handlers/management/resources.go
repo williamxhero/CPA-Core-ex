@@ -100,7 +100,11 @@ func (h *Handler) ResourceCapabilities(c *gin.Context) {
 	if reason != "" {
 		caps.Reason = reason
 	}
-	c.JSON(http.StatusOK, caps)
+	view := resourceCapabilitiesView{Capabilities: caps}
+	if caps.CredentialQuery != nil {
+		view.CredentialQuery = &credentialQueryCapabilityView{CredentialQueryCapability: *caps.CredentialQuery, SourceBindings: true}
+	}
+	c.JSON(http.StatusOK, view)
 }
 
 // Resources never migrates sources or contacts providers as a side effect of a read.
@@ -178,11 +182,11 @@ func (h *Handler) ResourceBindings(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "resource_inventory_unavailable"})
 		return
 	}
-	bindings := []gin.H{}
+	bindings := []runtimeSourceBinding{}
 	for _, a := range h.authManager.List() {
 		a = h.currentRuntimeSource(a)
 		if a != nil {
-			bindings = append(bindings, gin.H{"scope": a.ResourceIdentity.Scope, "targets": a.ResourceIdentity.Targets, "auth_index": a.Index, "runtime_alias": a.ResourceIdentity.Targets[0].ResourceID})
+			bindings = append(bindings, bindingFromCurrentAuth(a))
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"bindings": bindings})

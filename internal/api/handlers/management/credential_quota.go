@@ -127,43 +127,23 @@ func (h *Handler) quotaPluginConfigEndpoint(ctx context.Context, a *coreauth.Aut
 	return strings.TrimRight(strings.TrimSpace(endpoint), "/")
 }
 
+// quotaSources preserves the private legacy source-only interface. The public
+// view and this wrapper share one builder and the same validation boundaries.
 func (h *Handler) quotaSources(ctx context.Context) ([]resource.QuotaSource, bool) {
-	if h.resourceCatalog == nil || h.resourceModeReason() != "" {
-		return nil, false
-	}
-	snapshot, err := h.resourceCatalog.Snapshot()
-	if err != nil {
-		return nil, false
-	}
-	out := []resource.QuotaSource{}
-	bound := map[string]bool{}
-	for _, a := range h.authManager.List() {
-		a = h.currentRuntimeSource(a)
-		if a != nil {
-			out = append(out, h.quotaSource(ctx, a))
-			for _, t := range a.ResourceIdentity.Targets {
-				bound[t.ResourceID] = true
-			}
-		}
-	}
-	for _, r := range snapshot.Resources {
-		if (r.Kind == "credential" || r.Kind == "provider" && len(r.Members) == 0) && !bound[r.ResourceID] {
-			out = append(out, resource.QuotaSource{Binding: resource.Binding{Scope: snapshot.Version, Targets: []resource.Target{r.Target}}, Protocol: "unavailable", State: "unsupported", Reason: "runtime_binding_unavailable", AccountProvenance: "unverified", ManualDisabled: r.Manual.Disabled})
-		}
-	}
-	return out, true
+	view, ok := h.quotaSourceBindingsView(ctx)
+	return view.Sources, ok
 }
 
 func (h *Handler) CredentialQuotaSources(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
-	sources, ok := h.quotaSources(ctx)
+	view, ok := h.quotaSourceBindingsView(ctx)
 	if !ok {
 		c.JSON(503, gin.H{"error": "resource_inventory_unavailable"})
 		return
 	}
-	c.JSON(200, gin.H{"version": 1, "sources": sources})
+	c.JSON(200, view)
 }
 
 func (h *Handler) selectedQuota(q resource.QuotaQuery) (*coreauth.Auth, bool) {
