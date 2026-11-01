@@ -477,7 +477,13 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 			return auth, fmt.Errorf("codex executor: invalid credential JSON in %s before write: %w", diskPath, errUnmarshal)
 		}
 		mergedDisk := patch.Apply(latestDisk)
-		if errWrite := codexauth.WriteJSONFileAtomic(diskPath, mergedDisk); errWrite != nil {
+		if errWrite := cliproxyauth.CommitNativeRefreshFile(ctx, auth, diskPath, func() error {
+			if err := codexauth.WriteJSONFileAtomic(diskPath, mergedDisk); err != nil {
+				return err
+			}
+			auth.Metadata = mergedDisk
+			return nil
+		}); errWrite != nil {
 			return auth, fmt.Errorf("codex executor: persist refreshed credentials to %s: %w", diskPath, errWrite)
 		}
 		auth.Metadata = mergedDisk

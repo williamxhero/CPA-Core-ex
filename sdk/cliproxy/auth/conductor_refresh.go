@@ -1305,7 +1305,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 
 	base := auth.Clone()
-	updated, err := exec.Refresh(ctx, base.Clone())
+	updated, err := exec.Refresh(m.withOwnedAuthSave(ctx), base.Clone())
 	now := time.Now()
 	if err != nil && errors.Is(err, context.Canceled) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
@@ -1541,7 +1541,11 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	// A successful refresh may have rotated upstream tokens after cancellation.
 	// Commit its result with context values intact; keep epoch checks and save ordering.
-	saved, errUpdate := m.UpdateRefreshedAuth(context.WithoutCancel(ctx), base, updated)
+	refreshCommitCtx := context.WithoutCancel(ctx)
+	if auth.Provider != "codex" || (updated.CodexRefreshPatch != nil && updated.CodexRefreshPatch.UpstreamRefreshed()) {
+		refreshCommitCtx = withNativeRefreshBinding(refreshCommitCtx, base)
+	}
+	saved, errUpdate := m.UpdateRefreshedAuth(refreshCommitCtx, base, updated)
 	if errUpdate != nil {
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)

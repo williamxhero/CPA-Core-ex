@@ -52,7 +52,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 					}
 					auth.Metadata["disabled"] = auth.Disabled
 					NormalizeCredentialMetadata(auth.Metadata)
-					return codex.WriteJSONFileAtomic(path, auth.Metadata)
+					return writeOwnedCodexAuth(ctx, path, auth, auth.Metadata)
 				}
 				return fmt.Errorf("auth filestore: read refresh source failed: %w", errRead)
 			}
@@ -62,7 +62,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 			}
 			merged := auth.CodexRefreshPatch.Apply(diskMap)
 			NormalizeCredentialMetadata(merged)
-			if errWrite := codex.WriteJSONFileAtomic(path, merged); errWrite != nil {
+			if errWrite := writeOwnedCodexAuth(ctx, path, auth, merged); errWrite != nil {
 				return errWrite
 			}
 			auth.Metadata = merged
@@ -86,7 +86,9 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 		if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
 			clonedStorage := *storage
 			clonedStorage.ReplaceCredentials = HasAuthCreationIntent(ctx)
+			clonedStorage.OwnedWrite = func(path string, data map[string]any) error { return writeOwnedCodexAuth(ctx, path, auth, data) }
 			auth.Storage = &clonedStorage
+			defer func() { clonedStorage.OwnedWrite = nil }()
 		}
 		if setter, ok := auth.Storage.(metadataSetter); ok {
 			setter.SetMetadata(auth.Metadata)
@@ -122,7 +124,7 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 			} else if errRead != nil && !os.IsNotExist(errRead) {
 				return fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 			}
-			return codex.WriteJSONFileAtomic(path, auth.Metadata)
+			return writeOwnedCodexAuth(ctx, path, auth, auth.Metadata)
 		})
 		if errLock != nil {
 			return true, errLock
@@ -132,4 +134,16 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 	default:
 		return false, nil
 	}
+}
+
+// Both executor refresh and normal persistence take the Codex file lock before
+// entering the source catalog. Reversing that order would deadlock metadata saves.
+func writeOwnedCodexAuth(ctx context.Context, path string, auth *Auth, data map[string]any) error {
+	return CommitNativeRefreshFile(ctx, auth, path, func() error {
+		if err := codex.WriteJSONFileAtomic(path, data); err != nil {
+			return err
+		}
+		auth.Metadata = data
+		return nil
+	})
 }

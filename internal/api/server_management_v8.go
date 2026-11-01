@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
@@ -15,9 +16,18 @@ func (s *Server) registerManagementV8Routes() {
 	s.engine.POST(prefix+"/oauth/callback", s.managementAvailabilityMiddleware(), s.mgmt.PostOAuthCallbackV8)
 
 	v8 := s.engine.Group(prefix)
-	v8.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
+	v8.Use(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, prefix+"/inference-gates") {
+			c.Header("Cache-Control", "no-store")
+		}
+	}, s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
+	v8.POST("/inference-gates/eligibility", s.mgmt.InferenceGateEligibility)
+	v8.GET("/inference-gates/capabilities", s.mgmt.InferenceGateCapabilities)
+	v8.GET("/inference-gates", s.mgmt.InferenceGates)
+	v8.POST("/inference-gates/operations", s.mgmt.ApplyInferenceGate)
+	v8.GET("/inference-gates/operations/:opId", s.mgmt.InferenceGateOperation)
 	v8.GET("/resource-capabilities", s.mgmt.ResourceCapabilities)
 	v8.GET("/resources", s.mgmt.Resources)
 	v8.GET("/resource-bindings", s.mgmt.ResourceBindings)

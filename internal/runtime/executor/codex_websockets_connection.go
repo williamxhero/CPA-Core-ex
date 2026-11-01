@@ -103,6 +103,9 @@ func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Co
 }
 
 func shouldRetryCodexWebsocketSend(err error) bool {
+	if cliproxyexecutor.IsInferenceAdmissionError(err) {
+		return false
+	}
 	if err == nil {
 		return false
 	}
@@ -311,4 +314,16 @@ func buildCodexResponsesWebsocketURL(httpURL string) (string, error) {
 		return "", fmt.Errorf("codex websockets executor: responses websocket URL host is empty")
 	}
 	return parsed.String(), nil
+}
+
+// The caller supplies a host-owned, execution-local authority. Control frames
+// deliberately use the original writer and remain usable during a pause.
+func writeAdmittedWebsocketPayloadMessage(ctx context.Context, provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+	if err := cliproxyexecutor.AdmitInference(ctx); err != nil {
+		return err
+	}
+	return writeWebsocketPayloadMessage(provider, sess, conn, payload)
+}
+func writeAdmittedCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+	return writeAdmittedWebsocketPayloadMessage(ctx, "codex", sess, conn, payload)
 }

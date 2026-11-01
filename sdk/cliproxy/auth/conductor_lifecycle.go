@@ -339,7 +339,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		}
 	}
 	if mode == updateModeRefresh {
+		hostBinding := auth.ResourceIdentity
 		merged := MergeRefreshedAuth(base, existing, auth)
+		if merged != nil && NativeRefreshBinding(ctx) != nil && hostBinding != nil {
+			merged.ResourceIdentity = hostBinding
+		}
 		if merged != nil {
 			auth = merged
 			NormalizeCredentialMetadata(auth.Metadata)

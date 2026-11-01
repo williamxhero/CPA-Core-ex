@@ -529,6 +529,7 @@ func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string
 		binder := h.identityBinder
 		h.mu.Unlock()
 		if pts, ok := auth.Storage.(*pluginTokenStorage); ok {
+			pts.identityHost = h
 			if writer, okWriter := binder.(coreauth.SourceIdentityWriter); okWriter {
 				pts.identityWriter = writer
 			}
@@ -548,6 +549,7 @@ type pluginTokenStorage struct {
 	rawJSON        []byte
 	meta           map[string]any
 	identityWriter coreauth.SourceIdentityWriter
+	identityHost   *Host
 }
 
 func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
@@ -590,8 +592,15 @@ func (s *pluginTokenStorage) SaveTokenToFile(path string) error {
 	if len(bytes.TrimSpace(payload)) == 0 {
 		return fmt.Errorf("plugin token storage payload is empty")
 	}
-	if s.identityWriter != nil {
-		enrolled, errSave := s.identityWriter.SaveAuthFile(path, payload)
+	writer := s.identityWriter
+	if s.identityHost != nil {
+		s.identityHost.mu.Lock()
+		binder := s.identityHost.identityBinder
+		s.identityHost.mu.Unlock()
+		writer, _ = binder.(coreauth.SourceIdentityWriter)
+	}
+	if writer != nil {
+		enrolled, errSave := writer.SaveAuthFile(path, payload)
 		if errSave != nil {
 			return errSave
 		}

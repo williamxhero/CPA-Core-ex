@@ -14,6 +14,11 @@ import (
 // BindAuths replaces reserved plugin claims with host-issued source evidence.
 // No source migration, upstream request, gate or query is performed here.
 func (c *Catalog) BindAuths(path string, data []byte, auths []*coreauth.Auth) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bindAuthsLocked(path, data, auths)
+}
+func (c *Catalog) bindAuthsLocked(path string, data []byte, auths []*coreauth.Auth) error {
 	for _, a := range auths {
 		if a != nil {
 			a.ResourceIdentity = nil
@@ -22,8 +27,6 @@ func (c *Catalog) BindAuths(path string, data []byte, auths []*coreauth.Auth) er
 			delete(a.Metadata, "resource_id")
 		}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if !c.currentLocked() {
 		return ErrUnavailable
 	}

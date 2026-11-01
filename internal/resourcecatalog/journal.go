@@ -245,6 +245,12 @@ func (c *Catalog) finishPublication(p *publication) error {
 	if err = saveState(c.stateDir, &p.Next); err != nil {
 		return err
 	}
+
+	if p.Next.Gates != nil && p.Next.Gates.Revision > 0 {
+		if err = c.writeFile(c.configPath+".gate-floor-v1", c.gateAnchorBytes(&p.Next)); err != nil {
+			return ErrUnavailable
+		}
+	}
 	if err = os.Remove(filepath.Join(c.stateDir, "journal.json")); err != nil {
 		return ErrUnavailable
 	}
