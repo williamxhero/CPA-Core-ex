@@ -28,7 +28,7 @@ func (h *Handler) SetQuotaNetwork(n credentialquota.NetworkOptions) {
 }
 
 func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.QuotaSource {
-	s := resource.QuotaSource{Binding: *a.ResourceIdentity, AuthIndex: a.Index, State: "unsupported", Reason: "quota_protocol_unverified", AccountProvenance: "unverified", Protocol: "unavailable", ManualDisabled: a.Disabled}
+	s := resource.QuotaSource{Binding: *a.ResourceIdentity, SourceID: a.ID, SubjectID: a.ResourceIdentity.Targets[0].ResourceID, AuthIndex: a.Index, State: "unsupported", Reason: "quota_protocol_unverified", AccountProvenance: "unverified", Protocol: "unavailable", ManualDisabled: a.Disabled}
 	switch {
 	case a.SourcePluginID == "qwen-cliproxyapi":
 		s.State = "needs_configuration"
@@ -194,7 +194,7 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		return
 	}
 	source := h.quotaSource(ctx, a)
-	if q.SourceVersion == "" || source.SourceVersion != q.SourceVersion {
+	if q.SourceID == "" || q.SubjectID == "" || q.SourceID != source.SourceID || q.SubjectID != source.SubjectID || q.SourceVersion == "" || source.SourceVersion != q.SourceVersion {
 		c.JSON(409, gin.H{"error": "source_changed"})
 		return
 	}

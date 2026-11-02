@@ -4,6 +4,8 @@ package resource
 type QuotaSource struct {
 	Binding
 	SourceVersion     string `json:"sourceVersion"`
+	SourceID          string `json:"sourceId"`
+	SubjectID         string `json:"subjectId"`
 	AuthIndex         string `json:"auth_index,omitempty"`
 	Protocol          string `json:"protocol"`
 	State             string `json:"state"`
@@ -15,6 +17,8 @@ type QuotaSource struct {
 type QuotaQuery struct {
 	Binding
 	SourceVersion string `json:"sourceVersion"`
+	SourceID      string `json:"sourceId"`
+	SubjectID     string `json:"subjectId"`
 	AuthIndex     string `json:"auth_index"`
 	TimeoutMS     int64  `json:"timeoutMs,omitempty"`
 }

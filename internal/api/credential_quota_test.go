@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -236,6 +237,25 @@ func quotaSourceFor(t *testing.T, f *inventoryHarness, protocol string) resource
 }
 func queryQuota(t *testing.T, f *inventoryHarness, q resource.QuotaQuery, want int) resource.QuotaObservation {
 	t.Helper()
+	// Successful callers must submit the complete host-issued source binding.
+	// Keep older fixture call sites readable while still exercising the current
+	// production contract: resolve only the exact source selected by auth index
+	// and binding, never by protocol or list position.
+	if q.SourceID == "" || q.SubjectID == "" {
+		var view struct {
+			Sources []resource.QuotaSource `json:"sources"`
+		}
+		if err := json.Unmarshal(f.request("credential-quota/sources", 200), &view); err != nil {
+			t.Fatal(err)
+		}
+		for _, source := range view.Sources {
+			if source.AuthIndex == q.AuthIndex && reflect.DeepEqual(source.Binding, q.Binding) {
+				q.SourceID = source.SourceID
+				q.SubjectID = source.SubjectID
+				break
+			}
+		}
+	}
 	data, _ := json.Marshal(q)
 	req := httptest.NewRequest("POST", "/v8/management/credential-quota/query", strings.NewReader(string(data)))
 	req.RemoteAddr = "127.0.0.1:1234"
@@ -450,7 +470,7 @@ func TestCredentialQuotaLateResultFencedBySourceReplacement(t *testing.T) {
 	}))
 	f := quotaOAuthFixture(t, n)
 	s := quotaSourceFor(t, f, "codex-oauth-wham")
-	data, _ := json.Marshal(resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion, TimeoutMS: 1000})
+	data, _ := json.Marshal(resource.QuotaQuery{Binding: s.Binding, SourceID: s.SourceID, SubjectID: s.SubjectID, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion, TimeoutMS: 1000})
 	req := httptest.NewRequest("POST", "/v8/management/credential-quota/query", bytes.NewReader(data))
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("Authorization", "Bearer test-password")
