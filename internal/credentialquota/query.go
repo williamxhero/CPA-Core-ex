@@ -18,6 +18,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 type NetworkOptions struct {
@@ -52,7 +53,12 @@ func read(ctx context.Context, endpoint, token, account string, n NetworkOptions
 	if err != nil {
 		return nil, "network_error", time.Time{}
 	}
-	defer res.Body.Close()
+	defer func() {
+		if errClose := res.Body.Close(); errClose != nil {
+			// Transport errors can contain credential-bearing URLs; keep the diagnostic fixed.
+			log.WithField("component", "credential_quota").Warn("Failed to close quota response body")
+		}
+	}()
 	if res.StatusCode == 401 || res.StatusCode == 403 {
 		return nil, "auth_error", time.Time{}
 	}
