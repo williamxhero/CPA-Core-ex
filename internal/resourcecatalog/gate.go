@@ -278,6 +278,12 @@ func (c *Catalog) BeginOwnedAuthSave(path string, a *coreauth.Auth) (func(*corea
 		if !continuity || a.ResourceIdentity == nil || len(a.ResourceIdentity.Targets) != 1 || !sameRefreshAuthority(previous.Targets[0], a.ResourceIdentity.Targets[0]) {
 			return nil
 		}
+		// A successful native refresh can leave the persisted source unchanged.
+		// There is no lifecycle transition to certify in that case. Publishing a
+		// self-edge would invalidate unrelated gate CAS operations indefinitely.
+		if reflect.DeepEqual(previous.Targets, a.ResourceIdentity.Targets) {
+			return nil
+		}
 		raw, _ := json.Marshal(c.state)
 		var next diskState
 		_ = json.Unmarshal(raw, &next)
