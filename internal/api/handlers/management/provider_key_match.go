@@ -40,6 +40,10 @@ func (h *Handler) ProviderKeyMatch(c *gin.Context) {
 	}
 	// Close over the complete group, actual Binding, source and native executor
 	// again before issuing either a positive or a negative credential receipt.
+	if c.Request.Context().Err() != nil {
+		providerKeyMatchError(c, 503)
+		return
+	}
 	current, executor, status := h.providerKeyMatchCurrent(c, q)
 	if status != 0 {
 		providerKeyMatchError(c, status)
@@ -81,6 +85,7 @@ func (h *Handler) providerKeyMatchCurrent(c *gin.Context, q providerkeymatch.Req
 		return nil, nil, 503
 	}
 	var selected *coreauth.Auth
+	var selectedExecutor *runtimeexecutor.OpenAICompatExecutor
 	for _, member := range view.Members {
 		a := h.authByIndex(member.AuthIndex)
 		if a == nil {
@@ -94,20 +99,31 @@ func (h *Handler) providerKeyMatchCurrent(c *gin.Context, q providerkeymatch.Req
 		if a == nil || a.Index != member.AuthIndex || !reflect.DeepEqual(*a.ResourceIdentity, member.Binding) || h.quotaSource(c.Request.Context(), a).SourceVersion != member.SourceVersion {
 			return nil, nil, 409
 		}
+		// Source rebinding does not seal compatibility dispatch selectors. Check
+		// every member against actual inference dispatch, not just Provider, and
+		// require agreement with the executor covered by the issued S1 receipt.
+		executor, ok := h.authManager.ExecutorForAuth(a)
+		if !ok {
+			return nil, nil, 503
+		}
+		e, native := executor.(*runtimeexecutor.OpenAICompatExecutor)
+		if !native || e == nil || a.SourcePluginID != "" {
+			return nil, nil, 422
+		}
+		covered, ok := h.authManager.Executor(a.Provider)
+		if !ok {
+			return nil, nil, 503
+		}
+		if covered != e {
+			return nil, nil, 409
+		}
 		if a.Index == q.AuthIndex {
 			selected = a
+			selectedExecutor = e
 		}
 	}
 	if selected == nil {
 		return nil, nil, 409
 	}
-	executor, ok := h.authManager.Executor(selected.Provider)
-	if !ok {
-		return nil, nil, 503
-	}
-	e, native := executor.(*runtimeexecutor.OpenAICompatExecutor)
-	if !native || selected.SourcePluginID != "" {
-		return nil, nil, 422
-	}
-	return selected, e, 0
+	return selected, selectedExecutor, 0
 }

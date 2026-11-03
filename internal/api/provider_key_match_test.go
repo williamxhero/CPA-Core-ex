@@ -401,8 +401,12 @@ func TestProviderKeyMatchPublicOnlineEqualityNotReplayCertificate(t *testing.T) 
 }
 
 func providerKeyMatchRaw(t *testing.T, f *inventoryHarness, body []byte, token string, want int) []byte {
+	return providerKeyMatchRawContext(t, context.Background(), f, body, token, want)
+}
+
+func providerKeyMatchRawContext(t *testing.T, ctx context.Context, f *inventoryHarness, body []byte, token string, want int) []byte {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v8/management/inference-gates/providers/key-match", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v8/management/inference-gates/providers/key-match", bytes.NewReader(body)).WithContext(ctx)
 	req.RemoteAddr = "127.0.0.1:1234"
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

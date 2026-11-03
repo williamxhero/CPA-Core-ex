@@ -53,6 +53,14 @@ and plugin sources are not supported by this slice.
 Missing runtime Bindings and multiple live claimants for an issued child are
 rejected rather than resolving authority by locator or iteration order.
 
+For every member, both the opening and closing validation resolve the executor
+through the auth manager's actual inference dispatch selector, including
+`compat_name` / `provider_key` precedence and canonicalization. The selected
+native executor must agree with the executor covered by the issued routing
+receipt. Missing dispatch, redirected wrappers and a different native executor
+fail closed even if the frozen S1 routing receipt/source revision is unchanged.
+The S1 coverage policy and the wire/HMAC contract are not changed by this check.
+
 Only literal `https://api.deepseek.com` inference bases qualify: optional `/v1`,
 optional final slash, optional explicit default `:443`. Userinfo, query,
 fragment, escaped/other paths, different hosts, and nondefault ports fail
@@ -81,6 +89,10 @@ members, official base variants, unsupported origins, stale and incomplete
 proofs, non-members, forged selected/sibling sources, missing keys, header
 overrides, partial runtime routes, authentication, strict JSON, no mutation,
 and real access/request logging with blocked business/quota egress.
+Public dispatch regressions cover selected and sibling members, missing,
+wrapped and different native executors, both selector attributes, deterministic
+closing drift at the request cancellation boundary, and canonical selector
+controls. All dispatch cases trap business and quota network access.
 
 The candidate's ordinary `cmd/server` binary, commit/SHA-256 pin, offline
 commands, raw RED/GREEN and failed-attempt logs are retained outside this
