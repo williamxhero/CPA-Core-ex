@@ -1,6 +1,12 @@
 package management
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -40,6 +46,39 @@ func TestQwenCLIObservationPreservesAcquisitionTimeAndRejectsStaleData(t *testin
 	response.ObservedAtMS = now.Add(-6 * time.Minute).UnixMilli()
 	if stale := qwenCLIObservation(binding, source, response, true, nil); stale.QueryStatus == "success" || stale.RecoveryEligible {
 		t.Fatalf("stale CLI observation became policy evidence: %+v", stale)
+	}
+}
+
+func TestQwenCLIReceiptBindsCurrentCacheAndLatestAttempt(t *testing.T) {
+	dir := t.TempDir()
+	cache := filepath.Join(dir, "quota.json")
+	cacheBody := []byte(`{"protocol":"qwen-coding-plan-v1"}`)
+	if err := os.WriteFile(cache, cacheBody, 0600); err != nil {
+		t.Fatal(err)
+	}
+	observed := time.Now().UTC().Add(-time.Second).Format(time.RFC3339Nano)
+	digest := sha256.Sum256(cacheBody)
+	receipt, _ := json.Marshal(map[string]any{"version": 1, "state": "success", "observedAt": observed, "cacheSHA256": hex.EncodeToString(digest[:])})
+	if err := os.WriteFile(cache+".attempt.json", receipt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	text := fmt.Sprintf("plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: %s\n      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, %s, --cache-file, %s]\n", filepath.ToSlash(cache), filepath.ToSlash(cache), filepath.ToSlash(cache))
+	cfg, err := config.ParseConfigBytes([]byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandlerWithoutConfigFilePath(cfg, nil)
+	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi"}
+	stamp, _ := time.Parse(time.RFC3339Nano, observed)
+	response := pluginapi.QuotaFetchResponse{ObservedAtMS: stamp.UnixMilli(), Protocol: "qwen-coding-plan-v1", AccountProvenance: "configured_cli_profile", TimestampProvenance: "local_cli_acquisition_time"}
+	if !h.qwenCLIReceiptValid(a, response) {
+		t.Fatal("matching cache receipt was rejected")
+	}
+	if err := os.WriteFile(cache, []byte("changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if h.qwenCLIReceiptValid(a, response) {
+		t.Fatal("changed cache escaped receipt fence")
 	}
 }
 
