@@ -81,6 +81,40 @@ func TestQwenCLIReceiptBindsCurrentCacheAndLatestAttempt(t *testing.T) {
 	if !h.qwenCLIReceiptValid(a, response) {
 		t.Fatal("matching cache receipt was rejected")
 	}
+	for _, tc := range []struct {
+		name                   string
+		cacheSize, receiptSize int
+		want                   bool
+	}{
+		{"cache_at_limit", 4 << 20, 0, true},
+		{"cache_over_limit", (4 << 20) + 1, 0, false},
+		{"receipt_at_limit", 0, 16 << 10, true},
+		{"receipt_over_limit", 0, (16 << 10) + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paddedCache := append([]byte(nil), cacheBody...)
+			if tc.cacheSize > len(paddedCache) {
+				paddedCache = append(paddedCache, []byte(strings.Repeat(" ", tc.cacheSize-len(paddedCache)))...)
+			}
+			digest := sha256.Sum256(paddedCache)
+			receiptBody, err := json.Marshal(map[string]any{"version": 1, "state": "success", "observedAt": observed, "cacheSHA256": hex.EncodeToString(digest[:])})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.receiptSize > len(receiptBody) {
+				receiptBody = append(receiptBody, []byte(strings.Repeat(" ", tc.receiptSize-len(receiptBody)))...)
+			}
+			if err := os.WriteFile(cache, paddedCache, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cache+".attempt.json", receiptBody, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if got := h.qwenCLIReceiptValid(a, response); got != tc.want {
+				t.Fatalf("receipt validation=%v, want %v for cache=%d receipt=%d bytes", got, tc.want, len(paddedCache), len(receiptBody))
+			}
+		})
+	}
 	if err := os.WriteFile(cache, []byte("changed"), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -460,6 +460,30 @@ type qwenCLIAttemptReceipt struct {
 	CacheSHA256 string `json:"cacheSHA256"`
 }
 
+const (
+	qwenCLICacheMaxBytes   = 4 << 20
+	qwenCLIReceiptMaxBytes = 16 << 10
+)
+
+func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("file exceeds %d-byte limit", maxBytes)
+	}
+	return body, nil
+}
+
 // qwenCLIReceiptValid is the host-owned enrollment fence for the existing CLI
 // lane. A successful plugin response is policy-capable only when it matches the
 // configured cache, its atomic latest-attempt receipt, and the selected source.
@@ -468,12 +492,12 @@ func (h *Handler) qwenCLIReceiptValid(a *coreauth.Auth, response pluginapi.Quota
 	if !ok || response.ObservedAtMS <= 0 {
 		return false
 	}
-	cache, err := os.ReadFile(cacheFile)
+	cache, err := readBoundedFile(cacheFile, qwenCLICacheMaxBytes)
 	if err != nil || len(cache) == 0 {
 		return false
 	}
-	receiptBody, err := os.ReadFile(cacheFile + ".attempt.json")
-	if err != nil || len(receiptBody) > 16<<10 {
+	receiptBody, err := readBoundedFile(cacheFile+".attempt.json", qwenCLIReceiptMaxBytes)
+	if err != nil {
 		return false
 	}
 	var receipt qwenCLIAttemptReceipt
