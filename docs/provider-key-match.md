@@ -33,6 +33,14 @@ credential returns HTTP 200 with `matched: false`; it does not establish a
 different account or any monetary conclusion. No response contains a key,
 challenge digest, endpoint, or stable key fingerprint.
 
+This is an online equality check, not a persistent certificate or a replay
+prevention mechanism. Core does not persist/consume nonces: repeating the same
+request may return the same answer while the complete context remains current.
+The caller must generate a fresh nonce and bind its consumption to its own
+current operation; an earlier receipt does not bypass current source checks.
+No anti-replay, credential-acquisition time, or financial freshness claim is
+made by this endpoint.
+
 ## Runtime validation
 
 The whole group must have current complete route coverage. Every runtime
@@ -42,6 +50,8 @@ OpenAI-compatible executor, which resolves the same `base_url` and `api_key`
 attributes as inference. Labels, config indices, group names, and structural
 executor impersonation cannot substitute for this authority. Custom headers
 and plugin sources are not supported by this slice.
+Missing runtime Bindings and multiple live claimants for an issued child are
+rejected rather than resolving authority by locator or iteration order.
 
 Only literal `https://api.deepseek.com` inference bases qualify: optional `/v1`,
 optional final slash, optional explicit default `:443`. Userinfo, query,

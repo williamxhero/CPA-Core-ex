@@ -347,6 +347,59 @@ func TestProviderKeyMatchRejectsBorrowedSiblingBinding(t *testing.T) {
 	providerKeyMatchRaw(t, x.f, mustProviderJSON(t, q), "test-password", 409)
 }
 
+func TestProviderKeyMatchPublicRejectsMissingAndMultipleRuntimeBindings(t *testing.T) {
+	for _, mode := range []string{"missing", "multiple"} {
+		t.Run(mode, func(t *testing.T) {
+			x := newProviderKeyMatchFixture(t, "https://api.deepseek.com")
+			q := providerKeyMatchQuery(t, x, "SYNTHETIC-A1")
+			for _, a := range x.f.manager.List() {
+				if a.Index != q["auth_index"] {
+					continue
+				}
+				if mode == "missing" {
+					// Clearing provenance forces a missing fresh runtime Binding,
+					// even if this auth retained an old issued claim.
+					a.Attributes[coreauth.AttributeSource] = ""
+					if _, err := x.f.manager.Update(coreauth.WithSkipPersist(context.Background()), a); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					// Two live runtime claimants of the same issued child cannot
+					// be reduced to whichever locator happens to be selected.
+					a.ID += "-ambiguous-runtime"
+					a.Index = "ambiguous-runtime-locator"
+					a.Attributes[coreauth.AttributeSource] = "unproven-runtime"
+					if _, err := x.f.manager.Register(coreauth.WithSkipPersist(context.Background()), a); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			want := 409
+			if mode == "multiple" {
+				want = 503
+			}
+			providerKeyMatchRaw(t, x.f, mustProviderJSON(t, q), "test-password", want)
+		})
+	}
+}
+
+func TestProviderKeyMatchPublicOnlineEqualityNotReplayCertificate(t *testing.T) {
+	x := newProviderKeyMatchFixture(t, "https://api.deepseek.com")
+	q := providerKeyMatchQuery(t, x, "SYNTHETIC-A1")
+	body := mustProviderJSON(t, q)
+	first := providerKeyMatchRaw(t, x.f, body, "test-password", 200)
+	if second := providerKeyMatchRaw(t, x.f, body, "test-password", 200); !bytes.Equal(first, second) {
+		t.Fatal("a current online equality read must not invent a consumed-nonce certificate")
+	}
+	for _, a := range x.f.manager.List() {
+		if a.Index == q["auth_index"] {
+			x.f.manager.Remove(context.Background(), a.ID)
+		}
+	}
+	// A previous positive receipt is not authority to skip current validation.
+	providerKeyMatchRaw(t, x.f, body, "test-password", 503)
+}
+
 func providerKeyMatchRaw(t *testing.T, f *inventoryHarness, body []byte, token string, want int) []byte {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v8/management/inference-gates/providers/key-match", bytes.NewReader(body))
