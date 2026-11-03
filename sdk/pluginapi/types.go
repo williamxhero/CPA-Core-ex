@@ -1865,6 +1865,12 @@ type QuotaFetchResponse struct {
 	Summary            []QuotaMetric      `json:"summary,omitempty"`
 	ServerTimeOffsetMs int64              `json:"serverTimeOffsetMs,omitempty"`
 	Groups             []QuotaGroup       `json:"groups,omitempty"`
+	// Optional observation metadata is host-validated for scoped local CLI sources.
+	// It is not an account identifier or an admission acknowledgement.
+	ObservedAtMS        int64  `json:"observedAtMs,omitempty"`
+	TimestampProvenance string `json:"timestampProvenance,omitempty"`
+	Protocol            string `json:"protocol,omitempty"`
+	AccountProvenance   string `json:"accountProvenance,omitempty"`
 }
 
 // UnmarshalJSON supports both camelCase and snake_case field names.

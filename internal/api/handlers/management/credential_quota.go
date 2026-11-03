@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -31,9 +33,15 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 	s := resource.QuotaSource{Binding: *a.ResourceIdentity, SourceID: a.ID, SubjectID: a.ResourceIdentity.Targets[0].ResourceID, AuthIndex: a.Index, State: "unsupported", Reason: "quota_protocol_unverified", AccountProvenance: "unverified", Protocol: "unavailable", ManualDisabled: a.Disabled}
 	switch {
 	case a.SourcePluginID == "qwen-cliproxyapi":
-		s.State = "needs_configuration"
+		s.Protocol = "qwen-coding-plan-cli"
 		s.Reason = "account_authority_unverified"
-		s.Protocol = "qwen-console"
+		if h.qwenCLIConfigured(ctx, a) {
+			s.State = "ready"
+			s.Reason = "configured_cli_source"
+			s.AccountProvenance = "configured_cli_profile"
+		} else {
+			s.State = "needs_configuration"
+		}
 	case a.SourcePluginID == "opencode-go-cliproxyapi":
 		s.Protocol = "opencode-go-usage"
 		s.State = "ready"
@@ -88,13 +96,81 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 	if s.Protocol == "opencode-go-usage" {
 		endpoint = h.quotaPluginEndpoint(ctx, a) + "/usage"
 	}
+	if s.Protocol == "qwen-coding-plan-cli" {
+		endpoint = ""
+	}
 	if s.State != "ready" {
 		endpoint = ""
 	}
-	revision, _ := json.Marshal([]string{s.Protocol, s.State, s.Reason, s.AccountProvenance, endpoint})
+	configRevision := ""
+	if s.Protocol == "qwen-coding-plan-cli" {
+		configRevision = h.qwenCLIRevision(ctx, a)
+	}
+	revision, _ := json.Marshal([]string{s.Protocol, s.State, s.Reason, s.AccountProvenance, endpoint, configRevision})
 	digest := sha256.Sum256(revision)
 	s.SourceVersion = hex.EncodeToString(digest[:])
 	return s
+}
+
+func (h *Handler) qwenCLIRevision(ctx context.Context, a *coreauth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
+	var raw map[string]any
+	_ = cfg.Raw.Decode(&raw)
+	h.mu.Unlock()
+	// Hash only the selected source configuration; the digest is secret-free and
+	// changes when the executable/profile/cache enrollment changes.
+	body, _ := json.Marshal([]any{raw["quota-source"], raw["command"], raw["command-args"], raw["command-timeout"]})
+	digest := sha256.Sum256(body)
+	return hex.EncodeToString(digest[:])
+}
+
+// qwenCLIConfigured is deliberately narrow: the host accepts only the
+// administrator-configured Coding Plan CLI/cache lane, never a default profile
+// or an arbitrary plugin claim. The values are folded into SourceVersion below
+// through the protocol/state projection and the selected resource binding.
+func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool {
+	if a == nil || a.SourcePluginID != "qwen-cliproxyapi" || a.Provider != "qwen" {
+		return false
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
+	var raw map[string]any
+	_ = cfg.Raw.Decode(&raw)
+	h.mu.Unlock()
+	if strings.TrimSpace(fmt.Sprint(raw["quota-source"])) != "command" || strings.TrimSpace(fmt.Sprint(raw["command"])) == "" {
+		return false
+	}
+	args, ok := raw["command-args"].([]any)
+	if !ok || len(args) == 0 {
+		return false
+	}
+	seen := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(fmt.Sprint(args[i]))
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name, value, has := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		if !has && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(fmt.Sprint(args[i+1])), "--") {
+			value = strings.TrimSpace(fmt.Sprint(args[i+1]))
+			i++
+		}
+		seen[name] = value
+	}
+	if seen["source"] != "coding-plan" || seen["protocol"] != "qwen-coding-plan-v1" {
+		return false
+	}
+	if seen["token-file"] != "" || seen["console-site"] != "" || seen["console-region"] != "" {
+		return false
+	}
+	if seen["cache-only"] != "" {
+		return strings.TrimSpace(seen["cache-file"]) != "" && strings.TrimSpace(seen["max-age"]) != ""
+	}
+	return strings.TrimSpace(seen["bl-path"]) != "" && strings.TrimSpace(seen["cache-file"]) != ""
 }
 
 // Resolve the SAME effective endpoint as the known plugin: explicit auth first,
@@ -202,6 +278,9 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 	if source.State == "ready" {
 		if source.Protocol == "codex-oauth-wham" {
 			obs = credentialquota.Codex(ctx, q.Binding, a.Metadata, n)
+		} else if source.Protocol == "qwen-coding-plan-cli" {
+			response, handled, err := host.FetchQuotaByPlugin(ctx, a.SourcePluginID, pluginapi.QuotaFetchRequest{AuthIndex: a.Index, AuthID: a.ID, Provider: a.Provider, Metadata: a.Metadata, Attributes: a.Attributes})
+			obs = qwenCLIObservation(q.Binding, source, response, handled, err)
 		} else {
 			// Both in-process and compiled plugins use this invocation-scoped bridge.
 			// It records only this selected quota request, with no generic HTTP fallback.
@@ -232,4 +311,54 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		obs.TimestampProvenance = "core_attempt_time"
 	}
 	c.JSON(200, obs)
+}
+
+func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, response pluginapi.QuotaFetchResponse, handled bool, fetchErr error) resource.QuotaObservation {
+	now := time.Now()
+	obs := resource.QuotaObservation{Binding: binding, Protocol: source.Protocol, QueryStatus: "network_error", ErrorCode: "qwen_cli_quota_failed", ObservedAtMS: now.UnixMilli(), AccountProvenance: source.AccountProvenance}
+	if !handled || fetchErr != nil || response.Protocol != "qwen-coding-plan-v1" || response.AccountProvenance != "configured_cli_profile" || response.TimestampProvenance != "local_cli_acquisition_time" || response.ObservedAtMS <= 0 || response.ObservedAtMS > now.Add(time.Minute).UnixMilli() || now.Sub(time.UnixMilli(response.ObservedAtMS)) > 5*time.Minute || len(response.Groups) != 1 || len(response.Groups[0].Buckets) != 3 {
+		return obs
+	}
+	seen := map[string]bool{}
+	obs.QueryStatus = "success"
+	obs.ErrorCode = ""
+	obs.TimestampProvenance = response.TimestampProvenance
+	obs.ReceivedAtMS = now.UnixMilli()
+	obs.ObservedAtMS = response.ObservedAtMS
+	obs.Complete = true
+	obs.RecoveryEligible = true
+	for _, bucket := range response.Groups[0].Buckets {
+		if bucket.Window == "" || seen[bucket.Window] || bucket.RemainingFraction < 0 || bucket.RemainingFraction > 1 || math.IsNaN(bucket.RemainingFraction) || math.IsInf(bucket.RemainingFraction, 0) {
+			obs.QueryStatus = "parse_error"
+			obs.ErrorCode = "INVALID_QWEN_QUOTA_WINDOWS"
+			obs.Windows = nil
+			obs.Complete = false
+			obs.RecoveryEligible = false
+			return obs
+		}
+		reset, err := time.Parse(time.RFC3339Nano, bucket.ResetTime)
+		if err != nil || !reset.After(now) {
+			obs.QueryStatus = "parse_error"
+			obs.ErrorCode = "INVALID_QWEN_QUOTA_WINDOWS"
+			obs.Windows = nil
+			obs.Complete = false
+			obs.RecoveryEligible = false
+			return obs
+		}
+		seen[bucket.Window] = true
+		status := "allowed"
+		if bucket.RemainingFraction == 0 {
+			status = "rate-limited"
+			obs.RecoveryEligible = false
+		}
+		obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: bucket.Window, UsedPercent: (1 - bucket.RemainingFraction) * 100, RemainingFraction: bucket.RemainingFraction, ResetAt: bucket.ResetTime, SourceStatus: status})
+	}
+	if !seen["5h"] || !seen["week"] || !seen["billing_month"] {
+		obs.QueryStatus = "parse_error"
+		obs.ErrorCode = "INVALID_QWEN_QUOTA_WINDOWS"
+		obs.Windows = nil
+		obs.Complete = false
+		obs.RecoveryEligible = false
+	}
+	return obs
 }
