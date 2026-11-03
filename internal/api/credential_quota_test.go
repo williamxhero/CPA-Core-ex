@@ -433,7 +433,7 @@ func TestCredentialQuotaUnknownAccountAndManagementTimeout(t *testing.T) {
 
 func TestCredentialQuotaQwenUnverifiedNeverQueries(t *testing.T) {
 	f, calls := pluginInventoryFixture(t)
-	s := quotaSourceFor(t, f, "qwen-console")
+	s := quotaSourceFor(t, f, "qwen-coding-plan-cli")
 	obs := queryQuota(t, f, resource.QuotaQuery{Binding: s.Binding, AuthIndex: s.AuthIndex, SourceVersion: s.SourceVersion}, 200)
 	if obs.QueryStatus != "needs_configuration" || obs.AccountProvenance != "unverified" || obs.RecoveryEligible || len(obs.Windows) != 0 || calls.Load() != 0 {
 		t.Fatalf("unproven console account was queried/recovered: %+v", obs)

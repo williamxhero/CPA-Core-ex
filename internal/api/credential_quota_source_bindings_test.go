@@ -306,7 +306,7 @@ func TestCredentialQuotaSourceBindingsPluginAndUnboundEquivalence(t *testing.T) 
 	}
 	qwen, opencode, unbound := false, false, false
 	for _, s := range view.Sources {
-		if s.Protocol == "qwen-console" {
+		if s.Protocol == "qwen-coding-plan-cli" {
 			qwen = true
 			if s.State != "needs_configuration" {
 				t.Fatal("unverified Qwen account promoted")
