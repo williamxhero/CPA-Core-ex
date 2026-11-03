@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -123,7 +124,33 @@ func (h *Handler) qwenCLIRevision(ctx context.Context, a *coreauth.Auth) string 
 	h.mu.Unlock()
 	// Hash only the selected source configuration; the digest is secret-free and
 	// changes when the executable/profile/cache enrollment changes.
-	body, _ := json.Marshal([]any{raw["quota-source"], raw["command"], raw["command-args"], raw["command-timeout"]})
+	command := fmt.Sprint(raw["command"])
+	blPath := ""
+	if args, ok := raw["command-args"].([]any); ok {
+		for i := 0; i < len(args); i++ {
+			arg := strings.TrimSpace(fmt.Sprint(args[i]))
+			if !strings.HasPrefix(arg, "--") {
+				continue
+			}
+			name, value, has := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+			if !has && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(fmt.Sprint(args[i+1])), "--") {
+				value = strings.TrimSpace(fmt.Sprint(args[i+1]))
+				i++
+			}
+			if name == "bl-path" {
+				blPath = value
+			}
+		}
+	}
+	fileHash := func(path string) string {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return "missing"
+		}
+		digest := sha256.Sum256(body)
+		return hex.EncodeToString(digest[:])
+	}
+	body, _ := json.Marshal([]any{raw["quota-source"], command, raw["command-args"], raw["command-timeout"], fileHash(command), fileHash(blPath)})
 	digest := sha256.Sum256(body)
 	return hex.EncodeToString(digest[:])
 }
@@ -280,6 +307,10 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 			obs = credentialquota.Codex(ctx, q.Binding, a.Metadata, n)
 		} else if source.Protocol == "qwen-coding-plan-cli" {
 			response, handled, err := host.FetchQuotaByPlugin(ctx, a.SourcePluginID, pluginapi.QuotaFetchRequest{AuthIndex: a.Index, AuthID: a.ID, Provider: a.Provider, Metadata: a.Metadata, Attributes: a.Attributes})
+			if handled && err == nil && !h.qwenCLIReceiptValid(a, response) {
+				response = pluginapi.QuotaFetchResponse{}
+				err = fmt.Errorf("qwen CLI cache receipt is not current")
+			}
 			obs = qwenCLIObservation(q.Binding, source, response, handled, err)
 		} else {
 			// Both in-process and compiled plugins use this invocation-scoped bridge.
@@ -315,7 +346,7 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 
 func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, response pluginapi.QuotaFetchResponse, handled bool, fetchErr error) resource.QuotaObservation {
 	now := time.Now()
-	obs := resource.QuotaObservation{Binding: binding, Protocol: source.Protocol, QueryStatus: "network_error", ErrorCode: "qwen_cli_quota_failed", ObservedAtMS: now.UnixMilli(), AccountProvenance: source.AccountProvenance}
+	obs := resource.QuotaObservation{Binding: binding, Protocol: source.Protocol, ProtocolVersion: 1, TimestampProvenance: "local_cli_acquisition_time", ReceivedAtMS: now.UnixMilli(), QueryStatus: "network_error", ErrorCode: "qwen_cli_quota_failed", ObservedAtMS: now.UnixMilli(), AccountProvenance: source.AccountProvenance}
 	if !handled || fetchErr != nil || response.Protocol != "qwen-coding-plan-v1" || response.AccountProvenance != "configured_cli_profile" || response.TimestampProvenance != "local_cli_acquisition_time" || response.ObservedAtMS <= 0 || response.ObservedAtMS > now.Add(time.Minute).UnixMilli() || now.Sub(time.UnixMilli(response.ObservedAtMS)) > 5*time.Minute || len(response.Groups) != 1 || len(response.Groups[0].Buckets) != 3 {
 		return obs
 	}
@@ -351,7 +382,16 @@ func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, r
 			status = "rate-limited"
 			obs.RecoveryEligible = false
 		}
-		obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: bucket.Window, UsedPercent: (1 - bucket.RemainingFraction) * 100, RemainingFraction: bucket.RemainingFraction, ResetAt: bucket.ResetTime, SourceStatus: status})
+		name := map[string]string{"5h": "rolling", "week": "weekly", "billing_month": "monthly"}[bucket.Window]
+		if name == "" {
+			obs.QueryStatus = "parse_error"
+			obs.ErrorCode = "INVALID_QWEN_QUOTA_WINDOWS"
+			obs.Windows = nil
+			obs.Complete = false
+			obs.RecoveryEligible = false
+			return obs
+		}
+		obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: name, UsedPercent: (1 - bucket.RemainingFraction) * 100, RemainingFraction: bucket.RemainingFraction, ResetAt: bucket.ResetTime, SourceStatus: status})
 	}
 	if !seen["5h"] || !seen["week"] || !seen["billing_month"] {
 		obs.QueryStatus = "parse_error"
@@ -361,4 +401,69 @@ func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, r
 		obs.RecoveryEligible = false
 	}
 	return obs
+}
+
+type qwenCLIAttemptReceipt struct {
+	Version     int    `json:"version"`
+	State       string `json:"state"`
+	ObservedAt  string `json:"observedAt"`
+	CacheSHA256 string `json:"cacheSHA256"`
+}
+
+// qwenCLIReceiptValid is the host-owned enrollment fence for the existing CLI
+// lane. A successful plugin response is policy-capable only when it matches the
+// configured cache, its atomic latest-attempt receipt, and the selected source.
+func (h *Handler) qwenCLIReceiptValid(a *coreauth.Auth, response pluginapi.QuotaFetchResponse) bool {
+	cacheFile, ok := h.qwenCLICacheFile(a)
+	if !ok || response.ObservedAtMS <= 0 {
+		return false
+	}
+	cache, err := os.ReadFile(cacheFile)
+	if err != nil || len(cache) == 0 {
+		return false
+	}
+	receiptBody, err := os.ReadFile(cacheFile + ".attempt.json")
+	if err != nil || len(receiptBody) > 16<<10 {
+		return false
+	}
+	var receipt qwenCLIAttemptReceipt
+	if json.Unmarshal(receiptBody, &receipt) != nil || receipt.Version != 1 || receipt.State != "success" || len(receipt.CacheSHA256) != 64 {
+		return false
+	}
+	hash := sha256.Sum256(cache)
+	if !strings.EqualFold(hex.EncodeToString(hash[:]), receipt.CacheSHA256) {
+		return false
+	}
+	observed, err := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
+	return err == nil && observed.UnixMilli() == response.ObservedAtMS && response.TimestampProvenance == "local_cli_acquisition_time" && response.Protocol == "qwen-coding-plan-v1" && response.AccountProvenance == "configured_cli_profile"
+}
+
+func (h *Handler) qwenCLICacheFile(a *coreauth.Auth) (string, bool) {
+	if a == nil {
+		return "", false
+	}
+	h.mu.Lock()
+	cfg := h.cfg.Plugins.Configs[a.SourcePluginID]
+	var raw map[string]any
+	_ = cfg.Raw.Decode(&raw)
+	h.mu.Unlock()
+	args, ok := raw["command-args"].([]any)
+	if !ok {
+		return "", false
+	}
+	for i := 0; i < len(args); i++ {
+		arg := strings.TrimSpace(fmt.Sprint(args[i]))
+		if !strings.HasPrefix(arg, "--") {
+			continue
+		}
+		name, value, has := strings.Cut(strings.TrimPrefix(arg, "--"), "=")
+		if !has && i+1 < len(args) && !strings.HasPrefix(strings.TrimSpace(fmt.Sprint(args[i+1])), "--") {
+			value = strings.TrimSpace(fmt.Sprint(args[i+1]))
+			i++
+		}
+		if name == "cache-file" && value != "" {
+			return value, true
+		}
+	}
+	return "", false
 }
