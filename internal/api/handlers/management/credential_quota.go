@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"reflect"
@@ -150,7 +151,13 @@ func (h *Handler) qwenCLIRevision(ctx context.Context, a *coreauth.Auth) string 
 		digest := sha256.Sum256(body)
 		return hex.EncodeToString(digest[:])
 	}
-	body, _ := json.Marshal([]any{raw["quota-source"], command, raw["command-args"], raw["command-timeout"], fileHash(command), fileHash(blPath)})
+	var targetIDs []string
+	if a.ResourceIdentity != nil {
+		for _, target := range a.ResourceIdentity.Targets {
+			targetIDs = append(targetIDs, target.ResourceID)
+		}
+	}
+	body, _ := json.Marshal([]any{raw["quota-source"], command, raw["command-args"], raw["command-timeout"], raw["quota-resource-ids"], targetIDs, fileHash(command), fileHash(blPath)})
 	digest := sha256.Sum256(body)
 	return hex.EncodeToString(digest[:])
 }
@@ -169,6 +176,9 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 	_ = cfg.Raw.Decode(&raw)
 	h.mu.Unlock()
 	if strings.TrimSpace(fmt.Sprint(raw["quota-source"])) != "command" || strings.TrimSpace(fmt.Sprint(raw["command"])) == "" {
+		return false
+	}
+	if a.ResourceIdentity == nil || len(a.ResourceIdentity.Targets) == 0 || !qwenTargetEnrolled(raw["quota-resource-ids"], a.ResourceIdentity.Targets[0].ResourceID) {
 		return false
 	}
 	args, ok := raw["command-args"].([]any)
@@ -202,6 +212,19 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 		return strings.TrimSpace(seen["cache-file"]) != "" && strings.TrimSpace(seen["max-age"]) != ""
 	}
 	return strings.TrimSpace(seen["bl-path"]) != "" && strings.TrimSpace(seen["cache-file"]) != ""
+}
+
+func qwenTargetEnrolled(raw any, resourceID string) bool {
+	ids, ok := raw.([]any)
+	if !ok || resourceID == "" {
+		return false
+	}
+	for _, id := range ids {
+		if strings.TrimSpace(fmt.Sprint(id)) == resourceID {
+			return true
+		}
+	}
+	return false
 }
 
 // Resolve the SAME effective endpoint as the known plugin: explicit auth first,
@@ -439,7 +462,44 @@ func (h *Handler) qwenCLIReceiptValid(a *coreauth.Auth, response pluginapi.Quota
 		return false
 	}
 	observed, err := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
-	return err == nil && observed.UnixMilli() == response.ObservedAtMS && response.TimestampProvenance == "local_cli_acquisition_time" && response.Protocol == "qwen-coding-plan-v1" && response.AccountProvenance == "configured_cli_profile"
+	return err == nil && observed.UnixMilli() == response.ObservedAtMS && response.TimestampProvenance == "local_cli_acquisition_time" && response.Protocol == "qwen-coding-plan-v1" && response.AccountProvenance == "configured_cli_profile" && qwenCacheMatchesResponse(cache, response)
+}
+
+func qwenCacheMatchesResponse(cache []byte, response pluginapi.QuotaFetchResponse) bool {
+	var saved struct {
+		Protocol    string `json:"protocol"`
+		Product     string `json:"product"`
+		QueryStatus string `json:"queryStatus"`
+		Windows     []struct {
+			Window    string `json:"window"`
+			Used      string `json:"used"`
+			Total     string `json:"total"`
+			ResetTime string `json:"resetTime"`
+		} `json:"windows"`
+	}
+	if json.Unmarshal(cache, &saved) != nil || saved.Protocol != "qwen-coding-plan-v1" || saved.Product != "coding-plan" || saved.QueryStatus != "success" || len(saved.Windows) != 3 || len(response.Groups) != 1 || len(response.Groups[0].Buckets) != 3 {
+		return false
+	}
+	for _, savedWindow := range saved.Windows {
+		used, okUsed := new(big.Int).SetString(savedWindow.Used, 10)
+		total, okTotal := new(big.Int).SetString(savedWindow.Total, 10)
+		if !okUsed || !okTotal || total.Sign() <= 0 || used.Cmp(total) > 0 {
+			return false
+		}
+		difference := new(big.Int).Sub(new(big.Int).Set(total), used)
+		want, _ := new(big.Float).SetPrec(256).SetRat(new(big.Rat).SetFrac(difference, total)).Float64()
+		matched := false
+		for _, bucket := range response.Groups[0].Buckets {
+			if bucket.Window == savedWindow.Window && bucket.ResetTime == savedWindow.ResetTime && math.Abs(bucket.RemainingFraction-want) <= 1e-12 {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) qwenCLICacheFile(a *coreauth.Auth) (string, bool) {
