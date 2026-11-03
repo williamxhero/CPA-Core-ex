@@ -513,7 +513,7 @@ func qwenCacheMatchesResponse(cache []byte, response pluginapi.QuotaFetchRespons
 		want, _ := new(big.Float).SetPrec(256).SetRat(new(big.Rat).SetFrac(difference, total)).Float64()
 		matched := false
 		for _, bucket := range response.Groups[0].Buckets {
-			if bucket.Window == savedWindow.Window && bucket.ResetTime == savedWindow.ResetTime && math.Abs(bucket.RemainingFraction-want) <= 1e-15 {
+			if bucket.Window == savedWindow.Window && bucket.ResetTime == savedWindow.ResetTime && bucket.RemainingFraction == want {
 				matched = true
 				break
 			}
