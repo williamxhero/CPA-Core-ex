@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ import (
 func TestQwenCLIConfiguredRequiresExplicitCodingPlanCLIConfiguration(t *testing.T) {
 	cfg := testConfigForQwenCLI(t, "      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, C:/bl.cmd, --cache-file, C:/quota.json]\n")
 	h := NewHandlerWithoutConfigFilePath(cfg, nil)
-	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "test-resource"}}}}
+	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "test-resource", IdentityVersion: 1, CredentialVersion: 2, ConfigVersion: 3, MembershipVersion: 4}}}}
 	if !h.qwenCLIConfigured(nil, a) {
 		t.Fatal("explicit Coding Plan CLI configuration was not accepted")
 	}
@@ -27,6 +28,11 @@ func TestQwenCLIConfiguredRequiresExplicitCodingPlanCLIConfiguration(t *testing.
 	h = NewHandlerWithoutConfigFilePath(cfg, nil)
 	if h.qwenCLIConfigured(nil, a) {
 		t.Fatal("legacy Token Plan source was accepted as Coding Plan")
+	}
+	cfg = testConfigForQwenCLI(t, "      quota-resource-bindings: [{resource-id: test-resource, identity-version: 9, credential-version: 2, config-version: 3, membership-version: 4}]\n      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, C:/bl.cmd, --cache-file, C:/quota.json]\n")
+	h = NewHandlerWithoutConfigFilePath(cfg, nil)
+	if h.qwenCLIConfigured(nil, a) {
+		t.Fatal("stale identity binding was accepted")
 	}
 }
 
@@ -63,13 +69,13 @@ func TestQwenCLIReceiptBindsCurrentCacheAndLatestAttempt(t *testing.T) {
 	if err := os.WriteFile(cache+".attempt.json", receipt, 0600); err != nil {
 		t.Fatal(err)
 	}
-	text := fmt.Sprintf("plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: %s\n      quota-resource-ids: [receipt-resource]\n      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, %s, --cache-file, %s]\n", filepath.ToSlash(cache), filepath.ToSlash(cache), filepath.ToSlash(cache))
+	text := fmt.Sprintf("plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: %s\n      quota-resource-bindings: [{resource-id: receipt-resource, identity-version: 1, credential-version: 2, config-version: 3, membership-version: 4}]\n      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, %s, --cache-file, %s]\n", filepath.ToSlash(cache), filepath.ToSlash(cache), filepath.ToSlash(cache))
 	cfg, err := config.ParseConfigBytes([]byte(text))
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := NewHandlerWithoutConfigFilePath(cfg, nil)
-	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "receipt-resource"}}}}
+	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "receipt-resource", IdentityVersion: 1, CredentialVersion: 2, ConfigVersion: 3, MembershipVersion: 4}}}}
 	stamp, _ := time.Parse(time.RFC3339Nano, observed)
 	response := pluginapi.QuotaFetchResponse{ObservedAtMS: stamp.UnixMilli(), Protocol: "qwen-coding-plan-v1", AccountProvenance: "configured_cli_profile", TimestampProvenance: "local_cli_acquisition_time", Groups: []pluginapi.QuotaGroup{{Buckets: []pluginapi.QuotaBucket{{Window: "5h", RemainingFraction: .8, ResetTime: reset}, {Window: "week", RemainingFraction: .7, ResetTime: reset}, {Window: "billing_month", RemainingFraction: .6, ResetTime: reset}}}}}
 	if !h.qwenCLIReceiptValid(a, response) {
@@ -85,7 +91,11 @@ func TestQwenCLIReceiptBindsCurrentCacheAndLatestAttempt(t *testing.T) {
 
 func testConfigForQwenCLI(t *testing.T, args string) *config.Config {
 	t.Helper()
-	text := "plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: bl.cmd\n      quota-resource-ids: [test-resource]\n" + args
+	enrollment := "      quota-resource-bindings: [{resource-id: test-resource, identity-version: 1, credential-version: 2, config-version: 3, membership-version: 4}]\n"
+	if strings.Contains(args, "quota-resource-bindings:") {
+		enrollment = ""
+	}
+	text := "plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: bl.cmd\n" + enrollment + args
 	cfg, err := config.ParseConfigBytes([]byte(text))
 	if err != nil {
 		t.Fatal(err)

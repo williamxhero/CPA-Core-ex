@@ -151,13 +151,11 @@ func (h *Handler) qwenCLIRevision(ctx context.Context, a *coreauth.Auth) string 
 		digest := sha256.Sum256(body)
 		return hex.EncodeToString(digest[:])
 	}
-	var targetIDs []string
+	var targets []resource.Target
 	if a.ResourceIdentity != nil {
-		for _, target := range a.ResourceIdentity.Targets {
-			targetIDs = append(targetIDs, target.ResourceID)
-		}
+		targets = append(targets, a.ResourceIdentity.Targets...)
 	}
-	body, _ := json.Marshal([]any{raw["quota-source"], command, raw["command-args"], raw["command-timeout"], raw["quota-resource-ids"], targetIDs, fileHash(command), fileHash(blPath)})
+	body, _ := json.Marshal([]any{raw["quota-source"], command, raw["command-args"], raw["command-timeout"], raw["quota-resource-bindings"], targets, fileHash(command), fileHash(blPath)})
 	digest := sha256.Sum256(body)
 	return hex.EncodeToString(digest[:])
 }
@@ -178,7 +176,7 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 	if strings.TrimSpace(fmt.Sprint(raw["quota-source"])) != "command" || strings.TrimSpace(fmt.Sprint(raw["command"])) == "" {
 		return false
 	}
-	if a.ResourceIdentity == nil || len(a.ResourceIdentity.Targets) == 0 || !qwenTargetEnrolled(raw["quota-resource-ids"], a.ResourceIdentity.Targets[0].ResourceID) {
+	if a.ResourceIdentity == nil || len(a.ResourceIdentity.Targets) == 0 || !qwenTargetEnrolled(raw["quota-resource-bindings"], a.ResourceIdentity.Targets) {
 		return false
 	}
 	args, ok := raw["command-args"].([]any)
@@ -217,17 +215,39 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 	return strings.TrimSpace(seen["bl-path"]) != "" && strings.TrimSpace(seen["cache-file"]) != ""
 }
 
-func qwenTargetEnrolled(raw any, resourceID string) bool {
-	ids, ok := raw.([]any)
-	if !ok || resourceID == "" {
+func qwenTargetEnrolled(raw any, targets []resource.Target) bool {
+	if len(targets) == 0 {
 		return false
 	}
-	for _, id := range ids {
-		if strings.TrimSpace(fmt.Sprint(id)) == resourceID {
-			return true
+	body, err := json.Marshal(raw)
+	if err != nil {
+		return false
+	}
+	var enrolled []qwenResourceBinding
+	if json.Unmarshal(body, &enrolled) != nil || len(enrolled) == 0 {
+		return false
+	}
+	for _, target := range targets {
+		matched := false
+		for _, candidate := range enrolled {
+			if candidate.ResourceID == target.ResourceID && candidate.IdentityVersion == target.IdentityVersion && candidate.CredentialVersion == target.CredentialVersion && candidate.ConfigVersion == target.ConfigVersion && candidate.MembershipVersion == target.MembershipVersion {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+type qwenResourceBinding struct {
+	ResourceID        string `json:"resource-id"`
+	IdentityVersion   uint64 `json:"identity-version"`
+	CredentialVersion uint64 `json:"credential-version"`
+	ConfigVersion     uint64 `json:"config-version"`
+	MembershipVersion uint64 `json:"membership-version"`
 }
 
 // Resolve the SAME effective endpoint as the known plugin: explicit auth first,
@@ -493,7 +513,7 @@ func qwenCacheMatchesResponse(cache []byte, response pluginapi.QuotaFetchRespons
 		want, _ := new(big.Float).SetPrec(256).SetRat(new(big.Rat).SetFrac(difference, total)).Float64()
 		matched := false
 		for _, bucket := range response.Groups[0].Buckets {
-			if bucket.Window == savedWindow.Window && bucket.ResetTime == savedWindow.ResetTime && math.Abs(bucket.RemainingFraction-want) <= 1e-12 {
+			if bucket.Window == savedWindow.Window && bucket.ResetTime == savedWindow.ResetTime && math.Abs(bucket.RemainingFraction-want) <= 1e-15 {
 				matched = true
 				break
 			}
