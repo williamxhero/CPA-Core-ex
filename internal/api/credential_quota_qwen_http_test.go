@@ -165,4 +165,40 @@ func TestQwenCLIHTTPEnrollmentPreservesCurrentCredentialGenerations(t *testing.T
 	if after.State != "ready" || after.AccountProvenance != "configured_cli_profile" || before.SourceVersion == after.SourceVersion {
 		t.Fatalf("exact enrollment did not produce a new configured source revision: %+v", after)
 	}
+	// The production file store adds disabled:false on the first successful
+	// inference save. This default materialization must not revoke enrollment;
+	// a real manual disable must still rotate the configuration generation.
+	authPath := filepath.Join(f.authDir, after.SourceID)
+	raw, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authFile map[string]any
+	if err := json.Unmarshal(raw, &authFile); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := authFile["disabled"]; present {
+		t.Fatal("fixture must start with the implicit enabled default")
+	}
+	for _, disabled := range []bool{false, true} {
+		authFile["disabled"] = disabled
+		body, err := json.Marshal(authFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(authPath, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.watcher.ReconcileResourceInventory(); err != nil {
+			t.Fatal(err)
+		}
+		current := qwenHTTPSourceForIndex(t, f, after.AuthIndex)
+		if !disabled {
+			if !reflect.DeepEqual(after.Targets, current.Targets) || after.SourceVersion != current.SourceVersion || current.State != "ready" {
+				t.Fatalf("materializing disabled:false revoked current enrollment: before=%+v after=%+v", after, current)
+			}
+		} else if reflect.DeepEqual(after.Targets, current.Targets) || current.State == "ready" {
+			t.Fatalf("manual disable escaped target-generation fence: %+v", current)
+		}
+	}
 }

@@ -122,6 +122,14 @@ func rowSeals(key []byte, r *sourceRow) (string, string, error) {
 	// them. Query-source revisions still fence enrollment edits independently.
 	queryEnrollment := r.plugin && r.row.Family == "qwen"
 	conf := nodeValue(r.node, map[string]bool{r.marker: true, "keys": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
+	// The file store materializes the runtime default disabled:false on the
+	// first save. Treat omitted and explicit false as the same configuration;
+	// an explicit true still remains in the seal and rotates the generation.
+	if queryEnrollment && r.file.json {
+		if disabled, ok := conf["disabled"].(bool); ok && !disabled {
+			delete(conf, "disabled")
+		}
+	}
 	if r.plugin {
 		ids := []string{}
 		for _, related := range r.projections {
