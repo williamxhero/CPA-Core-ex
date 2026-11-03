@@ -118,7 +118,10 @@ func effectiveConfigCredentials(r *sourceRow) (map[string]any, error) {
 }
 
 func rowSeals(key []byte, r *sourceRow) (string, string, error) {
-	conf := nodeValue(r.node, map[string]bool{r.marker: true, "keys": true, "api-keys": true})
+	// Qwen quota enrollment refers to these generations; it cannot itself rotate
+	// them. Query-source revisions still fence enrollment edits independently.
+	queryEnrollment := r.plugin && r.row.Family == "qwen"
+	conf := nodeValue(r.node, map[string]bool{r.marker: true, "keys": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
 	if r.plugin {
 		ids := []string{}
 		for _, related := range r.projections {
@@ -127,12 +130,12 @@ func rowSeals(key []byte, r *sourceRow) (string, string, error) {
 		conf["host-source-bindings"] = ids
 		conf["host-binding-state"] = r.row.BindingState
 		if r.file.json {
-			conf["host-plugin-config"] = nodeValue(r.pluginConfig, map[string]bool{"resource-id": true, "api-keys": true})
+			conf["host-plugin-config"] = nodeValue(r.pluginConfig, map[string]bool{"resource-id": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
 		}
 	}
 	var parent any
 	if r.parent != nil {
-		parent = nodeValue(r.parent.node, map[string]bool{"resource-id": true, "keys": true, "api-keys": true})
+		parent = nodeValue(r.parent.node, map[string]bool{"resource-id": true, "keys": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
 	}
 	var credentials map[string]any
 	if r.plugin {
