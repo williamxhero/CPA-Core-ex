@@ -96,7 +96,8 @@ func (c *Catalog) bindingLocked(b *resource.Binding) bool {
 }
 
 func ValidGateOperation(op resource.GateOperation) bool {
-	return op.Version == 1 && validID(op.OpID) && op.Subject == "credential" && (op.Action == "pause" || op.Action == "clear") && gateReference.MatchString(op.Owner) && gateReference.MatchString(op.Reason) && gateReference.MatchString(op.EvidenceID) && len(op.Model) <= 256 && (op.Model == "" || gateReference.MatchString(op.Model)) && validSeal(op.SourceVersion) && op.AuthIndex != "" && len(op.AuthIndex) <= 256 && len(op.Targets) > 0 && len(op.Targets) <= 64
+	subjectValid := (op.Subject == "credential" && op.AuthIndex != "" && len(op.AuthIndex) <= 256) || (op.Subject == "provider" && op.AuthIndex == "")
+	return op.Version == 1 && validID(op.OpID) && subjectValid && (op.Action == "pause" || op.Action == "clear") && gateReference.MatchString(op.Owner) && gateReference.MatchString(op.Reason) && gateReference.MatchString(op.EvidenceID) && len(op.Model) <= 256 && (op.Model == "" || gateReference.MatchString(op.Model)) && validSeal(op.SourceVersion) && len(op.Targets) > 0 && len(op.Targets) <= 64
 }
 
 func (c *Catalog) GateState() (resource.GateState, error) {
@@ -131,7 +132,17 @@ func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, err
 		}
 		return saved.Result, nil
 	}
-	if !c.bindingLocked(&op.Binding) {
+	targets := op.Targets
+	if op.Subject == "provider" {
+		if !ValidGateOperation(op) {
+			return resource.GateResult{}, ErrConflict
+		}
+		binding, err := c.providerGateBindingLocked(op.Binding)
+		if err != nil {
+			return resource.GateResult{}, err
+		}
+		targets = binding.Targets
+	} else if op.Subject != "credential" || !c.bindingLocked(&op.Binding) {
 		return resource.GateResult{}, ErrConflict
 	}
 	if op.ExpectedRevision != c.state.Gates.Revision {
@@ -145,17 +156,26 @@ func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, err
 	_ = json.Unmarshal(raw, &next)
 	ledger := next.Gates
 	ledger.Revision++
-	// Matching is owner/model/issued target group, never a manual or health flag.
+	// Provider reconciliation replaces only its own stable parent lineage.
+	// Credential matching remains the original issued lifecycle group.
 	filtered := []resource.Gate{}
 	for _, g := range ledger.Gates {
-		if g.Owner == op.Owner && g.Model == op.Model && sameGateSubjects(g.Targets, op.Targets) {
+		matching := g.Subject != "provider" && op.Subject == "credential" && sameGateSubjects(g.Targets, targets)
+		if g.Subject == "provider" && op.Subject == "provider" && len(g.Targets) > 0 {
+			matching = sameProviderLineage(g.Targets[0], targets[0])
+		}
+		if g.Owner == op.Owner && g.Model == op.Model && matching {
 			continue
 		}
 		filtered = append(filtered, g)
 	}
 	ledger.Gates = filtered
 	if op.Action == "pause" {
-		ledger.Gates = append(ledger.Gates, resource.Gate{Targets: op.Targets, Owner: op.Owner, Model: op.Model, Reason: op.Reason, EvidenceID: op.EvidenceID, SourceVersion: op.SourceVersion, Revision: ledger.Revision})
+		subject := ""
+		if op.Subject == "provider" {
+			subject = "provider"
+		}
+		ledger.Gates = append(ledger.Gates, resource.Gate{Subject: subject, Targets: append([]resource.Target(nil), targets...), Owner: op.Owner, Model: op.Model, Reason: op.Reason, EvidenceID: op.EvidenceID, SourceVersion: op.SourceVersion, Revision: ledger.Revision})
 	}
 	result := resource.GateResult{Version: 1, OpID: op.OpID, Status: "applied", Revision: ledger.Revision, DurableRevision: ledger.Revision, AppliedRevision: ledger.Revision, Durable: true, Applied: true}
 	ledger.Operations[op.OpID] = gateReceipt{Operation: op, Result: result}
@@ -212,8 +232,22 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		}
 		return ErrConflict
 	}
+	parents, err := c.providerParentsLocked(b)
+	if err != nil {
+		return err
+	}
 	for _, g := range c.state.Gates.Gates {
 		if g.Model != "" && g.Model != model {
+			continue
+		}
+		if g.Subject == "provider" {
+			applies, err := c.providerGateAppliesLocked(g, parents, b)
+			if err != nil {
+				return err
+			}
+			if applies {
+				return ErrGateDenied
+			}
 			continue
 		}
 		for _, gt := range g.Targets {
@@ -321,6 +355,12 @@ func sameGateLifecycle(a, b resource.Target) bool {
 
 func (c *Catalog) gateLifecyclesCurrentLocked(gates []resource.Gate) bool {
 	for _, g := range gates {
+		if g.Subject == "provider" {
+			if _, err := c.providerGateBindingLocked(resource.Binding{Scope: c.versionLocked(), Targets: g.Targets}); err != nil {
+				return false
+			}
+			continue
+		}
 		for _, t := range g.Targets {
 			r := c.state.Records[t.ResourceID]
 			if r == nil || r.Deleted || r.Blocked || !sameGateLifecycle(t, r.Target) {
@@ -374,7 +414,17 @@ func (c *Catalog) GateBindingReady(b *resource.Binding) error {
 	if !c.bindingLocked(b) {
 		return ErrConflict
 	}
+	parents, err := c.providerParentsLocked(b)
+	if err != nil {
+		return err
+	}
 	for _, g := range c.state.Gates.Gates {
+		if g.Subject == "provider" {
+			if _, err := c.providerGateAppliesLocked(g, parents, b); err != nil {
+				return err
+			}
+			continue
+		}
 		for _, old := range g.Targets {
 			for _, t := range b.Targets {
 				if old.ResourceID == t.ResourceID && !sameGateLifecycle(old, t) {

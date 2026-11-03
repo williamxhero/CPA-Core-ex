@@ -29,7 +29,7 @@ func (h *Handler) InferenceGateCapabilities(c *gin.Context) {
 			}
 		}
 	}
-	c.JSON(200, gin.H{"version": 1, "ready": false, "durable": durable, "applied": false, "gateRevision": revision, "reason": reason, "mode": "standalone", "subjects": []string{"credential"}, "modelScoped": false, "routes": []gin.H{{"route": "all-current", "supported": false, "reason": reason}}})
+	c.JSON(200, gin.H{"version": 1, "ready": false, "durable": durable, "applied": false, "gateRevision": revision, "reason": reason, "mode": "standalone", "subjects": []string{"credential", "provider"}, "modelScoped": false, "routes": []gin.H{{"route": "all-current", "supported": false, "reason": reason}}})
 }
 func (h *Handler) InferenceGates(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
@@ -92,24 +92,21 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "gate_unavailable"})
 		return
 	}
-	a, ok := h.selectedQuota(resource.QuotaQuery{Binding: op.Binding, AuthIndex: op.AuthIndex})
-	if !ok || h.quotaSource(c.Request.Context(), a).SourceVersion != op.SourceVersion {
-		c.JSON(409, gin.H{"error": "gate_conflict"})
-		return
-	}
-
-	supported, _, routes := h.gateSourceCoverage(c.Request.Context(), a)
-	for _, route := range routes {
-		if route["supported"] != true {
-			supported = false
+	if op.Subject == "provider" {
+		view, err := h.currentProviderGate(c.Request.Context(), op.Binding)
+		if err != nil {
+			providerGateError(c, err)
+			return
 		}
-	}
-	if !supported {
-		c.JSON(503, gin.H{"error": "gate_route_unavailable"})
-		return
-	}
-	if h.resourceCatalog.GateBindingReady(a.ResourceIdentity) != nil {
-		c.JSON(409, gin.H{"error": "gate_conflict"})
+		if view.SourceVersion != op.SourceVersion {
+			c.JSON(409, gin.H{"error": "gate_conflict"})
+			return
+		}
+		if !view.Ready || !view.Supported {
+			c.JSON(503, gin.H{"error": "gate_route_unavailable"})
+			return
+		}
+	} else if !h.credentialGateOperationReady(c, op) {
 		return
 	}
 	result, err = h.resourceCatalog.ApplyGate(op)
@@ -130,6 +127,30 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 		return
 	}
 	c.JSON(200, result)
+}
+
+func (h *Handler) credentialGateOperationReady(c *gin.Context, op resource.GateOperation) bool {
+	a, ok := h.selectedQuota(resource.QuotaQuery{Binding: op.Binding, AuthIndex: op.AuthIndex})
+	if !ok || h.quotaSource(c.Request.Context(), a).SourceVersion != op.SourceVersion {
+		c.JSON(409, gin.H{"error": "gate_conflict"})
+		return false
+	}
+
+	supported, _, routes := h.gateSourceCoverage(c.Request.Context(), a)
+	for _, route := range routes {
+		if route["supported"] != true {
+			supported = false
+		}
+	}
+	if !supported {
+		c.JSON(503, gin.H{"error": "gate_route_unavailable"})
+		return false
+	}
+	if h.resourceCatalog.GateBindingReady(a.ResourceIdentity) != nil {
+		c.JSON(409, gin.H{"error": "gate_conflict"})
+		return false
+	}
+	return true
 }
 
 // InferenceGateEligibility reads current source authority without changing intent.

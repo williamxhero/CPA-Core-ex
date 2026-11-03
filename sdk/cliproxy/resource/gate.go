@@ -37,6 +37,8 @@ type Gate struct {
 	EvidenceID    string   `json:"evidenceId"`
 	SourceVersion string   `json:"sourceVersion"`
 	Revision      uint64   `json:"gateRevision"`
+	// Subject is omitted for legacy credential rows to preserve ledger seals.
+	Subject string `json:"subject,omitempty"`
 }
 
 type GateState struct {
