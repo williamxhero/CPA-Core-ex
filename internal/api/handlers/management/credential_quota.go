@@ -209,7 +209,10 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 		return false
 	}
 	if cacheOnlyPresent {
-		return strings.TrimSpace(seen["cache-file"]) != "" && strings.TrimSpace(seen["max-age"]) != ""
+		value := strings.TrimSpace(strings.ToLower(seen["cache-only"]))
+		if value == "" || value == "true" {
+			return strings.TrimSpace(seen["cache-file"]) != "" && strings.TrimSpace(seen["max-age"]) != ""
+		}
 	}
 	return strings.TrimSpace(seen["bl-path"]) != "" && strings.TrimSpace(seen["cache-file"]) != ""
 }
