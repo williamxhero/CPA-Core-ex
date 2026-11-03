@@ -176,6 +176,7 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 		return false
 	}
 	seen := map[string]string{}
+	cacheOnlyPresent := false
 	for i := 0; i < len(args); i++ {
 		arg := strings.TrimSpace(fmt.Sprint(args[i]))
 		if !strings.HasPrefix(arg, "--") {
@@ -187,6 +188,9 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 			i++
 		}
 		seen[name] = value
+		if name == "cache-only" {
+			cacheOnlyPresent = true
+		}
 	}
 	if seen["source"] != "coding-plan" || seen["protocol"] != "qwen-coding-plan-v1" {
 		return false
@@ -194,7 +198,7 @@ func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool 
 	if seen["token-file"] != "" || seen["console-site"] != "" || seen["console-region"] != "" {
 		return false
 	}
-	if seen["cache-only"] != "" {
+	if cacheOnlyPresent {
 		return strings.TrimSpace(seen["cache-file"]) != "" && strings.TrimSpace(seen["max-age"]) != ""
 	}
 	return strings.TrimSpace(seen["bl-path"]) != "" && strings.TrimSpace(seen["cache-file"]) != ""
