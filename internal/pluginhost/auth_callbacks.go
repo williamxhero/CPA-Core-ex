@@ -507,6 +507,11 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 			if pref, ok := metadata["prefix"].(string); ok && auth.Prefix == "" {
 				auth.Prefix = strings.Trim(strings.TrimSpace(pref), "/")
 			}
+			if len(out) == 1 {
+				if alias, ok := coreauth.ExplicitCredentialLabel(metadata); ok {
+					auth.Label = alias
+				}
+			}
 			if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 				return nil, fmt.Errorf("invalid auth weight: %w", errWeight)
 			}
@@ -530,6 +535,9 @@ func (h *Host) buildAuthsFromFileData(ctx context.Context, path string, data []b
 	label := provider
 	if email, ok := metadata["email"].(string); ok && strings.TrimSpace(email) != "" {
 		label = strings.TrimSpace(email)
+	}
+	if alias, ok := coreauth.ExplicitCredentialLabel(metadata); ok {
+		label = alias
 	}
 	authID := defaultAuthID
 	existing := h.findExistingAuthForSave(authID, path, true)

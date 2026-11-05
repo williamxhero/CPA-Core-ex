@@ -1,5 +1,24 @@
 package auth
 
+import "strings"
+
+// ExplicitCredentialLabel returns the alias stored on a credential file.
+// An empty or whitespace-only label is not an alias.
+func ExplicitCredentialLabel(metadata map[string]any) (string, bool) {
+	if metadata == nil {
+		return "", false
+	}
+	raw, ok := metadata["label"].(string)
+	if !ok {
+		return "", false
+	}
+	label := strings.TrimSpace(raw)
+	if label == "" {
+		return "", false
+	}
+	return label, true
+}
+
 // CanonicalCredentialMetadataKey returns the canonical snake_case name for
 // credential metadata keys that previously also accepted config-style aliases.
 func CanonicalCredentialMetadataKey(key string) string {

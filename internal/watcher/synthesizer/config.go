@@ -79,6 +79,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(ctx *SynthesisContext, en
 	out := make([]*coreauth.Auth, 0, len(entries))
 	for i := range entries {
 		entry := entries[i]
+		if entry.AutoHeld {
+			continue
+		}
 		key := strings.TrimSpace(entry.APIKey)
 		base := strings.TrimSpace(entry.BaseURL)
 		if key == "" && base == "" {
@@ -142,6 +145,9 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 	out := make([]*coreauth.Auth, 0, len(cfg.ClaudeKey))
 	for i := range cfg.ClaudeKey {
 		ck := cfg.ClaudeKey[i]
+		if ck.AutoHeld {
+			continue
+		}
 		key := strings.TrimSpace(ck.APIKey)
 		base := strings.TrimSpace(ck.BaseURL)
 		if key == "" && base == "" {
@@ -227,6 +233,9 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(ctx *SynthesisContext, entr
 	out := make([]*coreauth.Auth, 0, len(entries))
 	for i := range entries {
 		entry := entries[i]
+		if entry.AutoHeld {
+			continue
+		}
 		key := strings.TrimSpace(entry.APIKey)
 		baseURL := strings.TrimSpace(entry.BaseURL)
 		if key == "" && baseURL == "" {
@@ -416,6 +425,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0, len(cfg.VertexCompatAPIKey))
 	for i := range cfg.VertexCompatAPIKey {
 		compat := &cfg.VertexCompatAPIKey[i]
+		if compat.AutoHeld {
+			continue
+		}
 		providerName := "vertex"
 		base := strings.TrimSpace(compat.BaseURL)
 

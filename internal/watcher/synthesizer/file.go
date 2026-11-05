@@ -170,6 +170,11 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) (o
 				if pref, ok := metadata["prefix"].(string); ok && auth.Prefix == "" {
 					auth.Prefix = strings.Trim(strings.TrimSpace(pref), "/")
 				}
+				if len(auths) == 1 {
+					if alias, ok := coreauth.ExplicitCredentialLabel(metadata); ok {
+						auth.Label = alias
+					}
+				}
 				if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 					return nil, fmt.Errorf("invalid plugin auth weight in %s: %w", filepath.Base(fullPath), errWeight)
 				}
@@ -195,6 +200,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) (o
 	label := provider
 	if email, _ := metadata["email"].(string); email != "" {
 		label = email
+	}
+	if alias, ok := coreauth.ExplicitCredentialLabel(metadata); ok {
+		label = alias
 	}
 	// Use relative path under authDir as ID to stay consistent with the file-based token store.
 	id := fullPath

@@ -22,6 +22,9 @@ type VertexCompatKey struct {
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
+	// AutoHeld is the automatic quota stop. It does not change manual enablement.
+	AutoHeld bool `yaml:"auto-held,omitempty" json:"auto-held,omitempty"`
+
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
 	Weight *int `yaml:"weight,omitempty" json:"weight,omitempty"`

@@ -136,6 +136,37 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_ExplicitLabelAheadOfEmail(t *testing.T) {
+	tempDir := t.TempDir()
+	authData := map[string]any{
+		"type":  "codex",
+		"email": "person@example.com",
+		"label": " OAI-WXH ",
+	}
+	data, errMarshal := json.Marshal(authData)
+	if errMarshal != nil {
+		t.Fatalf("marshal auth: %v", errMarshal)
+	}
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0644); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("synthesize: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if auths[0].Label != "OAI-WXH" {
+		t.Fatalf("label = %q, want alias", auths[0].Label)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_LegacyKimiFingerprintProfile(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{

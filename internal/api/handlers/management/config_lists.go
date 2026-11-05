@@ -204,6 +204,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
+		AutoHeld            *bool                            `json:"auto-held"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -265,6 +266,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -410,6 +414,7 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
+		AutoHeld            *bool                            `json:"auto-held"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -472,6 +477,9 @@ func (h *Handler) PatchInteractionsKey(c *gin.Context) {
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -652,6 +660,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey                  *string                          `json:"api-key"`
 		Priority                *int                             `json:"priority"`
+		AutoHeld                *bool                            `json:"auto-held"`
 		FingerprintProfile      *string                          `json:"fingerprint-profile"`
 		Weight                  json.RawMessage                  `json:"weight"`
 		Prefix                  *string                          `json:"prefix"`
@@ -1077,6 +1086,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
 		Priority       *int                        `json:"priority"`
+		AutoHeld       *bool                       `json:"auto-held"`
 		Weight         json.RawMessage             `json:"weight"`
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
@@ -1132,6 +1142,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1565,6 +1578,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey               *string                          `json:"api-key"`
 		Priority             *int                             `json:"priority"`
+		AutoHeld             *bool                            `json:"auto-held"`
 		Weight               json.RawMessage                  `json:"weight"`
 		Prefix               *string                          `json:"prefix"`
 		BaseURL              *string                          `json:"base-url"`
@@ -1614,6 +1628,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1767,6 +1784,7 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 	type xaiKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
+		AutoHeld            *bool                            `json:"auto-held"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -1815,6 +1833,9 @@ func (h *Handler) PatchXAIKey(c *gin.Context) {
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
@@ -1965,6 +1986,7 @@ func (h *Handler) PatchMetaKey(c *gin.Context) {
 	type metaKeyPatch struct {
 		APIKey              *string                          `json:"api-key"`
 		Priority            *int                             `json:"priority"`
+		AutoHeld            *bool                            `json:"auto-held"`
 		Weight              json.RawMessage                  `json:"weight"`
 		Prefix              *string                          `json:"prefix"`
 		BaseURL             *string                          `json:"base-url"`
@@ -2012,6 +2034,9 @@ func (h *Handler) PatchMetaKey(c *gin.Context) {
 	}
 	if body.Value.Priority != nil {
 		entry.Priority = *body.Value.Priority
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if len(body.Value.Weight) > 0 {
 		weight, errWeight := parseCredentialWeightPatch(body.Value.Weight)
