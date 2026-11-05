@@ -32,6 +32,15 @@ type QuotaWindow struct {
 	SourceStatus      string  `json:"sourceStatus,omitempty"`
 }
 
+// QuotaCredits is the Codex wallet observed with the same usage read.
+// It is absent when that read did not include a credits object.
+type QuotaCredits struct {
+	HasCredits          bool   `json:"hasCredits"`
+	Unlimited           bool   `json:"unlimited"`
+	Balance             string `json:"balance,omitempty"`
+	OverageLimitReached bool   `json:"overageLimitReached"`
+}
+
 // QuotaObservation never includes account IDs, tokens, raw responses or gate ACKs.
 type QuotaObservation struct {
 	Binding
@@ -44,6 +53,7 @@ type QuotaObservation struct {
 	ErrorCode           string        `json:"errorCode,omitempty"`
 	ObservedAtMS        int64         `json:"observedAtMs"`
 	Windows             []QuotaWindow `json:"windows,omitempty"`
+	Credits             *QuotaCredits `json:"credits,omitempty"`
 	Complete            bool          `json:"complete"`
 	AccountProvenance   string        `json:"accountProvenance"`
 	RecoveryEligible    bool          `json:"recoveryEligible"`

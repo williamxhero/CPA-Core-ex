@@ -171,9 +171,52 @@ func Codex(ctx context.Context, b resource.Binding, metadata map[string]any, n N
 		obs.Windows = nil
 		obs.Complete = false
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
+	} else {
+		obs.Credits = codexCreditsFromUsage(data)
 	}
 	freshWindows(&obs)
 	return obs
+}
+
+func codexCreditsFromUsage(data []byte) *resource.QuotaCredits {
+	var root struct {
+		Credits *struct {
+			HasCredits *bool           `json:"has_credits"`
+			Unlimited  *bool           `json:"unlimited"`
+			Balance    json.RawMessage `json:"balance"`
+			Overage    *bool           `json:"overage_limit_reached"`
+		} `json:"credits"`
+	}
+	if json.Unmarshal(data, &root) != nil || root.Credits == nil {
+		return nil
+	}
+	out := &resource.QuotaCredits{}
+	if root.Credits.HasCredits != nil {
+		out.HasCredits = *root.Credits.HasCredits
+	}
+	if root.Credits.Unlimited != nil {
+		out.Unlimited = *root.Credits.Unlimited
+	}
+	if root.Credits.Overage != nil {
+		out.OverageLimitReached = *root.Credits.Overage
+	}
+	out.Balance = creditBalanceText(root.Credits.Balance)
+	return out
+}
+
+func creditBalanceText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return strings.TrimSpace(text)
+	}
+	var number json.Number
+	if json.Unmarshal(raw, &number) == nil {
+		return number.String()
+	}
+	return ""
 }
 
 type codexWindow struct {
