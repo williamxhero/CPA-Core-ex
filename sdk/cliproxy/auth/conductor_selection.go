@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -1461,6 +1462,10 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if isRequestInvalidError(err) || isRequestStopError(err) {
 		return 0, false
 	}
+	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
+	if hiddenRetry && defaultRequestRetry < clienterror.HiddenClientRetryMinimum {
+		defaultRequestRetry = clienterror.HiddenClientRetryMinimum
+	}
 	if m.HomeEnabled() {
 		var cooldownErr *homeDispatchRetryAfterError
 		if errors.As(err, &cooldownErr) && cooldownErr != nil {
@@ -1486,6 +1491,15 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 		return 0, true
 	}
 	if m.HomeEnabled() {
+		if hiddenRetry {
+			limit := homeRetryLimit
+			if limit < clienterror.HiddenClientRetryMinimum {
+				limit = clienterror.HiddenClientRetryMinimum
+			}
+			if attempt < limit {
+				return 0, true
+			}
+		}
 		if status != http.StatusTooManyRequests || !m.homeRetryAllowed(attempt, homeRetryLimit) {
 			return 0, false
 		}
@@ -1579,6 +1593,9 @@ func isCredentialRetryRoundStatus(status int) bool {
 func isRequestRetryRoundError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if clienterror.IsHiddenClientRetry(err.Error()) {
+		return true
 	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)
 }

@@ -54,7 +54,7 @@ func newOpenAICompatibilityRegistrationCacheForConfig(cfg *config.Config) *openA
 	}
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
+		if compat.Disabled || compat.AutoHeld {
 			continue
 		}
 		compatName := strings.TrimSpace(compat.Name)
@@ -127,7 +127,7 @@ func (s *Service) hasNativeOpenAICompatExecutorConfig(a *coreauth.Auth, provider
 
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
+		if compat.Disabled || compat.AutoHeld {
 			continue
 		}
 		name := strings.ToLower(strings.TrimSpace(compat.Name))

@@ -2935,6 +2935,9 @@ func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if clienterror.IsHiddenClientRetry(err.Error()) {
+		return false
+	}
 	if isStreamTruncatedError(err) {
 		// A truncated accepted stream must stop here: the generation was
 		// already submitted and must not be replayed on another credential.

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -37,6 +38,31 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 	}
 	if !strings.HasPrefix(errMsg, "IP banned due to too many failed attempts. Try again in") {
 		t.Fatalf("unexpected banned message: %q", errMsg)
+	}
+}
+
+func TestAuthenticateManagementKey_DisableIPBanClearsExistingBan(t *testing.T) {
+	h := &Handler{
+		cfg: &config.Config{RemoteManagement: config.RemoteManagement{DisableIPBan: true}},
+		failedAttempts: map[string]*attemptInfo{
+			"127.0.0.1": {count: 0, blockedUntil: time.Now().Add(30 * time.Minute)},
+		},
+		envSecret: "test-secret",
+	}
+
+	allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret")
+	if !allowed || statusCode != 0 || errMsg != "" {
+		t.Fatalf("disabled ban rejected a valid key: allowed=%t status=%d msg=%q", allowed, statusCode, errMsg)
+	}
+	if len(h.failedAttempts) != 0 {
+		t.Fatalf("existing bans were not cleared: %#v", h.failedAttempts)
+	}
+
+	for i := 0; i < 6; i++ {
+		allowed, statusCode, errMsg = h.AuthenticateManagementKey("127.0.0.1", true, "wrong-secret")
+		if allowed || statusCode != http.StatusUnauthorized || errMsg != "invalid management key" {
+			t.Fatalf("attempt %d = allowed=%t status=%d msg=%q", i+1, allowed, statusCode, errMsg)
+		}
 	}
 }
 

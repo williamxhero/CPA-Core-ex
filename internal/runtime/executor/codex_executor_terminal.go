@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -732,6 +733,9 @@ func newCodexBootstrapOverloadErr(body []byte) statusErr {
 // Only these failures justify replacing the whole attempt during bootstrap; every other terminal
 // failure keeps the original in-stream delivery semantics so downstream behaviour is unchanged.
 func isCodexOverloadBootstrapFailure(body []byte) bool {
+	if clienterror.IsHiddenClientRetry(string(body)) {
+		return true
+	}
 	if isCodexTransientCapacityError(body) {
 		return true
 	}

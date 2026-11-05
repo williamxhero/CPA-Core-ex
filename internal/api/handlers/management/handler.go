@@ -384,9 +384,11 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote bool
 		secretHash  string
 	)
+	disableIPBan := false
 	if cfg != nil {
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
+		disableIPBan = cfg.RemoteManagement.DisableIPBan
 	}
 	h.mu.Unlock()
 	if h.allowRemoteOverride {
@@ -396,24 +398,34 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 
 	now := time.Now()
 	h.attemptsMu.Lock()
-	ai := h.failedAttempts[clientIP]
-	if ai != nil && !ai.blockedUntil.IsZero() {
-		if now.Before(ai.blockedUntil) {
-			remaining := ai.blockedUntil.Sub(now).Round(time.Second)
-			h.attemptsMu.Unlock()
-			return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+	if disableIPBan {
+		for ip := range h.failedAttempts {
+			delete(h.failedAttempts, ip)
 		}
-		// Ban expired, reset state
-		ai.blockedUntil = time.Time{}
-		ai.count = 0
+		h.attemptsMu.Unlock()
+	} else {
+		ai := h.failedAttempts[clientIP]
+		if ai != nil && !ai.blockedUntil.IsZero() {
+			if now.Before(ai.blockedUntil) {
+				remaining := ai.blockedUntil.Sub(now).Round(time.Second)
+				h.attemptsMu.Unlock()
+				return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+			}
+			// Ban expired, reset state
+			ai.blockedUntil = time.Time{}
+			ai.count = 0
+		}
+		h.attemptsMu.Unlock()
 	}
-	h.attemptsMu.Unlock()
 
 	if !localClient && !allowRemote {
 		return false, http.StatusForbidden, "remote management disabled"
 	}
 
 	fail := func() {
+		if disableIPBan {
+			return
+		}
 		h.attemptsMu.Lock()
 		aip := h.failedAttempts[clientIP]
 		if aip == nil {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -420,7 +421,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 				reporter.PublishFailure(ctx, wsErr)
-				if timeoutReached {
+				if timeoutReached && !clienterror.IsHiddenClientRetry(wsErr.Error()) {
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap error after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 					bootstrapTerminalErr = wsErr
 					break
@@ -439,7 +440,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				overloadFailover := isCodexOverloadBootstrapFailure(terminalBody)
 				usageLimitFailover := isCodexUsageLimitError(terminalBody)
 				failoverPending := overloadFailover || usageLimitFailover
-				if failoverPending && timeoutReached {
+				if failoverPending && timeoutReached && !clienterror.IsHiddenClientRetry(string(terminalBody)) {
 					failoverPending = false
 					helps.LogWithRequestID(ctx).Debugf("codex websockets executor: bootstrap overload rejection after %d messages read / %v, time budget exhausted; delivering in-stream", bufferedFrames, timeSinceStart)
 				}

@@ -909,6 +909,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Priority              *int                                `json:"priority"`
 		Prefix                *string                             `json:"prefix"`
 		Disabled              *bool                               `json:"disabled"`
+		AutoHeld              *bool                               `json:"auto-held"`
 		DisableCooling        json.RawMessage                     `json:"disable-cooling"`
 		BaseURL               *string                             `json:"base-url"`
 		APIKeyEntries         *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
@@ -960,6 +961,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 	if body.Value.Disabled != nil {
 		entry.Disabled = *body.Value.Disabled
+	}
+	if body.Value.AutoHeld != nil {
+		entry.AutoHeld = *body.Value.AutoHeld
 	}
 	if !applyDisableCoolingPatch(c, body.Value.DisableCooling, &entry.DisableCooling) {
 		return

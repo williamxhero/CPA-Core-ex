@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/grokbuild"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -254,7 +255,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if isCodexOverloadBootstrapFailure(terminalBody) {
 						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 						timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
-						if !timeoutReached {
+						if !timeoutReached || clienterror.IsHiddenClientRetry(string(terminalBody)) {
 							// Transient capacity rejection smuggled into an HTTP 200 stream. Fail the
 							// attempt before the downstream headers are committed so the conductor can
 							// transparently retry on another credential, and report the status the

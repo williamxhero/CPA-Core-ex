@@ -25,6 +25,9 @@ type NetworkOptions struct {
 	RootCAs     *x509.CertPool
 	LookupIP    func(context.Context, string) ([]net.IPAddr, error)
 	DialContext func(context.Context, string, string) (net.Conn, error)
+	// RecoverLookup runs only when every system answer is in 198.18.0.0/15.
+	// Nil uses DNS-over-HTTPS to a pinned resolver. It cannot receive credentials.
+	RecoverLookup func(context.Context, string) ([]net.IPAddr, error)
 }
 type QueryTarget struct {
 	EndpointURL    string

@@ -299,7 +299,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled {
+		if compat.Disabled || compat.AutoHeld {
 			continue
 		}
 		prefix := strings.TrimSpace(compat.Prefix)

@@ -425,6 +425,8 @@ type DiscoveryConfig struct {
 type RemoteManagement struct {
 	// AllowRemote toggles remote (non-localhost) access to management API.
 	AllowRemote bool `yaml:"allow-remote"`
+	// DisableIPBan turns off the management-key failure counter and clears any active IP ban.
+	DisableIPBan bool `yaml:"disable-ip-ban"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
@@ -974,6 +976,9 @@ type OpenAICompatibility struct {
 
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// AutoHeld is the automatic quota stop. It does not change Disabled.
+	AutoHeld bool `yaml:"auto-held,omitempty" json:"auto-held,omitempty"`
 
 	// Prefix optionally namespaces model aliases for this provider (e.g., "teamA/kimi-k2").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`

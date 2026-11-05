@@ -6,6 +6,7 @@ import "net/netip"
 // IsGlobalUnicast includes deprecated/site-local and IPv4 transition addresses.
 // RFC6052/RFC8215 translation and 6to4/Teredo are unsupported, even with a
 // private permit. IPv4-mapped literals are normalized before all policy checks.
+var fakeIPPrefix = netip.MustParsePrefix("198.18.0.0/15")
 var forbiddenV4 = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
 	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("192.0.2.0/24"),
