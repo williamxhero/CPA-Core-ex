@@ -390,21 +390,23 @@ func responsesWebsocketErrorStatus(errMsg *interfaces.ErrorMessage) int {
 // shouldExposeResponsesUpstreamError reports whether a terminal upstream error
 // must reach the downstream client.
 //
-// Request-shape failures and terminal capacity rejections are exposed. Capacity
-// errors arrive here only after internal failover is exhausted or output has
-// committed; a silent disconnect must not suggest replaying an accepted tool call.
-// Credential, quota and transport failures stay silent so the client reconnects;
-// a fresh connection carries no server-side transcript, so reconnecting already
-// implies a full context resend.
+// Request-shape failures are exposed. Capacity sentences such as
+// "Selected model is at capacity" stay inside CPA and are not written to the
+// client. Credential, quota and transport failures stay silent so the client
+// reconnects; a fresh connection carries no server-side transcript, so
+// reconnecting already implies a full context resend.
 func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if errMsg == nil {
+		return false
+	}
+	if errMsg.Error != nil && clienterror.IsHiddenClientRetry(errMsg.Error.Error()) {
 		return false
 	}
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
 	if isResponsesCapacityError(errMsg) {
-		return true
+		return false
 	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }

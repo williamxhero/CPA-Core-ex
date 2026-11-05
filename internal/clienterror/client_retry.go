@@ -1,10 +1,21 @@
 package clienterror
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // HiddenClientRetryMinimum is the number of additional attempts CPA makes for
 // upstream failures that must not be returned to the client on the first hit.
 const HiddenClientRetryMinimum = 2
+
+// HiddenClientRetryExtra is how many further rounds CPA keeps after the
+// configured request-retry budget, including rounds that max-retry-interval
+// would otherwise hand back to the client.
+const HiddenClientRetryExtra = 30
+
+// HiddenClientRetryGap is the pause between those extra rounds.
+const HiddenClientRetryGap = time.Second
 
 // IsHiddenClientRetry reports upstream failures CPA retries itself.
 // The client sees them only after those attempts are exhausted.

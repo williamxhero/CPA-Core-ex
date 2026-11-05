@@ -2747,6 +2747,11 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 		{name: "payment required", status: http.StatusPaymentRequired, body: "insufficient credits"},
 		{name: "forbidden", status: http.StatusForbidden, body: "forbidden"},
 		{name: "too many requests", status: http.StatusTooManyRequests, body: "usage limit reached"},
+		{
+			name:   "selected model at capacity stays inside CPA",
+			status: http.StatusServiceUnavailable,
+			body:   `{"error":{"message":"Selected model is at capacity. Please try a different model."}}`,
+		},
 		{name: "request timeout", status: http.StatusRequestTimeout, body: "timeout"},
 		{name: "bad gateway", status: http.StatusBadGateway, body: "bad gateway"},
 		{

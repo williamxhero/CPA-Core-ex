@@ -1456,15 +1456,21 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 		return 0, false
 	}
 	status := statusCodeFromError(err)
-	if status == http.StatusOK {
+	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
+	if status == http.StatusOK && !hiddenRetry {
 		return 0, false
 	}
 	if isRequestInvalidError(err) || isRequestStopError(err) {
 		return 0, false
 	}
-	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
 	if hiddenRetry && defaultRequestRetry < clienterror.HiddenClientRetryMinimum {
 		defaultRequestRetry = clienterror.HiddenClientRetryMinimum
+	}
+	giveUp := func() (time.Duration, bool) {
+		if hiddenRetry && attempt >= 0 && attempt < defaultRequestRetry+clienterror.HiddenClientRetryExtra {
+			return clienterror.HiddenClientRetryGap, true
+		}
+		return 0, false
 	}
 	if m.HomeEnabled() {
 		var cooldownErr *homeDispatchRetryAfterError
@@ -1475,14 +1481,14 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	var exhausted *homeRetryRoundExhaustedError
 	if m.HomeEnabled() && errors.As(err, &exhausted) && exhausted != nil {
 		if !isRequestRetryRoundError(err) || !m.homeRetryAllowed(attempt, homeRetryLimit) {
-			return 0, false
+			return giveUp()
 		}
 		if exhausted.retryNow {
 			return 0, true
 		}
 		if retryAfter := retryAfterFromError(err); retryAfter != nil {
 			if *retryAfter < 0 || (*retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait)) {
-				return 0, false
+				return giveUp()
 			}
 			return *retryAfter, true
 		}
@@ -1501,29 +1507,29 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 			}
 		}
 		if status != http.StatusTooManyRequests || !m.homeRetryAllowed(attempt, homeRetryLimit) {
-			return 0, false
+			return giveUp()
 		}
 		retryAfter := retryAfterFromError(err)
 		if retryAfter == nil || *retryAfter <= 0 || (maxWait <= 0 || *retryAfter > maxWait) {
-			return 0, false
+			return giveUp()
 		}
 		return *retryAfter, true
 	}
 	eligibility := authSelectionEligibilityForRequest(ctx, opts)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	if !isRequestRetryRoundError(err) || !m.retryAllowed(attempt, providers, model, eligibility, pinnedAuthID, defaultRequestRetry) {
-		return 0, false
+		return giveUp()
 	}
 	wait, found := m.closestCooldownWaitWithAttempted(providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
-			return 0, false
+			return giveUp()
 		}
 		return wait, true
 	}
 	if retryAfter := retryAfterFromError(err); retryAfter != nil {
 		if *retryAfter < 0 || (*retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait)) {
-			return 0, false
+			return giveUp()
 		}
 		return *retryAfter, true
 	}
