@@ -267,9 +267,17 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	for {
 		roundAttempted := make(map[string]struct{})
 		roundOpts := withAttemptedAuthTracker(opts, roundAttempted)
+		previousErr := lastErr
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
 		if errStream == nil {
 			return result, nil
+		}
+		// A retry round may have no immediately eligible credential after the
+		// previous upstream attempt put every credential into cooldown. Preserve
+		// that real upstream error instead of replacing it with the selector's
+		// synthetic auth_not_found/auth_unavailable result.
+		if previousErr != nil && isCredentialSelectionFailure(errStream) {
+			return nil, previousErr
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
 			preferredUpstreamErr = errStream

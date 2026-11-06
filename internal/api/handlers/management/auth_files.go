@@ -342,11 +342,13 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 	// Try to find auth ID via authManager
 	var authID string
+	var matched *coreauth.Auth
 	if h.authManager != nil {
 		auths := h.authManager.List()
 		for _, auth := range auths {
-			if auth.FileName == name || auth.ID == name {
+			if auth != nil && (auth.FileName == name || auth.ID == name) {
 				authID = auth.ID
+				matched = auth
 				break
 			}
 		}
@@ -356,9 +358,14 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		authID = name // fallback to filename as ID
 	}
 
-	// Get models from registry
+	// Get models from registry. A disabled credential is unregistered so
+	// routing ignores it; the settings page still needs the plugin catalog
+	// with this credential's exclusions removed.
 	reg := registry.GetGlobalRegistry()
 	models := reg.GetModelsForClient(authID)
+	if len(models) == 0 && matched != nil {
+		models = h.pluginCatalogModels(c, matched)
+	}
 
 	result := make([]gin.H, 0, len(models))
 	for _, m := range models {
@@ -378,6 +385,97 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"models": result})
+}
+
+func (h *Handler) pluginCatalogModels(c *gin.Context, auth *coreauth.Auth) []*registry.ModelInfo {
+	if h == nil || h.pluginHost == nil || auth == nil || c == nil || c.Request == nil {
+		return nil
+	}
+	result := h.pluginHost.ModelsForAuth(c.Request.Context(), auth)
+	if !result.Handled || result.Err != nil {
+		return nil
+	}
+	return omitExcludedModels(result.Models, auth)
+}
+
+func omitExcludedModels(models []*registry.ModelInfo, auth *coreauth.Auth) []*registry.ModelInfo {
+	patterns := excludedModelPatterns(auth)
+	if len(models) == 0 || len(patterns) == 0 {
+		return models
+	}
+	filtered := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID := strings.ToLower(strings.TrimSpace(model.ID))
+		if modelID == "" || modelPatternMatches(patterns, modelID) {
+			continue
+		}
+		filtered = append(filtered, model)
+	}
+	return filtered
+}
+
+func excludedModelPatterns(auth *coreauth.Auth) []string {
+	if auth == nil || auth.Attributes == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(auth.Attributes["excluded_models"])
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	patterns := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.ToLower(strings.TrimSpace(part)); trimmed != "" {
+			patterns = append(patterns, trimmed)
+		}
+	}
+	return patterns
+}
+
+func modelPatternMatches(patterns []string, modelID string) bool {
+	for _, pattern := range patterns {
+		if matchModelPattern(pattern, modelID) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchModelPattern(pattern, value string) bool {
+	if pattern == "" {
+		return false
+	}
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+	parts := strings.Split(pattern, "*")
+	if prefix := parts[0]; prefix != "" {
+		if !strings.HasPrefix(value, prefix) {
+			return false
+		}
+		value = value[len(prefix):]
+	}
+	if suffix := parts[len(parts)-1]; suffix != "" {
+		if !strings.HasSuffix(value, suffix) {
+			return false
+		}
+		value = value[:len(value)-len(suffix)]
+	}
+	for i := 1; i < len(parts)-1; i++ {
+		segment := parts[i]
+		if segment == "" {
+			continue
+		}
+		idx := strings.Index(value, segment)
+		if idx < 0 {
+			return false
+		}
+		value = value[idx+len(segment):]
+	}
+	return true
 }
 
 // List auth files from disk when the auth manager is unavailable.

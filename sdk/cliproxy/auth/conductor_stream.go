@@ -63,6 +63,16 @@ func (e *streamBootstrapError) Unwrap() error {
 	return e.cause
 }
 
+// StatusCode preserves the upstream HTTP status when a stream rejects before
+// its first payload. Callers use this to distinguish a real capacity response
+// from a locally synthesized stream error.
+func (e *streamBootstrapError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return statusCodeFromError(e.cause)
+}
+
 func (e *streamBootstrapError) Headers() http.Header {
 	if e == nil {
 		return nil

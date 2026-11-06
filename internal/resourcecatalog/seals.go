@@ -120,6 +120,8 @@ func effectiveConfigCredentials(r *sourceRow) (map[string]any, error) {
 func rowSeals(key []byte, r *sourceRow) (string, string, error) {
 	// Qwen quota enrollment refers to these generations; it cannot itself rotate
 	// them. Query-source revisions still fence enrollment edits independently.
+	// Derived projection bookkeeping is not administrator configuration, so it
+	// must not advance the generation that enrollment pins.
 	queryEnrollment := r.plugin && r.row.Family == "qwen"
 	conf := nodeValue(r.node, map[string]bool{r.marker: true, "keys": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
 	// The file store materializes the runtime default disabled:false on the
@@ -130,7 +132,7 @@ func rowSeals(key []byte, r *sourceRow) (string, string, error) {
 			delete(conf, "disabled")
 		}
 	}
-	if r.plugin {
+	if r.plugin && !queryEnrollment {
 		ids := []string{}
 		for _, related := range r.projections {
 			ids = append(ids, related.row.ResourceID)

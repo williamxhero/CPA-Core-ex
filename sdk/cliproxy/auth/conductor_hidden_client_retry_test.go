@@ -60,6 +60,30 @@ func TestHiddenCapacityRetryStaysInsideWhenIntervalIsShorterThanCooldown(t *test
 	}
 }
 
+func TestOverloadBeyondRetryIntervalStaysInsideCPA(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	wait := 305 * time.Second
+	cause := withTrustedRetryAfter(hiddenRetryStatusError{
+		msg:    `{"error":{"code":"server_is_overloaded","headers":{"x-retry-metadata":"NO_MORE_RETRY"},"message":"Our servers are currently overloaded. Please try again later."}}`,
+		status: http.StatusServiceUnavailable,
+	}, &wait)
+	waitGot, retry := manager.shouldRetryAfterErrorWithAttempted(
+		context.Background(),
+		cliproxyexecutor.Options{},
+		cause,
+		0,
+		nil,
+		"gpt-6.1-sol",
+		time.Second,
+		0,
+		10,
+		nil,
+	)
+	if !retry || waitGot != clienterror.HiddenClientRetryGap {
+		t.Fatalf("overload beyond max-retry-interval must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
+	}
+}
+
 func TestOrdinaryUpstreamErrorStillStopsAtMaxRetryInterval(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	wait := 2 * time.Second

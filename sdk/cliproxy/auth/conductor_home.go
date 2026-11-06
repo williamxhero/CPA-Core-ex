@@ -303,6 +303,25 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	}
 }
 
+func isCredentialSelectionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isAuthUnavailableError(err) {
+		return true
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(authErr.Code)) {
+	case "auth_not_found", "auth_unavailable", "model_cooldown":
+		return true
+	default:
+		return false
+	}
+}
+
 func isHomeNextRoundImmediatelyAvailable(err error) bool {
 	var authErr *Error
 	if !errors.As(err, &authErr) || authErr == nil {

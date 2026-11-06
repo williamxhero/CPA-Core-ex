@@ -28,7 +28,7 @@ func IsHiddenClientRetry(text string) bool {
 		return true
 	}
 	lower := strings.ToLower(raw)
-	if strings.Contains(lower, "selected model is at capacity") {
+	if isCapacityPressure(lower) {
 		return true
 	}
 	if strings.Contains(lower, "an error occurred while processing your request") &&
@@ -40,4 +40,16 @@ func IsHiddenClientRetry(text string) bool {
 	// but replaying on another credential is still the correct recovery.
 	return strings.Contains(lower, "stream disconnected before completion") ||
 		strings.Contains(lower, "stream closed before response.completed")
+}
+
+// isCapacityPressure reports transient model admission failures. A credential
+// whose quota is exhausted is not admission pressure and must not be replayed.
+func isCapacityPressure(lower string) bool {
+	if strings.Contains(lower, "usage_limit_reached") {
+		return false
+	}
+	return strings.Contains(lower, "model is at capacity") ||
+		strings.Contains(lower, "please try a different model") ||
+		strings.Contains(lower, "server_is_overloaded") ||
+		strings.Contains(lower, "servers are currently overloaded")
 }

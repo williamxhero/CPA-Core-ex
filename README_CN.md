@@ -1,5 +1,7 @@
 # CLI Proxy API
 
+<img align="right" src="./ex-badge.svg" alt="EX fork" width="76" />
+
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
 如果您想在您的桌面使用 CLIProxyAPI，我们推荐您使用我们的 [EasyCLIProxyAPI](https://github.com/router-for-me/EasyCLIProxyAPI) 桌面客户端，该客户端提供了图形化的配置界面、自动更新、系统托盘集成、一键启动/关闭 CLIProxyAPI 服务等功能。

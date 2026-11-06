@@ -13,6 +13,12 @@ func TestIsHiddenClientRetry(t *testing.T) {
 	if !IsHiddenClientRetry(`{"error":{"message":"Selected model is at capacity. Please try a different model."}}`) {
 		t.Fatal("model capacity text should be retried inside CPA")
 	}
+	if !IsHiddenClientRetry(`{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}`) {
+		t.Fatal("overload text should be retried inside CPA")
+	}
+	if IsHiddenClientRetry(`{"error":{"type":"usage_limit_reached","message":"Selected model is at capacity. Please try a different model."}}`) {
+		t.Fatal("exhausted quota must not be replayed as capacity")
+	}
 	if !IsHiddenClientRetry("stream disconnected before completion: stream closed before response.completed") {
 		t.Fatal("incomplete stream must be retried inside CPA")
 	}

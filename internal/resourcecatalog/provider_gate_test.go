@@ -595,6 +595,63 @@ func TestProviderGateVerifiedProjectionAdmission(t *testing.T) {
 	}
 }
 
+func TestReturningBlockedPluginCredentialDoesNotUnreadyAuthFile(t *testing.T) {
+	c, path, authDir := providerFixture(t, 1)
+	const secret = "synthetic-projection"
+	const base = "https://synthetic-opencode.invalid/v1"
+	editProviderConfig(t, c, path, func(root *yaml.Node) {
+		var plugin yaml.Node
+		text := fmt.Sprintf("enabled: true\nconfigs:\n  cpa-credential-opencode:\n    enabled: true\n    base-url: %s\n    api-keys: [{value: %s}]\n", base, secret)
+		if err := yaml.Unmarshal([]byte(text), &plugin); err != nil {
+			t.Fatal(err)
+		}
+		root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "plugins"}, plugin.Content[0])
+	})
+	var configID string
+	editProviderConfig(t, c, path, func(root *yaml.Node) {
+		plugin := providerYAMLField(t, providerYAMLField(t, providerYAMLField(t, root, "plugins"), "configs"), "cpa-credential-opencode")
+		key := providerYAMLField(t, plugin, "api-keys").Content[0]
+		configID = providerYAMLField(t, key, "resource-id").Value
+	})
+	authPath := filepath.Join(authDir, "opencode.json")
+	if err := os.WriteFile(authPath, []byte(fmt.Sprintf(`{"type":"opencode-go","api_key":%q,"base_url":%q}`, secret, base)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Reconcile(c.Version()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind := func() *coreauth.Auth {
+		t.Helper()
+		auth := &coreauth.Auth{Provider: "opencode-go", SourcePluginID: "cpa-credential-opencode", Attributes: map[string]string{"api_key": secret, "base_url": base}}
+		if err := c.BindAuths(authPath, raw, []*coreauth.Auth{auth}); err != nil {
+			t.Fatal(err)
+		}
+		return auth
+	}
+	if bind().ResourceIdentity == nil {
+		t.Fatal("matching auth file did not bind before the config record was removed")
+	}
+	editProviderConfig(t, c, path, func(root *yaml.Node) {
+		plugin := providerYAMLField(t, providerYAMLField(t, providerYAMLField(t, root, "plugins"), "configs"), "cpa-credential-opencode")
+		providerYAMLField(t, plugin, "api-keys").Content = nil
+	})
+	editProviderConfig(t, c, path, func(root *yaml.Node) {
+		var keys yaml.Node
+		if err := yaml.Unmarshal([]byte(fmt.Sprintf("- {value: %s, resource-id: %s}\n", secret, configID)), &keys); err != nil {
+			t.Fatal(err)
+		}
+		plugin := providerYAMLField(t, providerYAMLField(t, providerYAMLField(t, root, "plugins"), "configs"), "cpa-credential-opencode")
+		providerYAMLField(t, plugin, "api-keys").Content = keys.Content[0].Content
+	})
+	if bind().ResourceIdentity == nil {
+		t.Fatal("blocked config record took the matching auth file offline")
+	}
+}
+
 func TestProviderGateCurrentOwnerReplacesStaleOwnGroup(t *testing.T) {
 	for _, change := range []string{"key_rotation", "config_edit", "member_removed", "members_reordered"} {
 		t.Run(change, func(t *testing.T) {
