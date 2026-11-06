@@ -1433,10 +1433,6 @@ func TestManager_Execute_DisableCooling_RetriesAfter429RetryAfter(t *testing.T) 
 }
 
 func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(t *testing.T) {
-	incompleteErr := &requestScopedStatusError{
-		status:  http.StatusRequestTimeout,
-		message: "stream error: stream disconnected before completion: stream closed before response.completed",
-	}
 	messageTooBigErr := &requestScopedStatusError{
 		status:  http.StatusRequestEntityTooLarge,
 		message: `{"error":{"message":"upstream websocket message too big","type":"invalid_request_error","code":"message_too_big"}}`,
@@ -1488,8 +1484,6 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 		err                error
 		wantStatus         int
 	}{
-		{name: "non-streaming incomplete", err: incompleteErr, wantStatus: http.StatusRequestTimeout},
-		{name: "streaming incomplete", stream: true, err: incompleteErr, wantStatus: http.StatusRequestTimeout},
 		{name: "streaming codex websocket message too big", provider: "codex", stream: true, err: messageTooBigErr, wantStatus: http.StatusRequestEntityTooLarge},
 		{name: "streaming xai websocket message too big", provider: "xai", stream: true, err: messageTooBigErr, wantStatus: http.StatusRequestEntityTooLarge},
 		{name: "non-streaming invalid request", err: invalidRequestErr, wantStatus: http.StatusBadRequest},
@@ -1603,6 +1597,84 @@ func TestManager_RequestScopedErrorStopsCredentialFallbackWithoutSuspendingAuth(
 			}
 			if updatedGood.Failed != 0 {
 				t.Fatalf("fallback auth failed count = %d, want 0", updatedGood.Failed)
+			}
+		})
+	}
+}
+
+func TestManager_IncompleteStreamRetriesInsideCPA(t *testing.T) {
+	incompleteErr := &requestScopedStatusError{
+		status:  http.StatusRequestTimeout,
+		message: "stream error: stream disconnected before completion: stream closed before response.completed",
+	}
+	for _, stream := range []bool{false, true} {
+		name := "non-streaming"
+		if stream {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := NewManager(nil, nil, nil)
+			m.SetRetryConfig(2, 30*time.Second, 0)
+
+			executor := &authFallbackExecutor{id: "codex"}
+			if stream {
+				executor.streamFirstErrors = map[string]error{"aa-bad-auth": incompleteErr}
+			} else {
+				executor.executeErrors = map[string]error{"aa-bad-auth": incompleteErr}
+			}
+			m.RegisterExecutor(executor)
+
+			model := "gpt-5.5"
+			badAuth := &Auth{ID: "aa-bad-auth", Provider: "codex"}
+			goodAuth := &Auth{ID: "bb-good-auth", Provider: "codex"}
+			reg := registry.GetGlobalRegistry()
+			reg.RegisterClient(badAuth.ID, badAuth.Provider, []*registry.ModelInfo{{ID: model}})
+			reg.RegisterClient(goodAuth.ID, goodAuth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() {
+				reg.UnregisterClient(badAuth.ID)
+				reg.UnregisterClient(goodAuth.ID)
+			})
+			if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+				t.Fatalf("register bad auth: %v", errRegister)
+			}
+			if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+				t.Fatalf("register good auth: %v", errRegister)
+			}
+
+			var errExecute error
+			if stream {
+				result, errStream := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+				errExecute = errStream
+				if result != nil {
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							errExecute = chunk.Err
+						}
+					}
+				}
+			} else {
+				_, errExecute = m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+			}
+			if errExecute != nil {
+				t.Fatalf("incomplete stream must recover on another credential: %v", errExecute)
+			}
+
+			var calls []string
+			if stream {
+				calls = executor.StreamCalls()
+			} else {
+				calls = executor.ExecuteCalls()
+			}
+			if len(calls) < 2 || calls[0] != badAuth.ID || calls[len(calls)-1] != goodAuth.ID {
+				t.Fatalf("credential calls = %v, want bad then good", calls)
+			}
+
+			updatedBad, ok := m.GetByID(badAuth.ID)
+			if !ok || updatedBad == nil {
+				t.Fatal("expected bad auth to remain registered")
+			}
+			if updatedBad.Unavailable {
+				t.Fatal("incomplete stream must not suspend the credential")
 			}
 		})
 	}

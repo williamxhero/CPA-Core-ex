@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
@@ -79,6 +80,43 @@ func assertOldAuthNotReady(t *testing.T, c *Catalog, target resource.Target) {
 		if row.ResourceID == target.ResourceID && (row.Identity == "valid" || row.Readiness == "ready") {
 			t.Error("unauthorized physical replacement was published as ready")
 		}
+	}
+}
+
+func TestZeroWriteJournalYieldsWhenSourcesMove(t *testing.T) {
+	c, path, _, _ := publicationFixture(t)
+	files, _, err := sources(c.configPath, c.authDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	seals := map[string]string{}
+	for _, f := range files {
+		values[f.path] = seal(c.key, f.original)
+		seals[f.path] = seal(c.key, []byte(f.fileID))
+	}
+	p := publication{ID: uuid.NewString(), Format: 2, Next: *c.state, Sources: values, FileSeals: seals}
+	if err = c.writePublication(&p); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte(strings.Replace(string(data), "synthetic-A", "synthetic-B", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.Reconcile(c.Version()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.Snapshot(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(filepath.Join(c.stateDir, "journal.json")); !os.IsNotExist(err) {
+		t.Fatal("unapplied journal remained and would disable the catalog")
+	}
+	if err = c.Reconcile(c.Version()); err != nil {
+		t.Fatal(err)
 	}
 }
 

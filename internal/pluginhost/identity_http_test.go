@@ -56,7 +56,7 @@ func TestResourceIdentityHostSaveThroughManagementHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "config.yaml")
-	source := []byte(fmt.Sprintf("server: {port: 8317}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      api-keys: [{name: fixture, value: fixture-key}]\n", filepath.ToSlash(authDir)))
+	source := []byte(fmt.Sprintf("server: {port: 8317}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  configs:\n    cpa-credential-qwen:\n      enabled: true\n      api-keys: [{name: fixture, value: fixture-key}]\n", filepath.ToSlash(authDir)))
 	if err := os.WriteFile(path, source, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestResourceIdentityHostSaveThroughManagementHTTP(t *testing.T) {
 	host := pluginhost.New()
 	host.SetAuthManager(manager)
 	p := &identityCallbackProvider{call: pluginhost.IdentityCallbackFixture(host, cfg), filename: "qwen.json", body: json.RawMessage(`{"type":"qwen","api_key":"fixture-key","disabled":true}`)}
-	host.RegisterPluginForTest("qwen-cliproxyapi", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: p}})
+	host.RegisterPluginForTest("cpa-credential-qwen", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: p}})
 	h := management.NewHandler(cfg, path, manager)
 	h.SetLocalPassword("test-password")
 	h.SetPluginHost(host)

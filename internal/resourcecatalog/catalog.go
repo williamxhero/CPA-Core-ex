@@ -20,6 +20,9 @@ var (
 	ErrUnavailable = errors.New("resource catalog unavailable")
 	ErrConflict    = errors.New("resource catalog version conflict")
 	ErrUnsupported = errors.New("resource catalog filesystem unsupported")
+	// ErrSuperseded means a journal recorded source seals but replaced no files,
+	// then the sources moved. The journal is gone and reconciliation must republish.
+	ErrSuperseded = errors.New("resource catalog publication superseded")
 )
 
 type Catalog struct {
@@ -83,7 +86,7 @@ func Open(configPath, authDir, stateDir string) (*Catalog, error) {
 		return nil, err
 	}
 	c := &Catalog{lock: lock, configPath: configPath, authDir: authDir, stateDir: stateDir, key: key, boot: uuid.NewString(), writeFile: atomicWrite}
-	if err = c.recoverPublication(); err != nil {
+	if err = c.recoverPublication(); err != nil && !errors.Is(err, ErrSuperseded) {
 		return nil, err
 	}
 	state, err := loadState(stateDir)
@@ -105,7 +108,10 @@ func Open(configPath, authDir, stateDir string) (*Catalog, error) {
 	if err = c.initializeGates(); err != nil {
 		return nil, err
 	}
-	if err = c.reconcileLocked(); err != nil {
+	if err = c.reconcileLocked(); errors.Is(err, ErrSuperseded) {
+		err = c.reconcileLocked()
+	}
+	if err != nil {
 		return nil, err
 	}
 	success = true
@@ -133,17 +139,51 @@ func (c *Catalog) Reconcile(expected resource.Version) error {
 	if expected != c.versionLocked() {
 		return ErrConflict
 	}
+	// A journal is an unfinished publication, not proof the catalog is corrupt.
+	// Finish it, or drop it when it replaced nothing and the sources have since moved.
+	// Only a journal that remains after that attempt disables further publication.
+	if err := c.finishOutstandingJournal(); err != nil {
+		return err
+	}
 	if !c.storageCurrentLocked() {
 		c.failed = true
 		return ErrUnavailable
 	}
 	err := c.reconcileLocked()
+	if errors.Is(err, ErrSuperseded) {
+		err = c.reconcileLocked()
+	}
 	if err != nil {
 		if _, errJournal := os.Stat(filepath.Join(c.stateDir, "journal.json")); !os.IsNotExist(errJournal) {
 			c.failed = true
 		}
 	}
 	return err
+}
+
+// finishOutstandingJournal completes a journal left by an interrupted publish.
+// A zero-write journal whose sources moved is removed by finishPublication and
+// reported as ErrSuperseded; that is not a storage failure.
+func (c *Catalog) finishOutstandingJournal() error {
+	journal := filepath.Join(c.stateDir, "journal.json")
+	if _, err := os.Stat(journal); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return ErrUnavailable
+	}
+	err := c.recoverPublication()
+	if errors.Is(err, ErrSuperseded) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	state, err := loadState(c.stateDir)
+	if err != nil || state == nil {
+		return ErrUnavailable
+	}
+	c.state = state
+	return nil
 }
 
 func (c *Catalog) reconcileLocked() error {

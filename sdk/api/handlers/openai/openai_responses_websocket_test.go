@@ -2752,6 +2752,11 @@ func TestResponsesUpstreamErrorBodyDrivesExposure(t *testing.T) {
 			status: http.StatusServiceUnavailable,
 			body:   `{"error":{"message":"Selected model is at capacity. Please try a different model."}}`,
 		},
+		{
+			name:   "incomplete stream stays inside CPA",
+			status: http.StatusRequestTimeout,
+			body:   "stream error: stream disconnected before completion: stream closed before response.completed",
+		},
 		{name: "request timeout", status: http.StatusRequestTimeout, body: "timeout"},
 		{name: "bad gateway", status: http.StatusBadGateway, body: "bad gateway"},
 		{

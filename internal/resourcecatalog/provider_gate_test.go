@@ -531,7 +531,7 @@ func TestProviderGateVerifiedProjectionAdmission(t *testing.T) {
 	c, path, authDir := providerFixture(t, 1)
 	editProviderConfig(t, c, path, func(root *yaml.Node) {
 		var plugin yaml.Node
-		text := "enabled: true\nconfigs:\n  qwen-cliproxyapi:\n    enabled: true\n    base-url: https://synthetic-qwen.invalid/v1\n    api-keys: [{value: synthetic-projection}]\n"
+		text := "enabled: true\nconfigs:\n  cpa-credential-qwen:\n    enabled: true\n    base-url: https://synthetic-qwen.invalid/v1\n    api-keys: [{value: synthetic-projection}]\n"
 		if err := yaml.Unmarshal([]byte(text), &plugin); err != nil {
 			t.Fatal(err)
 		}
@@ -548,7 +548,7 @@ func TestProviderGateVerifiedProjectionAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	auth := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", Attributes: map[string]string{"api_key": "synthetic-projection", "base_url": "https://synthetic-qwen.invalid/v1"}}
+	auth := &coreauth.Auth{Provider: "qwen", SourcePluginID: "cpa-credential-qwen", Attributes: map[string]string{"api_key": "synthetic-projection", "base_url": "https://synthetic-qwen.invalid/v1"}}
 	if err := c.BindAuths(authPath, raw, []*coreauth.Auth{auth}); err != nil {
 		t.Fatal(err)
 	}
@@ -574,7 +574,7 @@ func TestProviderGateVerifiedProjectionAdmission(t *testing.T) {
 		t.Fatal("provider enforcement altered runtime credential/projection targets")
 	}
 	editProviderConfig(t, c, path, func(root *yaml.Node) {
-		plugin := providerYAMLField(t, providerYAMLField(t, providerYAMLField(t, root, "plugins"), "configs"), "qwen-cliproxyapi")
+		plugin := providerYAMLField(t, providerYAMLField(t, providerYAMLField(t, root, "plugins"), "configs"), "cpa-credential-qwen")
 		providerYAMLField(t, plugin, "api-keys").Content = nil
 	})
 	if err := c.BindAuths(authPath, raw, []*coreauth.Auth{auth}); err != nil {

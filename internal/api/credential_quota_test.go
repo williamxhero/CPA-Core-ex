@@ -117,7 +117,7 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 			}
 		}
 	}
-	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  codex: [{name: intermediary, base-url: https://synthetic.invalid/v1, keys: [{api-key: API-KEY-CANARY}]}]\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    opencode-go-cliproxyapi:\n      enabled: true\n      base-url: https://opencode.ai/zen/go/v1\n      api-keys: [{name: test, value: PLUGIN-SECRET-CANARY}]\n", filepath.ToSlash(auth), filepath.ToSlash(os.Getenv("QUOTA_FIXTURE_PLUGIN_DIR")))
+	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  codex: [{name: intermediary, base-url: https://synthetic.invalid/v1, keys: [{api-key: API-KEY-CANARY}]}]\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    cpa-credential-opencode:\n      enabled: true\n      base-url: https://opencode.ai/zen/go/v1\n      api-keys: [{name: test, value: PLUGIN-SECRET-CANARY}]\n", filepath.ToSlash(auth), filepath.ToSlash(os.Getenv("QUOTA_FIXTURE_PLUGIN_DIR")))
 	if os.Getenv("QUOTA_FIXTURE_ENDPOINT_MODE") != "" {
 		text = strings.Replace(text, "      base-url: https://opencode.ai/zen/go/v1\n", "", 1)
 	}
@@ -140,7 +140,7 @@ func TestCredentialQuotaProcessFixture(t *testing.T) {
 	cfg.ProxyURL = "http://127.0.0.1:1"
 	host.ApplyConfig(pluginhost.WithQuotaHTTPClient(context.Background(), fixtureDenyHTTP{}), cfg)
 	t.Cleanup(host.ShutdownAll)
-	if !host.HasQuotaProviderForPlugin("opencode-go-cliproxyapi") {
+	if !host.HasQuotaProviderForPlugin("cpa-credential-opencode") {
 		t.Fatal("real compiled existing plugin was not loaded")
 	}
 	sdkAuth.RegisterPluginAuthParser(host)

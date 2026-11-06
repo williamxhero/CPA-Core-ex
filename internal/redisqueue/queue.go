@@ -69,9 +69,9 @@ func Enqueue(payload []byte) {
 	if len(payload) == 0 {
 		return
 	}
-	if global.publishToSubscribers(payload) {
-		return
-	}
+	// Subscribers and the HTTP poll queue are different consumers. A connected
+	// subscriber must not hide the record from PopOldest.
+	global.publishToSubscribers(payload)
 	global.enqueue(payload)
 }
 

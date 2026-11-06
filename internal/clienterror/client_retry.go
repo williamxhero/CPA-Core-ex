@@ -35,8 +35,9 @@ func IsHiddenClientRetry(text string) bool {
 		(strings.Contains(lower, "you can retry your request") || strings.Contains(lower, "help.openai.com")) {
 		return true
 	}
-	return strings.Contains(lower, "stream disconnected before completion") &&
-		(strings.Contains(lower, "you can retry your request") ||
-			strings.Contains(lower, "help.openai.com") ||
-			strings.Contains(lower, "an error occurred while processing your request"))
+	// Incomplete Codex streams and OpenAI "stream disconnected" failures must stay
+	// inside CPA. The bare incomplete-stream wording has no help.openai.com hint,
+	// but replaying on another credential is still the correct recovery.
+	return strings.Contains(lower, "stream disconnected before completion") ||
+		strings.Contains(lower, "stream closed before response.completed")
 }

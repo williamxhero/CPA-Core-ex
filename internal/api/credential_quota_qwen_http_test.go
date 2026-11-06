@@ -64,7 +64,7 @@ func TestQwenCLIHTTPRejectsPositiveRoundingOfExhaustedCache(t *testing.T) {
 	}
 	producer.response = pluginapi.QuotaFetchResponse{ObservedAtMS: observed.UnixMilli(), Protocol: "qwen-coding-plan-v1", AccountProvenance: "configured_cli_profile", TimestampProvenance: "local_cli_acquisition_time", Groups: []pluginapi.QuotaGroup{{Buckets: []pluginapi.QuotaBucket{{Window: "5h", RemainingFraction: 0, ResetTime: reset}, {Window: "week", RemainingFraction: .7, ResetTime: reset}, {Window: "billing_month", RemainingFraction: .6, ResetTime: reset}}}}}
 	configs := qwenHTTPPluginConfigs(t, f)
-	qwen := configs["qwen-cliproxyapi"]
+	qwen := configs["cpa-credential-qwen"]
 	qwen["quota-source"] = "command"
 	qwen["command"] = "synthetic-helper.exe"
 	qwen["command-args"] = []string{"--source", "coding-plan", "--protocol", "qwen-coding-plan-v1", "--bl-path", "synthetic-bl.cmd", "--cache-file", cache}
@@ -75,12 +75,12 @@ func TestQwenCLIHTTPRejectsPositiveRoundingOfExhaustedCache(t *testing.T) {
 		enrollments = append(enrollments, map[string]any{"resource-id": target.ResourceID, "identity-version": target.IdentityVersion, "credential-version": target.CredentialVersion, "config-version": target.ConfigVersion, "membership-version": target.MembershipVersion})
 	}
 	configs = qwenHTTPPluginConfigs(t, f)
-	configs["qwen-cliproxyapi"]["quota-resource-bindings"] = enrollments
+	configs["cpa-credential-qwen"]["quota-resource-bindings"] = enrollments
 	qwenHTTPPutPluginConfigs(t, f, configs)
-	host.RegisterPluginForTest("qwen-cliproxyapi", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "qwen"}, QuotaProvider: producer}})
+	host.RegisterPluginForTest("cpa-credential-qwen", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "qwen"}, QuotaProvider: producer}})
 	f.handler.SetPluginHost(host)
 	source := qwenHTTPSourceForIndex(t, f, before.AuthIndex)
-	response, handled, fetchErr := host.FetchQuotaByPlugin(context.Background(), "qwen-cliproxyapi", pluginapi.QuotaFetchRequest{AuthIndex: source.AuthIndex, Provider: "qwen"})
+	response, handled, fetchErr := host.FetchQuotaByPlugin(context.Background(), "cpa-credential-qwen", pluginapi.QuotaFetchRequest{AuthIndex: source.AuthIndex, Provider: "qwen"})
 	if !handled || fetchErr != nil || response.Protocol != "qwen-coding-plan-v1" {
 		t.Fatalf("synthetic quota producer was not invoked: handled=%v err=%v response=%+v", handled, fetchErr, response)
 	}
@@ -136,7 +136,7 @@ func qwenHTTPSourceForIndex(t *testing.T, f *inventoryHarness, authIndex string)
 func TestQwenCLIHTTPEnrollmentPreservesCurrentCredentialGenerations(t *testing.T) {
 	f, _ := pluginInventoryFixture(t)
 	configs := qwenHTTPPluginConfigs(t, f)
-	qwen := configs["qwen-cliproxyapi"]
+	qwen := configs["cpa-credential-qwen"]
 	qwen["quota-source"] = "command"
 	qwen["command"] = "synthetic-helper.exe"
 	qwen["command-args"] = []string{"--source", "coding-plan", "--protocol", "qwen-coding-plan-v1", "--bl-path", "synthetic-bl.cmd", "--cache-file", "synthetic-cache.json"}
@@ -156,7 +156,7 @@ func TestQwenCLIHTTPEnrollmentPreservesCurrentCredentialGenerations(t *testing.T
 		})
 	}
 	configs = qwenHTTPPluginConfigs(t, f)
-	configs["qwen-cliproxyapi"]["quota-resource-bindings"] = enrollments
+	configs["cpa-credential-qwen"]["quota-resource-bindings"] = enrollments
 	qwenHTTPPutPluginConfigs(t, f, configs)
 	after := qwenHTTPSourceForIndex(t, f, before.AuthIndex)
 	if !reflect.DeepEqual(before.Targets, after.Targets) {

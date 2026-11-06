@@ -38,9 +38,9 @@ func pluginCredentials(r *sourceRow) (map[string]any, error) {
 // Known plugin schemas are host-owned adapters, not a generic plugin ABI.
 func knownPluginFamily(id string) string {
 	switch id {
-	case "qwen-cliproxyapi":
+	case "cpa-credential-qwen":
 		return "qwen"
-	case "opencode-go-cliproxyapi":
+	case "cpa-credential-opencode":
 		return "opencode-go"
 	default:
 		return "unsupported"

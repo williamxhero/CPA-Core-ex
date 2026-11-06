@@ -20,7 +20,7 @@ import (
 func TestQwenCLIConfiguredRequiresExplicitCodingPlanCLIConfiguration(t *testing.T) {
 	cfg := testConfigForQwenCLI(t, "      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, C:/bl.cmd, --cache-file, C:/quota.json]\n")
 	h := NewHandlerWithoutConfigFilePath(cfg, nil)
-	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "test-resource", IdentityVersion: 1, CredentialVersion: 2, ConfigVersion: 3, MembershipVersion: 4}}}}
+	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "cpa-credential-qwen", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "test-resource", IdentityVersion: 1, CredentialVersion: 2, ConfigVersion: 3, MembershipVersion: 4}}}}
 	if !h.qwenCLIConfigured(nil, a) {
 		t.Fatal("explicit Coding Plan CLI configuration was not accepted")
 	}
@@ -55,6 +55,24 @@ func TestQwenCLIObservationPreservesAcquisitionTimeAndRejectsStaleData(t *testin
 	}
 }
 
+func TestQwenCLIObservationAcceptsOneMonthlyCacheWindow(t *testing.T) {
+	now := time.Now().UTC()
+	binding := resource.Binding{}
+	source := resource.QuotaSource{Protocol: "qwen-coding-plan-cli", AccountProvenance: "configured_cli_profile"}
+	reset := now.Add(24 * time.Hour).Format(time.RFC3339Nano)
+	response := pluginapi.QuotaFetchResponse{Protocol: "qwen-coding-plan-v1", AccountProvenance: "configured_cli_profile", TimestampProvenance: "local_cli_acquisition_time", ObservedAtMS: now.Add(-20 * time.Minute).UnixMilli(), Groups: []pluginapi.QuotaGroup{{Buckets: []pluginapi.QuotaBucket{
+		{Window: "billing_month", RemainingFraction: 0.10849978466666672, ResetTime: reset},
+	}}}}
+	obs := qwenCLIObservation(binding, source, response, true, nil)
+	if obs.QueryStatus != "success" || obs.Complete || obs.RecoveryEligible || len(obs.Windows) != 1 || obs.Windows[0].Name != "monthly" {
+		t.Fatalf("monthly cache window was not accepted: %+v", obs)
+	}
+	response.Groups[0].Buckets = append(response.Groups[0].Buckets, pluginapi.QuotaBucket{Window: "5h", RemainingFraction: 1, ResetTime: reset})
+	if invented := qwenCLIObservation(binding, source, response, true, nil); invented.QueryStatus == "success" {
+		t.Fatalf("a partial extra window was accepted: %+v", invented)
+	}
+}
+
 func TestQwenCLIReceiptBindsCurrentCacheAndLatestAttempt(t *testing.T) {
 	dir := t.TempDir()
 	cache := filepath.Join(dir, "quota.json")
@@ -69,13 +87,13 @@ func TestQwenCLIReceiptBindsCurrentCacheAndLatestAttempt(t *testing.T) {
 	if err := os.WriteFile(cache+".attempt.json", receipt, 0600); err != nil {
 		t.Fatal(err)
 	}
-	text := fmt.Sprintf("plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: %s\n      quota-resource-bindings: [{resource-id: receipt-resource, identity-version: 1, credential-version: 2, config-version: 3, membership-version: 4}]\n      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, %s, --cache-file, %s]\n", filepath.ToSlash(cache), filepath.ToSlash(cache), filepath.ToSlash(cache))
+	text := fmt.Sprintf("plugins:\n  enabled: true\n  configs:\n    cpa-credential-qwen:\n      enabled: true\n      quota-source: command\n      command: %s\n      quota-resource-bindings: [{resource-id: receipt-resource, identity-version: 1, credential-version: 2, config-version: 3, membership-version: 4}]\n      command-args: [--source, coding-plan, --protocol, qwen-coding-plan-v1, --bl-path, %s, --cache-file, %s]\n", filepath.ToSlash(cache), filepath.ToSlash(cache), filepath.ToSlash(cache))
 	cfg, err := config.ParseConfigBytes([]byte(text))
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := NewHandlerWithoutConfigFilePath(cfg, nil)
-	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "qwen-cliproxyapi", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "receipt-resource", IdentityVersion: 1, CredentialVersion: 2, ConfigVersion: 3, MembershipVersion: 4}}}}
+	a := &coreauth.Auth{Provider: "qwen", SourcePluginID: "cpa-credential-qwen", ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: "receipt-resource", IdentityVersion: 1, CredentialVersion: 2, ConfigVersion: 3, MembershipVersion: 4}}}}
 	stamp, _ := time.Parse(time.RFC3339Nano, observed)
 	response := pluginapi.QuotaFetchResponse{ObservedAtMS: stamp.UnixMilli(), Protocol: "qwen-coding-plan-v1", AccountProvenance: "configured_cli_profile", TimestampProvenance: "local_cli_acquisition_time", Groups: []pluginapi.QuotaGroup{{Buckets: []pluginapi.QuotaBucket{{Window: "5h", RemainingFraction: .8, ResetTime: reset}, {Window: "week", RemainingFraction: .7, ResetTime: reset}, {Window: "billing_month", RemainingFraction: .6, ResetTime: reset}}}}}
 	if !h.qwenCLIReceiptValid(a, response) {
@@ -129,7 +147,7 @@ func testConfigForQwenCLI(t *testing.T, args string) *config.Config {
 	if strings.Contains(args, "quota-resource-bindings:") {
 		enrollment = ""
 	}
-	text := "plugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      quota-source: command\n      command: bl.cmd\n" + enrollment + args
+	text := "plugins:\n  enabled: true\n  configs:\n    cpa-credential-qwen:\n      enabled: true\n      quota-source: command\n      command: bl.cmd\n" + enrollment + args
 	cfg, err := config.ParseConfigBytes([]byte(text))
 	if err != nil {
 		t.Fatal(err)

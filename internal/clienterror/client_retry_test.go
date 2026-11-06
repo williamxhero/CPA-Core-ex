@@ -13,8 +13,11 @@ func TestIsHiddenClientRetry(t *testing.T) {
 	if !IsHiddenClientRetry(`{"error":{"message":"Selected model is at capacity. Please try a different model."}}`) {
 		t.Fatal("model capacity text should be retried inside CPA")
 	}
-	if IsHiddenClientRetry("stream disconnected before completion: stream closed before response.completed") {
-		t.Fatal("a plain incomplete stream is not this retry class")
+	if !IsHiddenClientRetry("stream disconnected before completion: stream closed before response.completed") {
+		t.Fatal("incomplete stream must be retried inside CPA")
+	}
+	if !IsHiddenClientRetry("stream error: stream disconnected before completion: stream closed before response.completed") {
+		t.Fatal("codex incomplete-stream message must be retried inside CPA")
 	}
 	if IsHiddenClientRetry("invalid api key") {
 		t.Fatal("unrelated errors must stay visible")

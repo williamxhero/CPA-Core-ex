@@ -80,3 +80,35 @@ func TestOrdinaryUpstreamErrorStillStopsAtMaxRetryInterval(t *testing.T) {
 		t.Fatal("non-capacity error beyond max-retry-interval must still return")
 	}
 }
+
+type incompleteStreamRequestScopedError struct {
+	msg string
+}
+
+func (e incompleteStreamRequestScopedError) Error() string { return e.msg }
+
+func (e incompleteStreamRequestScopedError) StatusCode() int { return http.StatusRequestTimeout }
+
+func (incompleteStreamRequestScopedError) IsRequestScoped() bool { return true }
+
+func TestHiddenIncompleteStreamRetryStaysInsideCPA(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	cause := incompleteStreamRequestScopedError{
+		msg: "stream error: stream disconnected before completion: stream closed before response.completed",
+	}
+	waitGot, retry := manager.shouldRetryAfterErrorWithAttempted(
+		context.Background(),
+		cliproxyexecutor.Options{},
+		cause,
+		0,
+		nil,
+		"gpt-5.1-codex",
+		time.Second,
+		0,
+		0,
+		nil,
+	)
+	if !retry || waitGot != clienterror.HiddenClientRetryGap {
+		t.Fatalf("incomplete stream must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
+	}
+}

@@ -378,7 +378,7 @@ func TestCredentialQuotaSourceBindingsConcurrentPublicationFailsClosed(t *testin
 			f, calls := pluginInventoryFixture(t)
 			p := &sourceViewQuotaProvider{entered: make(chan struct{}), release: make(chan struct{})}
 			host := identityTestHost()
-			host.RegisterPluginForTest("opencode-go-cliproxyapi", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "opencode-go"}, QuotaProvider: p}})
+			host.RegisterPluginForTest("cpa-credential-opencode", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "opencode-go"}, QuotaProvider: p}})
 			f.handler.SetPluginHost(host)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()

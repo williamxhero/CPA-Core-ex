@@ -34,7 +34,7 @@ func (h *Handler) SetQuotaNetwork(n credentialquota.NetworkOptions) {
 func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.QuotaSource {
 	s := resource.QuotaSource{Binding: *a.ResourceIdentity, SourceID: a.ID, SubjectID: a.ResourceIdentity.Targets[0].ResourceID, AuthIndex: a.Index, State: "unsupported", Reason: "quota_protocol_unverified", AccountProvenance: "unverified", Protocol: "unavailable", ManualDisabled: a.Disabled}
 	switch {
-	case a.SourcePluginID == "qwen-cliproxyapi":
+	case a.SourcePluginID == "cpa-credential-qwen":
 		s.Protocol = "qwen-coding-plan-cli"
 		s.Reason = "account_authority_unverified"
 		if h.qwenCLIConfigured(ctx, a) {
@@ -44,7 +44,7 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 		} else {
 			s.State = "needs_configuration"
 		}
-	case a.SourcePluginID == "opencode-go-cliproxyapi":
+	case a.SourcePluginID == "cpa-credential-opencode":
 		s.Protocol = "opencode-go-usage"
 		s.State = "ready"
 		s.Reason = "selected_native_plugin"
@@ -165,7 +165,7 @@ func (h *Handler) qwenCLIRevision(ctx context.Context, a *coreauth.Auth) string 
 // or an arbitrary plugin claim. The values are folded into SourceVersion below
 // through the protocol/state projection and the selected resource binding.
 func (h *Handler) qwenCLIConfigured(ctx context.Context, a *coreauth.Auth) bool {
-	if a == nil || a.SourcePluginID != "qwen-cliproxyapi" || a.Provider != "qwen" {
+	if a == nil || a.SourcePluginID != "cpa-credential-qwen" || a.Provider != "qwen" {
 		return false
 	}
 	h.mu.Lock()
@@ -397,7 +397,16 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, response pluginapi.QuotaFetchResponse, handled bool, fetchErr error) resource.QuotaObservation {
 	now := time.Now()
 	obs := resource.QuotaObservation{Binding: binding, Protocol: source.Protocol, ProtocolVersion: 1, TimestampProvenance: "local_cli_acquisition_time", ReceivedAtMS: now.UnixMilli(), QueryStatus: "network_error", ErrorCode: "qwen_cli_quota_failed", ObservedAtMS: now.UnixMilli(), AccountProvenance: source.AccountProvenance}
-	if !handled || fetchErr != nil || response.Protocol != "qwen-coding-plan-v1" || response.AccountProvenance != "configured_cli_profile" || response.TimestampProvenance != "local_cli_acquisition_time" || response.ObservedAtMS <= 0 || response.ObservedAtMS > now.Add(time.Minute).UnixMilli() || now.Sub(time.UnixMilli(response.ObservedAtMS)) > 5*time.Minute || len(response.Groups) != 1 || len(response.Groups[0].Buckets) != 3 {
+	if !handled || fetchErr != nil || response.Protocol != "qwen-coding-plan-v1" || response.AccountProvenance != "configured_cli_profile" || response.TimestampProvenance != "local_cli_acquisition_time" || response.ObservedAtMS <= 0 || response.ObservedAtMS > now.Add(time.Minute).UnixMilli() || len(response.Groups) != 1 {
+		return obs
+	}
+	buckets := response.Groups[0].Buckets
+	singleMonthly := len(buckets) == 1 && (buckets[0].Window == "billing_month" || buckets[0].Window == "1month")
+	age := 5 * time.Minute
+	if singleMonthly {
+		age = 45 * time.Minute
+	}
+	if now.Sub(time.UnixMilli(response.ObservedAtMS)) > age || (!singleMonthly && len(buckets) != 3) {
 		return obs
 	}
 	seen := map[string]bool{}
@@ -432,7 +441,7 @@ func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, r
 			status = "rate-limited"
 			obs.RecoveryEligible = false
 		}
-		name := map[string]string{"5h": "rolling", "week": "weekly", "billing_month": "monthly"}[bucket.Window]
+		name := map[string]string{"5h": "rolling", "week": "weekly", "billing_month": "monthly", "1month": "monthly"}[bucket.Window]
 		if name == "" {
 			obs.QueryStatus = "parse_error"
 			obs.ErrorCode = "INVALID_QWEN_QUOTA_WINDOWS"
@@ -442,6 +451,11 @@ func qwenCLIObservation(binding resource.Binding, source resource.QuotaSource, r
 			return obs
 		}
 		obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: name, UsedPercent: (1 - bucket.RemainingFraction) * 100, RemainingFraction: bucket.RemainingFraction, ResetAt: bucket.ResetTime, SourceStatus: status})
+	}
+	if singleMonthly {
+		obs.Complete = false
+		obs.RecoveryEligible = false
+		return obs
 	}
 	if !seen["5h"] || !seen["week"] || !seen["billing_month"] {
 		obs.QueryStatus = "parse_error"
@@ -496,6 +510,9 @@ func (h *Handler) qwenCLIReceiptValid(a *coreauth.Auth, response pluginapi.Quota
 	if err != nil || len(cache) == 0 {
 		return false
 	}
+	if qwenMonthlyCacheMatches(cache, response) {
+		return true
+	}
 	receiptBody, err := readBoundedFile(cacheFile+".attempt.json", qwenCLIReceiptMaxBytes)
 	if err != nil {
 		return false
@@ -510,6 +527,38 @@ func (h *Handler) qwenCLIReceiptValid(a *coreauth.Auth, response pluginapi.Quota
 	}
 	observed, err := time.Parse(time.RFC3339Nano, receipt.ObservedAt)
 	return err == nil && observed.UnixMilli() == response.ObservedAtMS && response.TimestampProvenance == "local_cli_acquisition_time" && response.Protocol == "qwen-coding-plan-v1" && response.AccountProvenance == "configured_cli_profile" && qwenCacheMatchesResponse(cache, response)
+}
+
+func qwenMonthlyCacheMatches(cache []byte, response pluginapi.QuotaFetchResponse) bool {
+	if len(response.Groups) != 1 || len(response.Groups[0].Buckets) != 1 {
+		return false
+	}
+	bucket := response.Groups[0].Buckets[0]
+	if bucket.Window != "billing_month" && bucket.Window != "1month" {
+		return false
+	}
+	var saved struct {
+		Source     string `json:"source"`
+		ObservedAt string `json:"observedAt"`
+		Windows    []struct {
+			Window      string   `json:"window"`
+			UsedPercent *float64 `json:"usedPercent"`
+			ResetTime   string   `json:"resetTime"`
+		} `json:"windows"`
+	}
+	if json.Unmarshal(cache, &saved) != nil || saved.Source != "bl" || len(saved.Windows) != 1 {
+		return false
+	}
+	window := saved.Windows[0]
+	if window.Window != "1month" || window.UsedPercent == nil || window.ResetTime != bucket.ResetTime || *window.UsedPercent < 0 || *window.UsedPercent > 100 {
+		return false
+	}
+	observed, err := time.Parse(time.RFC3339Nano, saved.ObservedAt)
+	if err != nil || observed.UnixMilli() != response.ObservedAtMS {
+		return false
+	}
+	remaining := (100 - *window.UsedPercent) / 100
+	return math.Abs(remaining-bucket.RemainingFraction) < 1e-9
 }
 
 func qwenCacheMatchesResponse(cache []byte, response pluginapi.QuotaFetchResponse) bool {

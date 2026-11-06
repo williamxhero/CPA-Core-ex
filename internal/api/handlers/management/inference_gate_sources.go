@@ -18,12 +18,12 @@ func (h *Handler) gateSourceCoverage(ctx context.Context, a *coreauth.Auth) (boo
 		return unavailable("executor_unavailable")
 	}
 	if a.SourcePluginID != "" {
-		if a.SourcePluginID == "opencode-go-cliproxyapi" || a.SourcePluginID == "qwen-cliproxyapi" {
+		if a.SourcePluginID == "cpa-credential-opencode" || a.SourcePluginID == "cpa-credential-qwen" {
 			h.mu.Lock()
 			host := h.pluginHost
 			h.mu.Unlock()
 			if host == nil || !host.InferenceExecutorScopedHTTP(ctx, e, a.SourcePluginID) {
-				if a.SourcePluginID == "qwen-cliproxyapi" {
+				if a.SourcePluginID == "cpa-credential-qwen" {
 					if inner, ok := pluginhost.UnwrapPluginRefreshCompatExecutor(e); ok {
 						if _, native := inner.(*runtimeexecutor.OpenAICompatExecutor); native {
 							return true, "verified_qwen_native_wrapper", []gin.H{{"route": "native-http", "supported": true, "reason": "verified_final_transport_admission"}, {"route": "native-sse", "supported": true, "reason": "verified_final_transport_admission"}, {"route": "downstream-ws-turn", "supported": true, "reason": "verified_reused_downstream_per_turn"}}

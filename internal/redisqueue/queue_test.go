@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestEnqueueBroadcastsToUsageSubscribersAndSkipsQueue(t *testing.T) {
+func TestEnqueueBroadcastsToUsageSubscribersAndKeepsThePollQueue(t *testing.T) {
 	withEnabledQueue(t, func() {
 		first, unsubscribeFirst := SubscribeUsage()
 		defer unsubscribeFirst()
@@ -20,15 +20,16 @@ func TestEnqueueBroadcastsToUsageSubscribersAndSkipsQueue(t *testing.T) {
 		requireUsageSubscriberPayload(t, first, "usage-record")
 		requireUsageSubscriberPayload(t, second, "usage-record")
 
-		if items := PopOldest(1); len(items) != 0 {
-			t.Fatalf("PopOldest() items = %q, want empty after subscriber broadcast", items)
+		items := PopOldest(1)
+		if len(items) != 1 || string(items[0]) != "usage-record" {
+			t.Fatalf("PopOldest() items = %q, want the broadcast record kept for pollers", items)
 		}
 
 		unsubscribeFirst()
 		unsubscribeSecond()
 
 		Enqueue([]byte("queued-record"))
-		items := PopOldest(1)
+		items = PopOldest(1)
 		if len(items) != 1 || string(items[0]) != "queued-record" {
 			t.Fatalf("PopOldest() items = %q, want queued record after unsubscribe", items)
 		}

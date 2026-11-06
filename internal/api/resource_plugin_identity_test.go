@@ -31,7 +31,7 @@ func pluginInventoryFixture(t *testing.T) (*inventoryHarness, *atomic.Int32) {
 	if err := os.MkdirAll(authDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  codex: [{name: native-canary, base-url: https://native.invalid/v1, keys: [{api-key: native-secret-canary}]}]\nplugins:\n  enabled: true\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      base-url: %q\n      api-keys: [{name: qwen-label-canary, value: qwen-secret-canary}]\n    opencode-go-cliproxyapi:\n      enabled: false\n      base-url: %q\n      api-keys: [{name: opencode-label-canary, value: opencode-secret-canary}]\n    example: {enabled: true, config1: ignored-secret-canary}\n", filepath.ToSlash(authDir), trap.URL, trap.URL)
+	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\napi-keys:\n  codex: [{name: native-canary, base-url: https://native.invalid/v1, keys: [{api-key: native-secret-canary}]}]\nplugins:\n  enabled: true\n  configs:\n    cpa-credential-qwen:\n      enabled: true\n      base-url: %q\n      api-keys: [{name: qwen-label-canary, value: qwen-secret-canary}]\n    cpa-credential-opencode:\n      enabled: false\n      base-url: %q\n      api-keys: [{name: opencode-label-canary, value: opencode-secret-canary}]\n    example: {enabled: true, config1: ignored-secret-canary}\n", filepath.ToSlash(authDir), trap.URL, trap.URL)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestResourcePluginEffectiveVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	plugins := doc["plugins"].(map[string]any)["configs"].(map[string]any)
-	plugins["qwen-cliproxyapi"].(map[string]any)["base-url"] = "https://changed.invalid/v1"
+	plugins["cpa-credential-qwen"].(map[string]any)["base-url"] = "https://changed.invalid/v1"
 	data, err = yaml.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -201,8 +201,8 @@ func TestResourcePluginManagementProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Copying a host marker to a different provider is not a valid save.
-	qwen := plugins["qwen-cliproxyapi"]["api-keys"].([]any)[0].(map[string]any)
-	open := plugins["opencode-go-cliproxyapi"]["api-keys"].([]any)[0].(map[string]any)
+	qwen := plugins["cpa-credential-qwen"]["api-keys"].([]any)[0].(map[string]any)
+	open := plugins["cpa-credential-opencode"]["api-keys"].([]any)[0].(map[string]any)
 	open["resource-id"] = qwen["resource-id"]
 	forged, _ := json.Marshal(plugins)
 	req := httptest.NewRequest(http.MethodPut, "/v8/management/config/plugins/configs", strings.NewReader(string(forged)))
@@ -231,7 +231,7 @@ func (identityCanaryParser) ParseAuth(_ context.Context, req pluginapi.AuthParse
 	if err := json.Unmarshal(req.RawJSON, &metadata); err != nil {
 		return nil, true, err
 	}
-	return &coreauth.Auth{SourcePluginID: map[string]string{"qwen": "qwen-cliproxyapi", "opencode-go": "opencode-go-cliproxyapi"}[req.Provider], ID: req.FileName, FileName: req.FileName, Provider: req.Provider, Metadata: metadata, Attributes: map[string]string{coreauth.AttributeResourceID: "plugin-forged-marker", coreauth.AttributeProviderResourceID: "plugin-forged-parent"}}, true, nil
+	return &coreauth.Auth{SourcePluginID: map[string]string{"qwen": "cpa-credential-qwen", "opencode-go": "cpa-credential-opencode"}[req.Provider], ID: req.FileName, FileName: req.FileName, Provider: req.Provider, Metadata: metadata, Attributes: map[string]string{coreauth.AttributeResourceID: "plugin-forged-marker", coreauth.AttributeProviderResourceID: "plugin-forged-parent"}}, true, nil
 }
 func TestResourcePluginHostBinding(t *testing.T) {
 	f, _ := pluginInventoryFixture(t)
@@ -517,7 +517,7 @@ func (identityHostProvider) RefreshAuth(_ context.Context, req pluginapi.AuthRef
 func TestResourcePluginUnknownProviderProvenance(t *testing.T) {
 	f, _ := pluginInventoryFixture(t)
 	host := pluginhost.New()
-	host.RegisterPluginForTest("opencode-go-cliproxyapi", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "opencode-go"}}})
+	host.RegisterPluginForTest("cpa-credential-opencode", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "opencode-go"}}})
 	host.RegisterPluginForTest("arbitrary-plugin", pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: "qwen"}}})
 	f.handler.SetPluginHost(host)
 	sdkAuth.RegisterPluginAuthParser(host)
@@ -536,7 +536,7 @@ func TestResourcePluginUnknownProviderProvenance(t *testing.T) {
 
 func identityTestHost() *pluginhost.Host {
 	host := pluginhost.New()
-	for id, family := range map[string]string{"qwen-cliproxyapi": "qwen", "opencode-go-cliproxyapi": "opencode-go"} {
+	for id, family := range map[string]string{"cpa-credential-qwen": "qwen", "cpa-credential-opencode": "opencode-go"} {
 		host.RegisterPluginForTest(id, pluginapi.Plugin{Capabilities: pluginapi.Capabilities{AuthProvider: identityHostProvider{family: family}}})
 	}
 	return host
@@ -572,12 +572,12 @@ func TestResourcePluginReorderAndKeyReplacement(t *testing.T) {
 		return plugins
 	}
 	plugins := read()
-	qwen := plugins["qwen-cliproxyapi"]
+	qwen := plugins["cpa-credential-qwen"]
 	qwen["api-keys"] = append(qwen["api-keys"].([]any), map[string]any{"name": "second", "value": "second-secret-canary"})
 	write(plugins)
 	before := f.snapshot()
 	plugins = read()
-	keys := plugins["qwen-cliproxyapi"]["api-keys"].([]any)
+	keys := plugins["cpa-credential-qwen"]["api-keys"].([]any)
 	first := keys[0].(map[string]any)
 	id := first["resource-id"].(string)
 	first["name"] = "second" // Same label as the other key must not map identity.
@@ -590,7 +590,7 @@ func TestResourcePluginReorderAndKeyReplacement(t *testing.T) {
 		t.Fatal("reorder/rename replaced durable credential")
 	}
 	plugins = read()
-	keys = plugins["qwen-cliproxyapi"]["api-keys"].([]any)
+	keys = plugins["cpa-credential-qwen"]["api-keys"].([]any)
 	keys[1].(map[string]any)["value"] = "replacement-secret-canary"
 	write(plugins)
 	replaced := rowByID(t, f.snapshot(), id)
@@ -661,9 +661,9 @@ func TestResourcePluginOnlyTypedSaveFencing(t *testing.T) {
 	stale := resourceSaveConfig(t, f)
 	fresh := resourceSaveConfig(t, f)
 	before := f.snapshot()
-	item := fresh.Plugins.Configs["qwen-cliproxyapi"]
+	item := fresh.Plugins.Configs["cpa-credential-qwen"]
 	testField(testField(&item.Raw, "api-keys").Content[0], "name").Value = "typed-rename"
-	fresh.Plugins.Configs["qwen-cliproxyapi"] = item
+	fresh.Plugins.Configs["cpa-credential-qwen"] = item
 	if err := config.SaveConfigPreserveComments(f.path, fresh); err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestResourcePluginConfigurationProjectsToFiles(t *testing.T) {
 	f, _ := pluginInventoryFixture(t)
 	before := f.snapshot()
 	editInventoryConfig(t, f.path, func(root *yaml.Node) {
-		qwen := testField(testField(testField(root, "plugins"), "configs"), "qwen-cliproxyapi")
+		qwen := testField(testField(testField(root, "plugins"), "configs"), "cpa-credential-qwen")
 		var protocols yaml.Node
 		if err := yaml.Unmarshal([]byte("{messages: false, chat-completions: true}"), &protocols); err != nil {
 			t.Fatal(err)

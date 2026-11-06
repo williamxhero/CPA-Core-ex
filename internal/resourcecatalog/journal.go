@@ -229,6 +229,17 @@ func (c *Catalog) finishPublication(p *publication) error {
 		expected[path] = sealValue(c.key, []string{p.FileSeals[path], content})
 	}
 	if sealValue(c.key, complete) != sealValue(c.key, expected) {
+		// No file was replaced. Keeping this journal makes every later
+		// reconcile treat the catalog as failed, including after a restart.
+		if len(p.Writes) == 0 {
+			if err = os.Remove(filepath.Join(c.stateDir, "journal.json")); err != nil {
+				return ErrUnavailable
+			}
+			if err = syncDirectory(c.stateDir); err != nil {
+				return ErrUnavailable
+			}
+			return ErrSuperseded
+		}
 		return ErrConflict
 	}
 	for _, intent := range p.Writes {

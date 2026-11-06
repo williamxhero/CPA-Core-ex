@@ -72,7 +72,7 @@ func TestInferenceGateCompiledOpenCode(t *testing.T) {
 	for _, key := range []string{"A", "B"} {
 		os.WriteFile(filepath.Join(authDir, key+".json"), []byte(fmt.Sprintf(`{"type":"opencode-go","api_key":"SYNTHETIC-%s","base_url":%q}`, key, upstream.URL+"/v1")), 0600)
 	}
-	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    opencode-go-cliproxyapi:\n      enabled: true\n      allow-http: true\n      base-url: %q\n      api-keys: [{name: a, value: SYNTHETIC-A}, {name: b, value: SYNTHETIC-B}]\n", filepath.ToSlash(authDir), filepath.ToSlash(pluginDir), upstream.URL+"/v1")
+	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    cpa-credential-opencode:\n      enabled: true\n      allow-http: true\n      base-url: %q\n      api-keys: [{name: a, value: SYNTHETIC-A}, {name: b, value: SYNTHETIC-B}]\n", filepath.ToSlash(authDir), filepath.ToSlash(pluginDir), upstream.URL+"/v1")
 	path := filepath.Join(dir, "config.yaml")
 	os.WriteFile(path, []byte(text), 0600)
 	cfg, err := config.ParseConfigBytes([]byte(text))
@@ -82,7 +82,7 @@ func TestInferenceGateCompiledOpenCode(t *testing.T) {
 	host := pluginhost.New()
 	host.ApplyConfig(context.Background(), cfg)
 	defer host.ShutdownAll()
-	if !host.HasQuotaProviderForPlugin("opencode-go-cliproxyapi") {
+	if !host.HasQuotaProviderForPlugin("cpa-credential-opencode") {
 		t.Fatal("actual DLL not loaded")
 	}
 	sdkAuth.RegisterPluginAuthParser(host)
@@ -210,7 +210,7 @@ func TestInferenceGateCompiledQwen(t *testing.T) {
 	for _, key := range []string{"A", "B"} {
 		os.WriteFile(filepath.Join(authDir, key+".json"), []byte(fmt.Sprintf(`{"type":"qwen","api_key":"SYNTHETIC-%s"}`, key)), 0600)
 	}
-	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      allow-http: true\n      command: quota-stub\n      base-url: %q\n      api-keys: [{name: a, value: SYNTHETIC-A}, {name: b, value: SYNTHETIC-B}]\n", filepath.ToSlash(authDir), filepath.ToSlash(pluginDir), upstream.URL+"/v1")
+	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    cpa-credential-qwen:\n      enabled: true\n      allow-http: true\n      command: quota-stub\n      base-url: %q\n      api-keys: [{name: a, value: SYNTHETIC-A}, {name: b, value: SYNTHETIC-B}]\n", filepath.ToSlash(authDir), filepath.ToSlash(pluginDir), upstream.URL+"/v1")
 	path := filepath.Join(dir, "config.yaml")
 	os.WriteFile(path, []byte(text), 0600)
 	cfg, err := config.ParseConfigBytes([]byte(text))
@@ -220,7 +220,7 @@ func TestInferenceGateCompiledQwen(t *testing.T) {
 	host := pluginhost.New()
 	host.ApplyConfig(context.Background(), cfg)
 	defer host.ShutdownAll()
-	if !host.HasQuotaProviderForPlugin("qwen-cliproxyapi") {
+	if !host.HasQuotaProviderForPlugin("cpa-credential-qwen") {
 		t.Fatal("actual DLL not loaded")
 	}
 	sdkAuth.RegisterPluginAuthParser(host)
@@ -348,7 +348,7 @@ func TestInferenceGateCompiledQwenNativeWrapper(t *testing.T) {
 	for _, key := range []string{"A", "B"} {
 		os.WriteFile(filepath.Join(authDir, key+".json"), []byte(fmt.Sprintf(`{"type":"qwen","api_key":"SYNTHETIC-%s","base_url":%q}`, key, upstream.URL+"/v1")), 0600)
 	}
-	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    qwen-cliproxyapi:\n      enabled: true\n      allow-http: true\n      command: quota-stub\n      base-url: %q\n      api-keys: [{name: a, value: SYNTHETIC-A}, {name: b, value: SYNTHETIC-B}]\n", filepath.ToSlash(authDir), filepath.ToSlash(pluginDir), upstream.URL+"/v1")
+	text := fmt.Sprintf("server: {port: 0}\nmanagement: {secret-key: test-password}\noauth: {auth-dir: %q}\nresource-catalog: {enabled: true}\nplugins:\n  enabled: true\n  dir: %q\n  configs:\n    cpa-credential-qwen:\n      enabled: true\n      allow-http: true\n      command: quota-stub\n      base-url: %q\n      api-keys: [{name: a, value: SYNTHETIC-A}, {name: b, value: SYNTHETIC-B}]\n", filepath.ToSlash(authDir), filepath.ToSlash(pluginDir), upstream.URL+"/v1")
 	path := filepath.Join(dir, "config.yaml")
 	os.WriteFile(path, []byte(text), 0600)
 	cfg, err := config.ParseConfigBytes([]byte(text))
@@ -358,7 +358,7 @@ func TestInferenceGateCompiledQwenNativeWrapper(t *testing.T) {
 	host := pluginhost.New()
 	host.ApplyConfig(context.Background(), cfg)
 	defer host.ShutdownAll()
-	if !host.HasQuotaProviderForPlugin("qwen-cliproxyapi") {
+	if !host.HasQuotaProviderForPlugin("cpa-credential-qwen") {
 		t.Fatal("actual DLL not loaded")
 	}
 	sdkAuth.RegisterPluginAuthParser(host)
