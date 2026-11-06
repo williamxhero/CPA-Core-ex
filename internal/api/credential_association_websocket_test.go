@@ -13,13 +13,13 @@ import (
 	"sync/atomic"
 	"testing"
 
+	gjson "github.com/MoeForge/moego/ojson"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialassociation"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
-	"github.com/tidwall/gjson"
 )
 
 // Each child uses a private TLS fallback root without changing machine trust,
