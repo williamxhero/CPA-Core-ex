@@ -1,6 +1,7 @@
 package clienterror
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 )
@@ -74,6 +75,7 @@ func TestClassifyTransientUpstreamFailureVariants(t *testing.T) {
 		{name: "http 5xx", status: http.StatusBadGateway, text: "bad gateway"},
 		{name: "http 429", status: http.StatusTooManyRequests, text: "too many requests", hidden: true},
 		{name: "inference admission 503", status: http.StatusServiceUnavailable, text: "inference admission unavailable or restricted", hidden: true},
+		{name: "high demand 400", status: http.StatusBadRequest, text: "We’re currently experiencing high demand, which may cause temporary errors.", hidden: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -84,6 +86,16 @@ func TestClassifyTransientUpstreamFailureVariants(t *testing.T) {
 				t.Fatalf("IsHiddenClientRetry(%q) = %t, want %t", tt.text, got, tt.hidden)
 			}
 		})
+	}
+}
+
+func TestClassifyTransient400BodyBeforeGenericRequestFault(t *testing.T) {
+	text := `{"error":{"type":"permission_denied","message":"We’re currently experiencing high demand, which may cause temporary errors."}}`
+	if got := Classify(http.StatusBadRequest, text); got != FailureTransientUpstream {
+		t.Fatalf("Classify(400, transient body) = %v, want transient upstream", got)
+	}
+	if IsRequestFault(http.StatusBadRequest, errors.New(text)) {
+		t.Fatal("transient 400 body must not be treated as a client request fault")
 	}
 }
 

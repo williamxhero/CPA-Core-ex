@@ -68,14 +68,14 @@ func Classify(status int, text string) FailureClass {
 	if status == StatusClientClosedRequest || strings.Contains(lower, "context canceled") || strings.Contains(lower, "client canceled") {
 		return FailureClientCanceled
 	}
-	if raw != "" && IsRequestFault(status, nil) {
-		return FailureRequestInvalid
-	}
 	if isCapacityPressure(lower) || isTransientText(lower) || status >= http.StatusInternalServerError || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests {
 		if isQuotaExhausted(lower) {
 			return FailureQuotaExhausted
 		}
 		return FailureTransientUpstream
+	}
+	if raw != "" && IsRequestFault(status, nil) {
+		return FailureRequestInvalid
 	}
 	if isQuotaExhausted(lower) {
 		return FailureQuotaExhausted
