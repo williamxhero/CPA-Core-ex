@@ -149,6 +149,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			defaultRequestRetry = limit
 		}
 	}
+	if streamReplayDisabled(ctx) {
+		defaultRequestRetry = 0
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -221,7 +224,6 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			defaultRequestRetry = limit
 		}
 	}
-
 	var lastErr error
 	var preferredUpstreamErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
@@ -323,6 +325,13 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		} else if limit > defaultRequestRetry {
 			defaultRequestRetry = limit
 		}
+	}
+	// Replay executions consume the request-wide upstream retry budget. Keep
+	// the legacy retry loop disabled after applying the configured limit above;
+	// otherwise one replay can start an additional retry round and exceed the
+	// finite budget.
+	if streamReplayDisabled(ctx) {
+		defaultRequestRetry = 0
 	}
 
 	var lastErr error

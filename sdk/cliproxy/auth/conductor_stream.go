@@ -908,6 +908,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					if retryErr != nil {
+						cancelAttempt()
 						if errCtx := ctx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, retryErr, ephemeralResult, executionSeq)
 							return nil, errCtx

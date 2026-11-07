@@ -280,12 +280,13 @@ func TestExecuteStreamReplayHonorsFiniteReplayLimit(t *testing.T) {
 		model = "stream-replay-limit-model"
 		authA = "stream-replay-limit-a"
 		authB = "stream-replay-limit-b"
+		authC = "stream-replay-limit-c"
 	)
 
 	manager := NewManager(nil, &FillFirstSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 2)
 	manager.SetUpstreamErrorRetryLimit(1)
-	for _, id := range []string{authA, authB} {
+	for _, id := range []string{authA, authB, authC} {
 		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
 			t.Fatalf("Register(%s): %v", id, errRegister)
 		}
