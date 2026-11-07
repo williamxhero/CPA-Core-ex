@@ -188,6 +188,36 @@ func (m *Manager) streamBootstrapTimeout() time.Duration {
 	return cfg.Codex.StreamBootstrapTimeoutDuration()
 }
 
+// streamGateAttemptWithTimeout bounds the provider call that creates the
+// stream itself. A provider can stall before returning headers or a channel;
+// readStreamBootstrapWithTimeout cannot protect that phase because it has not
+// received a stream to read yet.
+func (m *Manager) streamGateAttemptWithTimeout(ctx context.Context, executor ProviderExecutor, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	timeout := m.streamBootstrapTimeout()
+	if timeout <= 0 {
+		return m.streamGateAttempt(ctx, executor, auth, req, opts)
+	}
+	type gateResult struct {
+		stream *cliproxyexecutor.StreamResult
+		err    error
+	}
+	resultCh := make(chan gateResult, 1)
+	go func() {
+		stream, err := m.streamGateAttempt(ctx, executor, auth, req, opts)
+		resultCh <- gateResult{stream: stream, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result.stream, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, &Error{Code: "stream_bootstrap_timeout", Message: "provider did not create a stream before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}
+	}
+}
+
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, executionSeq uint64, cancelUpstream context.CancelFunc) *cliproxyexecutor.StreamResult {
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
 	accessToken := authAccessTokenForRequest(ctx, auth, opts.Headers)
@@ -218,6 +248,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				bootstrapTimer = nil
 				bootstrapTimeoutCh = nil
 			}
+		}
+		resetBootstrapTimer := func() {
+			stopBootstrapTimer()
+			startBootstrapTimer()
 		}
 		startBootstrapTimer()
 		defer func() {
@@ -267,13 +301,6 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if err == nil || replay == nil || deliveredAny {
 				return false
 			}
-			// A 429 received after the stream has been accepted may represent a
-			// provider-side quota or admission decision for the already submitted
-			// turn. The executor's bootstrap path handles pre-output 429 failover;
-			// do not replay an accepted stream here.
-			if statusCodeFromError(err) == http.StatusTooManyRequests {
-				return false
-			}
 			return isRetryableUpstreamFailure(err, clienterror.Classify(statusCodeFromError(err), err.Error()))
 		}
 		processPayload := func(chunk cliproxyexecutor.StreamChunk, applyRewrite bool) bool {
@@ -318,6 +345,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 			recordFailure(err)
 			if retryable(err) {
+				// Stop the failed provider before selecting a replacement. This is
+				// essential for silent providers whose stream would otherwise remain
+				// alive while the client is waiting for recovery.
+				if cancelUpstream != nil {
+					cancelUpstream()
+				}
 				discardStreamChunks(source)
 				excludedAuthIDs := streamReplayExcludedAuthIDsFromContext(ctx)
 				if auth != nil && strings.TrimSpace(auth.ID) != "" {
@@ -340,7 +373,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					sawCompleted = false
 					sawIncomplete = false
 					replayed = true
-					startBootstrapTimer()
+					resetBootstrapTimer()
 					return retryResult.Chunks, true
 				}
 				if retryErr != nil {
@@ -760,7 +793,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
 		attemptCtx, cancelAttempt := context.WithCancel(ctx)
-		streamResult, errStream := m.streamGateAttempt(attemptCtx, executor, auth, execReq, execOpts)
+		streamResult, errStream := m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
 			upstreamErr = errStream
@@ -784,7 +817,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					attemptCtx, cancelAttempt = context.WithCancel(ctx)
-					streamResult, errStream = m.streamGateAttempt(attemptCtx, executor, auth, execReq, execOpts)
+					streamResult, errStream = m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
 						upstreamErr = errStream
@@ -870,7 +903,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					attemptCtx, cancelAttempt = context.WithCancel(ctx)
-					retryStream, retryErr := m.streamGateAttempt(attemptCtx, executor, auth, execReq, execOpts)
+					retryStream, retryErr := m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
@@ -1004,7 +1037,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			remaining = closedCh
 		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
-		return m.wrapStreamResult(attemptCtx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, executionSeq, cancelAttempt), nil
+		// Keep the replay coordinator on the request context while isolating the
+		// old upstream attempt in attemptCtx. The replay must survive the
+		// cancellation that tears down the failed provider connection.
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, executionSeq, cancelAttempt), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

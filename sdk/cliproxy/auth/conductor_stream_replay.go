@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/url"
+	"sync/atomic"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -24,6 +25,13 @@ type streamReplayCoordinatorKey struct{}
 type streamReplayDisabledKey struct{}
 type streamReplayAttemptKey struct{}
 type streamReplayExcludedAuthIDsKey struct{}
+type streamReplayStateKey struct{}
+
+// streamReplayState is shared by nested stream executions so the request-wide
+// upstream retry budget cannot be reset by a replayed ExecuteStream call.
+type streamReplayState struct {
+	attempts atomic.Int64
+}
 
 func withStreamReplayCoordinator(ctx context.Context, coordinator streamReplayCoordinator) context.Context {
 	if ctx == nil {
@@ -71,6 +79,21 @@ func streamReplayAttemptFromContext(ctx context.Context) int {
 		return 0
 	}
 	return attempt
+}
+
+func withStreamReplayState(ctx context.Context, state *streamReplayState) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, streamReplayStateKey{}, state)
+}
+
+func streamReplayStateFromContext(ctx context.Context) *streamReplayState {
+	if ctx == nil {
+		return nil
+	}
+	state, _ := ctx.Value(streamReplayStateKey{}).(*streamReplayState)
+	return state
 }
 
 func withStreamReplayExcludedAuthIDs(ctx context.Context, authIDs []string) context.Context {

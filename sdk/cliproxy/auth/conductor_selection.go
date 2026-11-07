@@ -1585,7 +1585,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	wait, found := m.closestCooldownWaitWithAttemptedForRequest(ctx, providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted, opts.Headers)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
-			if transientUpstream {
+			if maxWait > 0 && transientUpstream {
 				return wait, true
 			}
 			return giveUp()
