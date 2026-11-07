@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -62,6 +63,15 @@ func TestQuotaTerminationFromSignalsRequiresBothResourceClasses(t *testing.T) {
 			},
 			want: QuotaTermination{Plan: QuotaExhausted, Recharge: QuotaUnknown},
 		},
+		{
+			name: "malformed plan window is unknown",
+			signals: map[string]string{
+				"X-Codex-5h-Used-Percent":    "not-a-number",
+				"X-Codex-1week-Used-Percent": "100",
+				"X-Codex-Credits-Balance":    "0",
+			},
+			want: QuotaTermination{Plan: QuotaUnknown, Recharge: QuotaExhausted},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,6 +80,18 @@ func TestQuotaTerminationFromSignalsRequiresBothResourceClasses(t *testing.T) {
 				t.Fatalf("quota termination = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestQuotaTerminationFromStateTreatsStaleObservationAsUnknown(t *testing.T) {
+	state := QuotaState{
+		ObservedAt: time.Now().Add(-quotaObservationMaxAge - time.Minute),
+		Signals: map[string]string{
+			"X-Codex-5h-Used-Percent": "100", "X-Codex-Credits-Balance": "0",
+		},
+	}
+	if got := quotaTerminationFromState("codex", state); got.ShouldTerminate() || got.Plan != QuotaUnknown || got.Recharge != QuotaUnknown {
+		t.Fatalf("stale quota state = %+v, want unknown/unknown", got)
 	}
 }
 
@@ -116,6 +138,27 @@ func TestManagerAllCandidatesQuotaTerminatedUsesANDAcrossCredentials(t *testing.
 	}
 }
 
+func TestManagerAllCandidatesQuotaTerminatedFiltersUnrelatedModels(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	targetModel := "quota-target-model"
+	targetAuthID := "quota-target-auth"
+	unrelatedAuthID := "quota-unrelated-auth"
+	registry.GetGlobalRegistry().RegisterClient(targetAuthID, "codex", []*registry.ModelInfo{{ID: targetModel}})
+	registry.GetGlobalRegistry().RegisterClient(unrelatedAuthID, "codex", []*registry.ModelInfo{{ID: "other-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(targetAuthID)
+		registry.GetGlobalRegistry().UnregisterClient(unrelatedAuthID)
+	})
+	now := time.Now()
+	manager.auths[targetAuthID] = &Auth{ID: targetAuthID, Provider: "codex", Quota: QuotaState{
+		ObservedAt: now, Signals: map[string]string{"X-Codex-5h-Used-Percent": "100", "X-Codex-Credits-Balance": "0"},
+	}}
+	manager.auths[unrelatedAuthID] = &Auth{ID: unrelatedAuthID, Provider: "codex"}
+	if !manager.allCandidatesQuotaTerminated([]string{"codex"}, targetModel) {
+		t.Fatal("unrelated model quota state must not block terminal decision for the requested model")
+	}
+}
+
 func TestQuotaErrorWithOneResourceRemainingStillRetries(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetUpstreamErrorRetryLimit(-1)
@@ -143,8 +186,25 @@ func TestQuotaErrorStopsOnlyWhenAllCandidatesHaveBothResourcesExhausted(t *testi
 		}},
 	}
 	err := quotaTestStatusError{status: 429, msg: "quota exhausted"}
-	if wait, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, err, 0, []string{"codex"}, "model", time.Hour, -1, 0, nil); retry || wait != 0 {
+	if wait, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, err, 0, []string{"codex"}, "", time.Hour, -1, 0, nil); retry || wait != 0 {
 		t.Fatalf("both resources exhausted = wait %s retry %t, want 0/false", wait, retry)
+	}
+}
+
+func TestFiniteQuotaRetryWaitsPastMaxInterval(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetUpstreamErrorRetryLimit(2)
+	manager.auths["quota-partial-finite"] = &Auth{
+		ID: "quota-partial-finite", Provider: "codex",
+		Quota: QuotaState{ObservedAt: time.Now(), Signals: map[string]string{
+			"X-Codex-5h-Used-Percent": "100", "X-Codex-Credits-Balance": "1",
+		}},
+	}
+	retryAfter := 2 * time.Second
+	err := withTrustedRetryAfter(quotaTestStatusError{status: 429, msg: "quota exhausted"}, &retryAfter)
+	wait, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, err, 0, []string{"codex"}, "model", time.Second, -1, 0, nil)
+	if !retry || wait != retryAfter {
+		t.Fatalf("finite quota retry = wait %s retry %t, want %s/true", wait, retry, retryAfter)
 	}
 }
 

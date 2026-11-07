@@ -3,7 +3,12 @@ package auth
 import (
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
+
+const quotaObservationMaxAge = time.Hour
 
 // QuotaAvailability is the knowledge state of one resource class.
 // Unknown is deliberately non-terminal: a missing, stale, expired, or failed
@@ -68,7 +73,7 @@ func quotaTerminationFromSignals(provider string, signals map[string]string) Quo
 func quotaTerminationFromState(provider string, quota QuotaState) QuotaTermination {
 	// A snapshot without an observation timestamp is not evidence. This also
 	// covers restored/expired state whose passive watermark was discarded.
-	if quota.ObservedAt.IsZero() || len(quota.Signals) == 0 {
+	if quota.ObservedAt.IsZero() || len(quota.Signals) == 0 || time.Since(quota.ObservedAt) > quotaObservationMaxAge || quota.ObservedAt.After(time.Now().Add(time.Minute)) {
 		return QuotaTermination{}
 	}
 	return quotaTerminationFromSignals(provider, quota.Signals)
@@ -84,7 +89,11 @@ func planAvailabilityFromSignals(provider string, signals map[string]string) Quo
 					windows = append(windows, QuotaExhausted)
 				} else if remaining >= 0 {
 					windows = append(windows, QuotaAvailable)
+				} else {
+					windows = append(windows, QuotaUnknown)
 				}
+			} else {
+				windows = append(windows, QuotaUnknown)
 			}
 		}
 		if strings.Contains(lower, "-status") && strings.Contains(lower, "ratelimit-unified-") {
@@ -93,6 +102,8 @@ func planAvailabilityFromSignals(provider string, signals map[string]string) Quo
 				windows = append(windows, QuotaAvailable)
 			case "rejected", "exhausted", "blocked", "denied":
 				windows = append(windows, QuotaExhausted)
+			default:
+				windows = append(windows, QuotaUnknown)
 			}
 		}
 		if provider == "codex" && strings.HasSuffix(lower, "-limit-reached") {
@@ -101,6 +112,8 @@ func planAvailabilityFromSignals(provider string, signals map[string]string) Quo
 				windows = append(windows, QuotaExhausted)
 			case "false", "0", "no":
 				windows = append(windows, QuotaAvailable)
+			default:
+				windows = append(windows, QuotaUnknown)
 			}
 		}
 	}
@@ -108,19 +121,16 @@ func planAvailabilityFromSignals(provider string, signals map[string]string) Quo
 }
 
 func rechargeAvailabilityFromSignals(provider string, signals map[string]string) QuotaAvailability {
-	var observed bool
 	var available bool
 	var exhausted bool
 	for key, value := range signals {
 		lower := strings.ToLower(key)
 		if provider == "codex" && strings.HasSuffix(lower, "credits-unlimited") {
-			observed = true
 			if isTruthy(value) {
 				available = true
 			}
 		}
 		if strings.HasSuffix(lower, "credits-balance") {
-			observed = true
 			if balance, ok := numericValue(value); ok {
 				if balance > 0 {
 					available = true
@@ -131,7 +141,6 @@ func rechargeAvailabilityFromSignals(provider string, signals map[string]string)
 			}
 		}
 		if strings.HasSuffix(lower, "credits-has-credits") {
-			observed = true
 			if isTruthy(value) {
 				available = true
 			}
@@ -140,7 +149,6 @@ func rechargeAvailabilityFromSignals(provider string, signals map[string]string)
 			}
 		}
 		if strings.HasSuffix(lower, "overage-limit-reached") {
-			observed = true
 			if isTruthy(value) {
 				exhausted = true
 			}
@@ -149,7 +157,6 @@ func rechargeAvailabilityFromSignals(provider string, signals map[string]string)
 			}
 		}
 		if strings.Contains(lower, "overage-status") {
-			observed = true
 			switch strings.ToLower(strings.TrimSpace(value)) {
 			case "allowed", "available", "ok":
 				available = true
@@ -163,9 +170,6 @@ func rechargeAvailabilityFromSignals(provider string, signals map[string]string)
 	}
 	if exhausted {
 		return QuotaExhausted
-	}
-	if observed {
-		return QuotaUnknown
 	}
 	return QuotaUnknown
 }
@@ -184,7 +188,7 @@ func isTruthy(raw string) bool {
 	}
 }
 
-func (m *Manager) allCandidatesQuotaTerminated(providers []string) bool {
+func (m *Manager) allCandidatesQuotaTerminated(providers []string, models ...string) bool {
 	if m == nil || len(providers) == 0 {
 		return false
 	}
@@ -193,6 +197,11 @@ func (m *Manager) allCandidatesQuotaTerminated(providers []string) bool {
 		providerSet[strings.ToLower(strings.TrimSpace(provider))] = struct{}{}
 	}
 	found := false
+	model := ""
+	if len(models) > 0 {
+		model = strings.TrimSpace(models[0])
+	}
+	registryRef := registry.GetGlobalRegistry()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for _, auth := range m.auths {
@@ -201,6 +210,9 @@ func (m *Manager) allCandidatesQuotaTerminated(providers []string) bool {
 		}
 		provider := canonicalSchedulingProvider(executorKeyFromAuth(auth))
 		if _, ok := providerSet[strings.ToLower(strings.TrimSpace(provider))]; !ok {
+			continue
+		}
+		if model != "" && !m.authSupportsRouteModel(registryRef, auth, model) {
 			continue
 		}
 		found = true

@@ -1482,7 +1482,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
 	configuredUpstreamLimit := m.configuredUpstreamErrorRetryLimit()
 	failureClass := clienterror.Classify(status, err.Error())
-	if failureClass == clienterror.FailureQuotaExhausted && m.allCandidatesQuotaTerminated(providers) {
+	if failureClass == clienterror.FailureQuotaExhausted && m.allCandidatesQuotaTerminated(providers, model) {
 		return 0, false
 	}
 	transientUpstream := isRetryableUpstreamFailure(err, failureClass)
@@ -1558,10 +1558,21 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 			}
 		}
 		if status != http.StatusTooManyRequests || !m.homeRetryAllowed(attempt, homeRetryLimit) {
+			if transientUpstream {
+				if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
+					return *retryAfter, true
+				}
+			}
 			return giveUp()
 		}
 		retryAfter := retryAfterFromError(err)
-		if retryAfter == nil || *retryAfter <= 0 || (maxWait <= 0 || *retryAfter > maxWait) {
+		if retryAfter == nil || *retryAfter <= 0 {
+			return giveUp()
+		}
+		if *retryAfter > maxWait && transientUpstream {
+			return *retryAfter, true
+		}
+		if maxWait <= 0 || *retryAfter > maxWait {
 			return giveUp()
 		}
 		return *retryAfter, true
@@ -1574,12 +1585,21 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	wait, found := m.closestCooldownWaitWithAttemptedForRequest(ctx, providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted, opts.Headers)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
+			if transientUpstream {
+				return wait, true
+			}
 			return giveUp()
 		}
 		return wait, true
 	}
 	if retryAfter := retryAfterFromError(err); retryAfter != nil {
-		if *retryAfter < 0 || (*retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait)) {
+		if *retryAfter < 0 {
+			return giveUp()
+		}
+		if *retryAfter > 0 && *retryAfter > maxWait && transientUpstream {
+			return *retryAfter, true
+		}
+		if *retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait) {
 			return giveUp()
 		}
 		return *retryAfter, true
