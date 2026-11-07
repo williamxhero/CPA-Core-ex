@@ -1482,7 +1482,17 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
 	configuredUpstreamLimit := m.configuredUpstreamErrorRetryLimit()
 	failureClass := clienterror.Classify(status, err.Error())
+	if failureClass == clienterror.FailureQuotaExhausted && m.allCandidatesQuotaTerminated(providers) {
+		return 0, false
+	}
 	transientUpstream := isRetryableUpstreamFailure(err, failureClass)
+	// A quota-shaped error is only terminal after both resource classes are
+	// explicitly exhausted across every eligible credential. Until then it is
+	// a retryable upstream failure, including when one class is unknown or the
+	// provider's quota read failed.
+	if failureClass == clienterror.FailureQuotaExhausted {
+		transientUpstream = true
+	}
 	if status == http.StatusOK && !hiddenRetry {
 		return 0, false
 	}
@@ -1656,7 +1666,8 @@ func isRequestRetryRoundError(err error) bool {
 	if clienterror.IsHiddenClientRetry(err.Error()) {
 		return true
 	}
-	if clienterror.Classify(statusCodeFromError(err), err.Error()) == clienterror.FailureTransientUpstream {
+	classified := clienterror.Classify(statusCodeFromError(err), err.Error())
+	if classified == clienterror.FailureTransientUpstream || classified == clienterror.FailureQuotaExhausted {
 		return true
 	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)
