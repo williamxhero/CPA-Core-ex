@@ -16,6 +16,11 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 ```
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
+## Deployment
+- CPA runtime work is local-only. Keep the small computer/yosef-server outside the scope of investigation, repair, and deployment.
+- After every bug fix that changes CPA-Core, deploy to the local machine with `D:\WILL\AGENT\CPA\ops\deploy-local-cpa-core.ps1`.
+- The deployment must create a backup, replace the live binary, restart the local CPA stack, and pass all readiness checks. Any failure must automatically restore the previous binary and restart the previous stack before reporting failure.
+
 ## Config
 - Default config: `config.yaml` (template: `config.example.yaml`)
 - `.env` is auto-loaded from the working directory
