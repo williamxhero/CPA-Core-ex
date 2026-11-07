@@ -110,7 +110,8 @@ func isTransientText(lower string) bool {
 	for _, phrase := range []string{
 		"server is busy", "server_busy", "upstream is busy", "temporarily unavailable", "temporary error",
 		"connection reset", "connection refused", "stream disconnected", "stream closed",
-		"idle timeout", "sse idle", "i/o timeout", "eof", "overloaded", "overload", "at capacity", "high demand",
+		"idle timeout", "sse idle", "i/o timeout", "eof", "inference admission unavailable", "admission unavailable",
+		"overloaded", "overload", "at capacity", "high demand",
 		"too many requests",
 	} {
 		if strings.Contains(lower, phrase) {

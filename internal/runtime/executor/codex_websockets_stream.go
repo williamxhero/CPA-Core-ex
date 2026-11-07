@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -313,7 +314,24 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	// delivered as an in-stream chunk after the buffered handshake so downstream behaviour stays
 	// identical to the unbuffered path instead of silently turning into a credential failover.
 	var bootstrapTerminalErr error
+	var bootstrapTimedOut atomic.Bool
+	var bootstrapTimeoutTimer *time.Timer
 	sawOutputDelta := false
+	if buffering && bootstrapTimeout > 0 {
+		bootstrapTimeoutTimer = time.AfterFunc(bootstrapTimeout, func() {
+			bootstrapTimedOut.Store(true)
+			if conn != nil {
+				_ = conn.Close()
+			}
+		})
+	}
+	stopBootstrapTimeout := func() {
+		if bootstrapTimeoutTimer != nil {
+			bootstrapTimeoutTimer.Stop()
+			bootstrapTimeoutTimer = nil
+		}
+	}
+	defer stopBootstrapTimeout()
 
 	if buffering {
 		for {
@@ -331,6 +349,23 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			msgType, payload, errRead := readCodexWebsocketMessage(ctx, sess, conn, readCh)
 			if errRead != nil {
+				if bootstrapTimedOut.Load() {
+					if sess != nil {
+						e.invalidateUpstreamConn(sess, conn, "bootstrap_timeout", errRead)
+						sess.clearActive(conn, readCh)
+						unlockStreamSession()
+						if isEphemeralSession {
+							closeCodexWebsocketSession(sess, "bootstrap_timeout")
+						}
+					} else {
+						logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "bootstrap_timeout", errRead)
+						_ = closer.Close()
+					}
+					errTimeout := newCodexBootstrapTimeoutError()
+					helps.RecordAPIWebsocketError(ctx, e.cfg, "bootstrap_timeout", errTimeout)
+					reporter.PublishFailure(ctx, errTimeout)
+					return nil, errTimeout
+				}
 				mappedErr := codexWebsocketTurnEventID(mapCodexWebsocketReadError(errRead), originalPayload)
 				if sess != nil {
 					e.invalidateUpstreamConn(sess, conn, "read_error", mappedErr)
@@ -347,6 +382,23 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				reporter.PublishFailure(ctx, mappedErr)
 				return nil, mappedErr
 			}
+			if bootstrapTimedOut.Load() {
+				if sess != nil {
+					e.invalidateUpstreamConn(sess, conn, "bootstrap_timeout", nil)
+					sess.clearActive(conn, readCh)
+					unlockStreamSession()
+					if isEphemeralSession {
+						closeCodexWebsocketSession(sess, "bootstrap_timeout")
+					}
+				} else {
+					logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "bootstrap_timeout", nil)
+					_ = closer.Close()
+				}
+				errTimeout := newCodexBootstrapTimeoutError()
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "bootstrap_timeout", errTimeout)
+				reporter.PublishFailure(ctx, errTimeout)
+				return nil, errTimeout
+			}
 			// Count every message ReadMessage returns, including the ones this loop goes on to skip,
 			// so a peer sending only skippable text frames still closes the window. Control frames
 			// are not counted: the websocket library answers ping and pong inside ReadMessage and
@@ -357,6 +409,24 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			bufferedFrames++
 			timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 			timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
+			if timeoutReached {
+				bootstrapTimedOut.Store(true)
+				if sess != nil {
+					e.invalidateUpstreamConn(sess, conn, "bootstrap_timeout", nil)
+					sess.clearActive(conn, readCh)
+					unlockStreamSession()
+					if isEphemeralSession {
+						closeCodexWebsocketSession(sess, "bootstrap_timeout")
+					}
+				} else {
+					logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "bootstrap_timeout", nil)
+					_ = closer.Close()
+				}
+				errTimeout := newCodexBootstrapTimeoutError()
+				helps.RecordAPIWebsocketError(ctx, e.cfg, "bootstrap_timeout", errTimeout)
+				reporter.PublishFailure(ctx, errTimeout)
+				return nil, errTimeout
+			}
 			windowOpen := bufferedFrames <= codexBootstrapMaxBufferedFrames && !timeoutReached
 			if !windowOpen && !exhaustionLogged {
 				exhaustionLogged = true
@@ -492,6 +562,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" || eventType == "response.failed" || eventType == "error"
 			if helps.HasMeaningfulCodexOutputDelta(payload) {
 				sawOutputDelta = true
+				stopBootstrapTimeout()
 			}
 			if helps.IsCodexTerminalEmptyIncomplete(payload, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
 				streamErr := newCodexEmptyIncompleteStreamError()
@@ -512,6 +583,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 			completedPayload := payload
 			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+				stopBootstrapTimeout()
 				completedPayload = normalizeCodexWebsocketCompletion(completedPayload)
 				if !preserveNativeOutput {
 					completedPayload = patchCodexCompletedOutput(completedPayload, outputItemsByIndex, outputItemsFallback)

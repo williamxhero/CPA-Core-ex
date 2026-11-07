@@ -309,11 +309,13 @@ type CodexConfig struct {
 	// either transport is not, so the request may be retried on another credential.
 	// Default is false.
 	StreamBootstrapBuffering bool `yaml:"stream-bootstrap-buffering" json:"stream-bootstrap-buffering"`
-	// StreamBootstrapTimeout specifies an optional maximum duration to hold back uncommitted response
-	// headers during bootstrap buffering before releasing the stream to the client.
+	// StreamBootstrapTimeout specifies an optional maximum duration for the stream bootstrap phase.
+	// During buffering it bounds how long CPA waits for the provider to produce the first business
+	// payload. If the provider sends no business payload before this deadline, CPA cancels that
+	// upstream attempt and retries it as a transient upstream failure.
 	// Defaults to "0" (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
-	// When set (e.g. "20s"), the stream is released once the time ceiling is reached, avoiding
-	// reverse-proxy timeouts (e.g. Nginx 60s proxy_read_timeout).
+	// When set (e.g. "20s"), the upstream attempt is canceled once the time ceiling is reached
+	// without business output, allowing the conductor to retry it instead of hanging the client.
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
 	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`

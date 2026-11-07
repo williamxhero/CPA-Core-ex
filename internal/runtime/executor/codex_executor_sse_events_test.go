@@ -272,7 +272,7 @@ func TestCodexExecuteStreamEventExceedsBudgetWhileAssemblingReleasesStream(t *te
 	}
 }
 
-func TestCodexExecuteStreamEventExceedsTimeBudgetWhileAssemblingReleasesStream(t *testing.T) {
+func TestCodexExecuteStreamEventExceedsTimeBudgetWhileAssemblingAbortsAttempt(t *testing.T) {
 	// Time budget check while assembling a multi-line event.
 	t0 := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	clock := withMockClock(t, t0)
@@ -309,22 +309,15 @@ func TestCodexExecuteStreamEventExceedsTimeBudgetWhileAssemblingReleasesStream(t
 
 	req, opts := codexTestRequest()
 	result, err := NewCodexExecutor(codexBufferingConfigWithTimeout(true, "10s")).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
-	if err != nil {
-		t.Fatalf("the time budget must release the stream: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "bootstrap timeout") {
+		t.Fatalf("expected bootstrap timeout, got %v", err)
 	}
-	if result == nil {
-		t.Fatal("expected a stream result once the time budget released the stream")
-	}
-	body, streamErr := drainChunks(result)
-	if streamErr == nil {
-		t.Fatal("expected the overload to arrive in-stream after the time budget released")
-	}
-	if !strings.Contains(body, "response.in_progress") || !strings.Contains(body, `"t_item":1`) {
-		t.Fatalf("body = %q, want valid assembled in_progress with t_item:1", body)
+	if result != nil {
+		t.Fatal("expected nil stream result after the upstream attempt was aborted")
 	}
 }
 
-func TestCodexExecuteStreamSplitCompletedAfterOutputAndClockAdvance(t *testing.T) {
+func TestCodexExecuteStreamSplitCompletedAfterOutputStopsBootstrapTimeout(t *testing.T) {
 	t0 := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	clock := withMockClock(t, t0)
 
@@ -350,10 +343,6 @@ func TestCodexExecuteStreamSplitCompletedAfterOutputAndClockAdvance(t *testing.T
 			f.Flush()
 		}
 
-		<-bootstrapStarted
-		// Advance clock past the 10s bootstrap timeout.
-		clock.advance(20 * time.Second)
-
 		// Send split response.completed.
 		_, _ = w.Write([]byte("event: response.completed\ndata: " + completed[:cut] + "\ndata: " + completed[cut:] + "\n\n"))
 		if f, ok := w.(http.Flusher); ok {
@@ -375,7 +364,7 @@ func TestCodexExecuteStreamSplitCompletedAfterOutputAndClockAdvance(t *testing.T
 		t.Fatalf("unexpected stream error: %v", streamErr)
 	}
 	if !strings.Contains(body, "response.completed") || !strings.Contains(body, `"id":"resp_clock"`) {
-		t.Fatalf("body = %q, want valid assembled response.completed after clock advance", body)
+		t.Fatalf("body = %q, want valid assembled response.completed after output", body)
 	}
 }
 

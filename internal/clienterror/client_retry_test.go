@@ -22,6 +22,12 @@ func TestIsHiddenClientRetry(t *testing.T) {
 	if !IsHiddenClientRetry(`{"error":{"code":"permission_denied","message":"We’re currently experiencing high demand, which may cause temporary errors."}}`) {
 		t.Fatal("high-demand text should be retried inside CPA")
 	}
+	if !IsHiddenClientRetry(`HTTP 503: inference admission unavailable or restricted`) {
+		t.Fatal("inference admission rejection should be retried inside CPA")
+	}
+	if !IsHiddenClientRetry("custom:cpa reported it was overloaded on all 8 attempts — HTTP 503: inference admission unavailable or restricted") {
+		t.Fatal("Hermes overload summary should remain an internal CPA retry")
+	}
 	if IsHiddenClientRetry(`{"error":{"type":"usage_limit_reached","message":"Selected model is at capacity. Please try a different model."}}`) {
 		t.Fatal("exhausted quota must not be replayed as capacity")
 	}
@@ -67,6 +73,7 @@ func TestClassifyTransientUpstreamFailureVariants(t *testing.T) {
 		{name: "sse idle", text: "SSE idle timeout while waiting for event", hidden: true},
 		{name: "http 5xx", status: http.StatusBadGateway, text: "bad gateway"},
 		{name: "http 429", status: http.StatusTooManyRequests, text: "too many requests", hidden: true},
+		{name: "inference admission 503", status: http.StatusServiceUnavailable, text: "inference admission unavailable or restricted", hidden: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

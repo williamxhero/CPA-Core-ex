@@ -167,6 +167,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
+		if maxRetryCredentials > 0 && defaultRequestRetry == 0 {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -236,6 +239,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
+		if maxRetryCredentials > 0 && defaultRequestRetry == 0 {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -272,8 +278,34 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	if !streamReplayDisabled(ctx) && maxRetryCredentials == 0 {
+		replayProviders := append([]string(nil), normalized...)
+		replayReq := req
+		replayReq.Payload = bytes.Clone(req.Payload)
+		replayOpts := opts
+		replayOpts.Headers = cloneRequestHeaders(opts.Headers)
+		replayOpts.Query = cloneStreamReplayQuery(opts.Query)
+		replayOpts.OriginalRequest = bytes.Clone(opts.OriginalRequest)
+		replayOpts.Metadata = cloneRequestMetadata(opts.Metadata)
+		replayAttempt := streamReplayAttemptFromContext(ctx)
+		ctx = withStreamReplayCoordinator(ctx, func(replayCtx context.Context, cause error) (*cliproxyexecutor.StreamResult, error) {
+			limit := m.configuredUpstreamErrorRetryLimit()
+			if limit == -2 {
+				limit, _, _ = m.retrySettings()
+				if limit < 0 {
+					limit = 0
+				}
+			}
+			if limit >= 0 && replayAttempt >= limit {
+				return nil, cause
+			}
+			replayAttempt++
+			replayCtx = withStreamReplayAttempt(withStreamReplayDisabled(replayCtx), replayAttempt)
+			return m.ExecuteStream(replayCtx, replayProviders, replayReq, replayOpts)
+		})
+	}
+
 	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
 		if limit < 0 {
 			defaultRequestRetry = int(^uint(0) >> 1)
@@ -325,6 +357,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, unwrapExecutionBoundaryError(errStream)
 		}
 		lastErr = errStream
+		if maxRetryCredentials > 0 && defaultRequestRetry == 0 {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errStream, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -556,6 +591,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	for _, authID := range streamReplayExcludedAuthIDsFromContext(ctx) {
+		if authID = strings.TrimSpace(authID); authID != "" {
+			tried[authID] = struct{}{}
+		}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}

@@ -234,6 +234,7 @@ func TestCapacityRoutingVariants(t *testing.T) {
 		event  string
 	}{
 		{"nested_502_message", 502, `{"error":{"message":"Selected Model is at capacity"}}`},
+		{"inference_admission_503", 503, `{"error":{"message":"inference admission unavailable or restricted"}}`},
 		{"overloaded_code", 200, `{"type":"error","error":{"code":"server_is_overloaded","message":"busy"}}`},
 		{"unavailable_type", 200, `{"type":"error","error":{"type":"service_unavailable_error","message":"busy"}}`},
 		{"model_capacity_code", 200, `{"type":"error","error":{"code":"model_at_capacity","message":"busy"}}`},
