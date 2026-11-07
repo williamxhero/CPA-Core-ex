@@ -183,3 +183,28 @@ func TestUnifiedUpstreamRetryLimitCountsAdditionalAttempts(t *testing.T) {
 		t.Fatal("attempt 2 must stop after two additional retries")
 	}
 }
+
+func TestUnlimitedTransientRetryHasSafetyBackoff(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	cause := &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "inference admission unavailable or restricted", Retryable: true}
+
+	wait, retry := manager.shouldRetryAfterErrorWithAttempted(
+		context.Background(),
+		cliproxyexecutor.Options{},
+		cause,
+		0,
+		nil,
+		"gpt-6.1-sol",
+		0,
+		-1,
+		0,
+		nil,
+	)
+	if !retry {
+		t.Fatal("unlimited transient retry must remain enabled")
+	}
+	if wait != clienterror.HiddenClientRetryGap {
+		t.Fatalf("unlimited transient retry wait = %s, want safety gap %s", wait, clienterror.HiddenClientRetryGap)
+	}
+}

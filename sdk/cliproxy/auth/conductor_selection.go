@@ -1504,12 +1504,15 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	// An explicit unlimited upstream policy is authoritative. It bypasses the
 	// legacy request-retry/max-retry-interval ceilings while preserving the
-	// existing credential cooldown and rotation machinery.
+	// existing credential cooldown and rotation machinery. A bounded safety gap
+	// is still required when the provider omitted Retry-After: disabling
+	// credential cooling must never turn an unlimited retry policy into a hot
+	// loop that starves the CPA process.
 	if configuredUpstreamLimit == -1 && transientUpstream {
 		if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
 			return *retryAfter, true
 		}
-		return 0, true
+		return unlimitedUpstreamRetrySafetyGap(maxWait), true
 	}
 	if hiddenRetry && defaultRequestRetry < clienterror.HiddenClientRetryMinimum {
 		defaultRequestRetry = clienterror.HiddenClientRetryMinimum
@@ -1731,6 +1734,19 @@ func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// unlimitedUpstreamRetrySafetyGap prevents an explicit unlimited retry policy
+// from becoming a busy loop when the upstream supplies no Retry-After hint.
+// This is deliberately separate from credential cooldown: disable-cooling may
+// be selected for routing state, but it must not allow transient provider
+// failures to starve the process or flood the upstream.
+func unlimitedUpstreamRetrySafetyGap(maxWait time.Duration) time.Duration {
+	const safetyGap = clienterror.HiddenClientRetryGap
+	if maxWait > 0 && maxWait < safetyGap {
+		return maxWait
+	}
+	return safetyGap
 }
 
 // List returns all auth entries currently known by the manager.
