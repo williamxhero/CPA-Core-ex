@@ -142,6 +142,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
+		if limit < 0 {
+			defaultRequestRetry = int(^uint(0) >> 1)
+		} else if limit > defaultRequestRetry {
+			defaultRequestRetry = limit
+		}
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -204,6 +211,13 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
+		if limit < 0 {
+			defaultRequestRetry = int(^uint(0) >> 1)
+		} else if limit > defaultRequestRetry {
+			defaultRequestRetry = limit
+		}
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -260,6 +274,13 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
+		if limit < 0 {
+			defaultRequestRetry = int(^uint(0) >> 1)
+		} else if limit > defaultRequestRetry {
+			defaultRequestRetry = limit
+		}
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error

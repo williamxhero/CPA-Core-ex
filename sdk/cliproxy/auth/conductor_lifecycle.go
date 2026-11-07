@@ -33,6 +33,18 @@ func (m *Manager) SetRetryConfig(retry int, maxRetryInterval time.Duration, maxR
 	m.maxRetryInterval.Store(maxRetryInterval.Nanoseconds())
 }
 
+// SetUpstreamErrorRetryLimit configures the shared transient-upstream retry
+// policy. A negative value other than -1 is normalized to unlimited (-1).
+func (m *Manager) SetUpstreamErrorRetryLimit(limit int) {
+	if m == nil {
+		return
+	}
+	if limit < -1 {
+		limit = -1
+	}
+	m.upstreamErrorRetryLimit.Store(int32(limit))
+}
+
 // RegisterExecutor registers a provider executor with the manager.
 func (m *Manager) RegisterExecutor(executor ProviderExecutor) {
 	if executor == nil {

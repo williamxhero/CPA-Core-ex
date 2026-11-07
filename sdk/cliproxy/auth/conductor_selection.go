@@ -1155,6 +1155,13 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func (m *Manager) configuredUpstreamErrorRetryLimit() int {
+	if m == nil {
+		return -2
+	}
+	return int(m.upstreamErrorRetryLimit.Load())
+}
+
 func effectiveRequestRetryLimit(auth *Auth, defaultRetry int) int {
 	if defaultRetry < 0 {
 		defaultRetry = 0
@@ -1473,16 +1480,34 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	status := statusCodeFromError(err)
 	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
+	configuredUpstreamLimit := m.configuredUpstreamErrorRetryLimit()
+	failureClass := clienterror.Classify(status, err.Error())
+	transientUpstream := isRetryableUpstreamFailure(err, failureClass)
 	if status == http.StatusOK && !hiddenRetry {
 		return 0, false
 	}
 	if isRequestInvalidError(err) || isRequestStopError(err) {
 		return 0, false
 	}
+	if configuredUpstreamLimit != -2 && transientUpstream && configuredUpstreamLimit >= 0 && attempt >= configuredUpstreamLimit {
+		return 0, false
+	}
+	// An explicit unlimited upstream policy is authoritative. It bypasses the
+	// legacy request-retry/max-retry-interval ceilings while preserving the
+	// existing credential cooldown and rotation machinery.
+	if configuredUpstreamLimit == -1 && transientUpstream {
+		if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
+			return *retryAfter, true
+		}
+		return 0, true
+	}
 	if hiddenRetry && defaultRequestRetry < clienterror.HiddenClientRetryMinimum {
 		defaultRequestRetry = clienterror.HiddenClientRetryMinimum
 	}
 	giveUp := func() (time.Duration, bool) {
+		if configuredUpstreamLimit != -2 && transientUpstream {
+			return 0, false
+		}
 		if hiddenRetry && attempt >= 0 && attempt < defaultRequestRetry+clienterror.HiddenClientRetryExtra {
 			return clienterror.HiddenClientRetryGap, true
 		}
@@ -1552,6 +1577,18 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	return 0, true
 }
 
+func isRetryableUpstreamFailure(err error, class clienterror.FailureClass) bool {
+	if err == nil || isRequestStopError(err) || isRequestTerminatedError(err) || IsTerminalAuthError(err) {
+		return false
+	}
+	if class == clienterror.FailureTransientUpstream {
+		return true
+	}
+	// Transport failures may not carry a status or a recognizable phrase, but
+	// the executor marks them after an upstream attempt. Keep those retryable.
+	return class == clienterror.FailureUnknown && hasUpstreamExecutionAttempt(err) && isTransientTransportError(err)
+}
+
 func (m *Manager) homeRetryAllowed(attempt int, retryLimit int) bool {
 	if m == nil || !m.HomeEnabled() || attempt < 0 {
 		return false
@@ -1617,6 +1654,9 @@ func isRequestRetryRoundError(err error) bool {
 		return false
 	}
 	if clienterror.IsHiddenClientRetry(err.Error()) {
+		return true
+	}
+	if clienterror.Classify(statusCodeFromError(err), err.Error()) == clienterror.FailureTransientUpstream {
 		return true
 	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)

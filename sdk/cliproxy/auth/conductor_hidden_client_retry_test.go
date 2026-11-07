@@ -136,3 +136,25 @@ func TestHiddenIncompleteStreamRetryStaysInsideCPA(t *testing.T) {
 		t.Fatalf("incomplete stream must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
 	}
 }
+
+func TestHiddenNestedIncompleteStreamRetryStaysInsideCPA(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	cause := incompleteStreamRequestScopedError{
+		msg: "stream disconnected before completion: stream error: stream disconnected before completion: stream closed before response.completed",
+	}
+	waitGot, retry := manager.shouldRetryAfterErrorWithAttempted(
+		context.Background(),
+		cliproxyexecutor.Options{},
+		cause,
+		0,
+		nil,
+		"gpt-5.1-codex",
+		time.Second,
+		0,
+		0,
+		nil,
+	)
+	if !retry || waitGot != clienterror.HiddenClientRetryGap {
+		t.Fatalf("nested incomplete stream must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
+	}
+}

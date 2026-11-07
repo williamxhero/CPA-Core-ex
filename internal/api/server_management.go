@@ -123,6 +123,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/max-retry-interval", s.mgmt.GetMaxRetryInterval)
 		mgmt.PUT("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
 		mgmt.PATCH("/max-retry-interval", s.mgmt.PutMaxRetryInterval)
+		mgmt.GET("/upstream-error-retry-limit", s.mgmt.GetUpstreamErrorRetryLimit)
+		mgmt.PUT("/upstream-error-retry-limit", s.mgmt.PutUpstreamErrorRetryLimit)
+		mgmt.PATCH("/upstream-error-retry-limit", s.mgmt.PutUpstreamErrorRetryLimit)
 
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)

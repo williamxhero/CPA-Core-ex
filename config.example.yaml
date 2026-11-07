@@ -237,6 +237,11 @@ routing:
     # Retry rounds that need no wait remain controlled by request-retry.
     max-retry-interval: 30
 
+    # Transient upstream failures stay inside CPA by default until success,
+    # client cancellation, or an explicit resource-exhausted result.
+    # -1 = unlimited, 0 = no additional retry, positive values count retries.
+    upstream-error-retry-limit: -1
+
   cooldown:
     # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
     # A credential/provider disable-cooling value, when present, overrides this global value.
