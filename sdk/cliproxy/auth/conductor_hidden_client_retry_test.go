@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -156,5 +157,29 @@ func TestHiddenNestedIncompleteStreamRetryStaysInsideCPA(t *testing.T) {
 	)
 	if !retry || waitGot != clienterror.HiddenClientRetryGap {
 		t.Fatalf("nested incomplete stream must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
+	}
+}
+
+func TestUnifiedUpstreamRetryLimitCountsAdditionalAttempts(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(5, 0, 0)
+	manager.SetUpstreamErrorRetryLimit(2)
+	executor := &authFallbackExecutor{id: "codex"}
+	manager.RegisterExecutor(executor)
+	model := "retry-limit-unified-model"
+	authID := "retry-limit-unified-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	cause := hiddenRetryStatusError{msg: "exceeded retry limit, last status: 429 Too Many Requests", status: http.StatusTooManyRequests}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, cause, attempt, []string{"codex"}, model, 0, -1, 5, nil); !retry {
+			t.Fatalf("attempt %d should retry under limit 2", attempt)
+		}
+	}
+	if _, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, cause, 2, []string{"codex"}, model, 0, -1, 5, nil); retry {
+		t.Fatal("attempt 2 must stop after two additional retries")
 	}
 }

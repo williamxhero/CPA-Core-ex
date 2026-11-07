@@ -46,6 +46,9 @@ func IsHiddenClientRetry(text string) bool {
 	if isCapacityPressure(lower) {
 		return true
 	}
+	if isQuotaExhausted(lower) {
+		return false
+	}
 	if strings.Contains(lower, "an error occurred while processing your request") &&
 		(strings.Contains(lower, "you can retry your request") || strings.Contains(lower, "help.openai.com")) {
 		return true
@@ -53,8 +56,7 @@ func IsHiddenClientRetry(text string) bool {
 	// Incomplete Codex streams and OpenAI "stream disconnected" failures must stay
 	// inside CPA. The bare incomplete-stream wording has no help.openai.com hint,
 	// but replaying on another credential is still the correct recovery.
-	return strings.Contains(lower, "stream disconnected before completion") ||
-		strings.Contains(lower, "stream closed before response.completed")
+	return isTransientText(lower)
 }
 
 // Classify returns the shared retry disposition for an upstream status/body.
@@ -98,10 +100,18 @@ func isQuotaExhausted(lower string) bool {
 }
 
 func isTransientText(lower string) bool {
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "exceeded retry limit") &&
+		(strings.Contains(lower, "429") || strings.Contains(lower, "too many requests")) {
+		return true
+	}
 	for _, phrase := range []string{
-		"server is busy", "server_busy", "temporarily unavailable", "temporary error",
+		"server is busy", "server_busy", "upstream is busy", "temporarily unavailable", "temporary error",
 		"connection reset", "connection refused", "stream disconnected", "stream closed",
-		"idle timeout", "i/o timeout", "eof", "overloaded", "at capacity", "high demand",
+		"idle timeout", "sse idle", "i/o timeout", "eof", "overloaded", "overload", "at capacity", "high demand",
+		"too many requests",
 	} {
 		if strings.Contains(lower, phrase) {
 			return true
@@ -126,8 +136,10 @@ func isCapacityPressure(lower string) bool {
 		return false
 	}
 	return strings.Contains(lower, "model is at capacity") ||
+		strings.Contains(lower, "at capacity") ||
 		strings.Contains(lower, "please try a different model") ||
 		strings.Contains(lower, "server_is_overloaded") ||
+		strings.Contains(lower, "server is overloaded") ||
 		strings.Contains(lower, "servers are currently overloaded") ||
 		strings.Contains(lower, "high demand")
 }
