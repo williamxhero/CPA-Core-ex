@@ -1,6 +1,7 @@
 package clienterror
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,20 @@ import (
 // Provider adapters should map provider-specific codes into this vocabulary
 // before the retry coordinator makes a termination decision.
 type FailureClass int
+
+// IsUpstreamHTTPResponse reports whether err came from an upstream HTTP
+// response rather than from the downstream request context. This distinction
+// matters for HTTP 499, which is also used by proxies for upstream disconnects.
+func IsUpstreamHTTPResponse(err error) bool {
+	if err == nil {
+		return false
+	}
+	type upstreamResponseMarker interface {
+		IsUpstreamHTTPResponse() bool
+	}
+	var marker upstreamResponseMarker
+	return errors.As(err, &marker) && marker != nil && marker.IsUpstreamHTTPResponse()
+}
 
 const (
 	FailureUnknown FailureClass = iota

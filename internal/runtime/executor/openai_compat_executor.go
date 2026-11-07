@@ -1291,6 +1291,10 @@ func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
 
+// IsUpstreamHTTPResponse distinguishes a provider response such as HTTP 499
+// from a downstream context cancellation. Proxies commonly use 499 for both.
+func (e statusErr) IsUpstreamHTTPResponse() bool { return e.code >= 400 && e.code <= 599 }
+
 // LogDiagnostic lets upstream failure logs explain a sanitized client message.
 func (e statusErr) LogDiagnostic() string { return e.diagnostic }
 

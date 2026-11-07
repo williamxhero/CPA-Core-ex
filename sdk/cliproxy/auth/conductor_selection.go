@@ -1614,6 +1614,11 @@ func isRetryableUpstreamFailure(err error, class clienterror.FailureClass) bool 
 	if err == nil || isRequestStopError(err) || isRequestTerminatedError(err) || IsTerminalAuthError(err) {
 		return false
 	}
+	if class == clienterror.FailureClientCanceled &&
+		statusCodeFromError(err) == clienterror.StatusClientClosedRequest &&
+		clienterror.IsUpstreamHTTPResponse(err) {
+		return true
+	}
 	if class == clienterror.FailureTransientUpstream {
 		return true
 	}
@@ -1690,6 +1695,11 @@ func isRequestRetryRoundError(err error) bool {
 		return true
 	}
 	classified := clienterror.Classify(statusCodeFromError(err), err.Error())
+	if classified == clienterror.FailureClientCanceled &&
+		statusCodeFromError(err) == clienterror.StatusClientClosedRequest &&
+		clienterror.IsUpstreamHTTPResponse(err) {
+		return true
+	}
 	if classified == clienterror.FailureTransientUpstream || classified == clienterror.FailureQuotaExhausted {
 		return true
 	}

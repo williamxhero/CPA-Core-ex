@@ -298,7 +298,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 		}
 		retryable := func(err error) bool {
-			if err == nil || replay == nil || deliveredAny {
+			if err == nil || replay == nil || deliveredAny || (ctx != nil && ctx.Err() != nil) {
 				return false
 			}
 			return isRetryableUpstreamFailure(err, clienterror.Classify(statusCodeFromError(err), err.Error()))

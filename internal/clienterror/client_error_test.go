@@ -388,3 +388,16 @@ func TestIsClientCancellation(t *testing.T) {
 		})
 	}
 }
+
+type upstreamHTTPResponseError struct{}
+
+func (upstreamHTTPResponseError) Error() string                { return "context canceled" }
+func (upstreamHTTPResponseError) StatusCode() int              { return StatusClientClosedRequest }
+func (upstreamHTTPResponseError) IsUpstreamHTTPResponse() bool { return true }
+
+func TestIsClientCancellationDoesNotMisclassifyUpstream499(t *testing.T) {
+	err := upstreamHTTPResponseError{}
+	if IsClientCancellation(StatusClientClosedRequest, err) {
+		t.Fatal("upstream HTTP 499 must not be classified as a downstream client cancellation")
+	}
+}

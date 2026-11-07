@@ -80,6 +80,70 @@ func TestExecuteStreamReplaysPreOutputAdmissionFailureWithoutLeakingIt(t *testin
 	}
 }
 
+func TestExecuteStreamReplaysUpstream499ContextCanceledBeforeOutput(t *testing.T) {
+	const (
+		model = "stream-replay-499-model"
+		authA = "stream-replay-499-a"
+		authB = "stream-replay-499-b"
+	)
+
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("Register(%s): %v", id, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	var mu sync.Mutex
+	var attempts []string
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "codex",
+		streamFn: func(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			mu.Lock()
+			attempts = append(attempts, auth.ID)
+			mu.Unlock()
+			chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+			if auth.ID == authA {
+				chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: 499, Message: "context canceled", Retryable: true}}
+			} else {
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"recovered\"}]}]}}\n\n")}
+			}
+			close(chunks)
+			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	})
+
+	stream, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream(): %v", errExecute)
+	}
+	var payload strings.Builder
+	var streamErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		payload.Write(chunk.Payload)
+	}
+	if streamErr != nil {
+		t.Fatalf("upstream 499 leaked terminal error: %v", streamErr)
+	}
+	if !strings.Contains(payload.String(), "recovered") {
+		t.Fatalf("payload = %q, want recovered response", payload.String())
+	}
+	mu.Lock()
+	gotAttempts := append([]string(nil), attempts...)
+	mu.Unlock()
+	if len(gotAttempts) != 2 || gotAttempts[0] != authA || gotAttempts[1] != authB {
+		t.Fatalf("attempts = %v, want [%s %s]", gotAttempts, authA, authB)
+	}
+}
+
 func TestExecuteStreamAbortsSilentProviderAtBootstrapTimeout(t *testing.T) {
 	const (
 		model = "stream-bootstrap-timeout-model"

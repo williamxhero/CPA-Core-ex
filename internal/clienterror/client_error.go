@@ -474,9 +474,15 @@ func hasRequestFaultBody(err error) bool {
 // a client-initiated cancellation (HTTP 499 StatusClientClosedRequest or context.Canceled).
 func IsClientCancellation(status int, err error) bool {
 	if status == StatusClientClosedRequest {
+		if IsUpstreamHTTPResponse(err) {
+			return false
+		}
 		return true
 	}
 	if err != nil {
+		if IsUpstreamHTTPResponse(err) {
+			return false
+		}
 		if errors.Is(err, context.Canceled) {
 			return true
 		}
