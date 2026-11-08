@@ -461,6 +461,9 @@ func (t *utlsChatGPTFallbackRoundTripper) RoundTrip(req *http.Request) (*http.Re
 		log.Debugf("codex TLS fallback succeeded via standard TLS")
 		return resp, errFallback
 	}
+	if req.Context().Err() != nil {
+		return nil, errFallback
+	}
 	// Keep the client-facing error safe while retaining both underlying errors
 	// for the conductor's transient transport classifier. The aggregate never
 	// includes URLs, headers, credentials, or request content.

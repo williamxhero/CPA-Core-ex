@@ -185,6 +185,29 @@ func TestUtlsChatGPTFallbackSkipsResponseAndCancellation(t *testing.T) {
 	}
 }
 
+func TestUtlsChatGPTFallbackDoesNotAggregateCallerCancellationDuringFallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	primary := utlsClientRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})
+	fallback := utlsClientRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		cancel()
+		return nil, context.Canceled
+	})
+	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	_, errRoundTrip := (&utlsChatGPTFallbackRoundTripper{primary: primary, fallback: fallback}).RoundTrip(req)
+	if !errors.Is(errRoundTrip, context.Canceled) {
+		t.Fatalf("RoundTrip error = %v, want caller cancellation", errRoundTrip)
+	}
+	if strings.Contains(errRoundTrip.Error(), "TLS fallback") {
+		t.Fatalf("caller cancellation was wrapped as fallback aggregate: %v", errRoundTrip)
+	}
+}
+
 type oneShotBody struct{ io.Reader }
 
 func (b *oneShotBody) Close() error { return nil }
