@@ -1,6 +1,9 @@
 package executor
 
-import "strings"
+import (
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"strings"
+)
 
 // openAICompatModelMode describes the upstream API shape a model expects.
 // The table is deliberately data-driven so adding a model does not require
@@ -27,4 +30,14 @@ func resolveOpenAICompatModelMode(model string) openAICompatModelMode {
 		return mode
 	}
 	return openAICompatModelModeAuto
+}
+
+func resolveOpenAICompatModelModeForConfig(model string, compat *config.OpenAICompatibility) openAICompatModelMode {
+	if compat != nil {
+		switch openAICompatModelMode(strings.ToLower(strings.TrimSpace(compat.UpstreamProtocol))) {
+		case openAICompatModelModeChat, openAICompatModelModeResponses, openAICompatModelModeImage:
+			return openAICompatModelMode(strings.ToLower(strings.TrimSpace(compat.UpstreamProtocol)))
+		}
+	}
+	return resolveOpenAICompatModelMode(model)
 }

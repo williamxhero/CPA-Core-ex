@@ -1070,6 +1070,10 @@ type OpenAICompatibility struct {
 	// Name is the identifier for this OpenAI compatibility configuration.
 	Name string `yaml:"name" json:"name"`
 
+	// UpstreamProtocol overrides automatic capability routing for this provider.
+	// Valid values are auto, chat, responses and image.
+	UpstreamProtocol string `yaml:"upstream-protocol,omitempty" json:"upstream-protocol,omitempty"`
+
 	// Priority controls selection preference when multiple providers or credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`

@@ -142,7 +142,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
-	if opts.Alt != "responses/compact" && resolveOpenAICompatModelMode(baseModel) == openAICompatModelModeResponses {
+	if opts.Alt != "responses/compact" && resolveOpenAICompatModelModeForConfig(baseModel, compat) == openAICompatModelModeResponses {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses"
 	}
@@ -392,7 +392,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
-	if opts.Alt != "responses/compact" && resolveOpenAICompatModelMode(baseModel) == openAICompatModelModeResponses {
+	if opts.Alt != "responses/compact" && resolveOpenAICompatModelModeForConfig(baseModel, compat) == openAICompatModelModeResponses {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses"
 	}
