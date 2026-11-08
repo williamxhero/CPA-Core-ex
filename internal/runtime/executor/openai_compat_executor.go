@@ -103,7 +103,7 @@ func (e *OpenAICompatExecutor) HttpRequest(ctx context.Context, auth *cliproxyau
 
 func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
-	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
+	if endpointPath := openAICompatImageEndpointPathForRequest(req, opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -359,7 +359,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	ctx = helps.EnsureSessionContext(ctx, opts, req.Payload)
-	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
+	if endpointPath := openAICompatImageEndpointPathForRequest(req, opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
 	}
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -960,9 +960,6 @@ func openAICompatAuthHasRefreshToken(auth *cliproxyauth.Auth) bool {
 }
 
 func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
-	if opts.SourceFormat.String() != openAICompatImageHandlerType {
-		return ""
-	}
 	path := helps.PayloadRequestPath(opts)
 	if strings.HasSuffix(path, "/images/edits") {
 		return openAICompatImagesEditsPath
@@ -970,7 +967,41 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 	if strings.HasSuffix(path, "/images/generations") {
 		return openAICompatImagesGenerationsPath
 	}
+	// Request-path metadata is authoritative after an interceptor or capability
+	// router has selected the image protocol. Keep this path available even when
+	// the original source format was OpenAI Chat or Responses.
+	if !strings.EqualFold(strings.TrimSpace(opts.SourceFormat.String()), openAICompatImageHandlerType) {
+		return ""
+	}
 	return openAICompatDefaultImageEndpoint
+}
+
+// openAICompatImageEndpointPathForRequest recognizes the native image model
+// even when a client sends it through the chat endpoint. This keeps the
+// capability routing local to the OpenAI-compatible executor while allowing
+// image fields to be handled by the image payload sanitizer below.
+func openAICompatImageEndpointPathForRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if endpoint := openAICompatImageEndpointPath(opts); endpoint != "" {
+		return endpoint
+	}
+	if strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName), "gpt-image-2.6") {
+		return openAICompatDefaultImageEndpoint
+	}
+	return ""
+}
+
+var openAICompatImageTextFields = [...]string{
+	"reasoning", "reasoning_effort", "tools", "tool_choice", "parallel_tool_calls",
+	"messages", "input", "instructions", "max_tokens", "max_completion_tokens",
+}
+
+func stripOpenAICompatImageTextFieldsDoc(doc *ojson.Doc) {
+	if doc == nil {
+		return
+	}
+	for _, field := range openAICompatImageTextFields {
+		_ = doc.Delete(field)
+	}
 }
 
 func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool) ([]byte, string, error) {
@@ -978,6 +1009,10 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 	contentType = strings.TrimSpace(contentType)
 	if json.Valid(payload) {
 		doc := ojson.NewDoc(payload)
+		// Image upstreams must receive image semantics only. In particular, a
+		// text-model interceptor must not leak reasoning or function tools into
+		// an image generation/edit request.
+		stripOpenAICompatImageTextFieldsDoc(doc)
 		if model != "" {
 			helps.SetStringIfDifferentDoc(doc, "model", model)
 		}
@@ -1036,6 +1071,9 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 		if key == "model" || key == "stream" {
 			continue
 		}
+		if isOpenAICompatImageTextField(key) {
+			continue
+		}
 		for _, value := range values {
 			if errWrite := writer.WriteField(key, value); errWrite != nil {
 				return nil, "", fmt.Errorf("write form field %s failed: %w", key, errWrite)
@@ -1076,6 +1114,16 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 		return nil, "", fmt.Errorf("close multipart writer failed: %w", errClose)
 	}
 	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+func isOpenAICompatImageTextField(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, field := range openAICompatImageTextFields {
+		if key == field {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cliproxyauth.Auth, from sdktranslator.Format, baseModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, translated []byte) ([]byte, error) {
