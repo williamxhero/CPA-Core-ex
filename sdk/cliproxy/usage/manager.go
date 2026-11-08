@@ -22,6 +22,10 @@ const DefaultServiceTier = "default"
 // historical direct-SDK default.
 const AutoServiceTier = "auto"
 
+// AutoReasoningEffort is the explicit usage-log value when a request does not
+// select a reasoning effort. It keeps the log distinguishable from missing data.
+const AutoReasoningEffort = "auto"
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	// RequestID uniquely identifies this specific model execution instance (UUID v4).

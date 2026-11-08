@@ -931,6 +931,28 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesClientServiceTier(t *
 	}
 }
 
+func TestUsageReporterSetTranslatedReasoningEffortDefaultsToAuto(t *testing.T) {
+	reporter := NewUsageReporter(context.Background(), "openai", "gpt-6.1-sol", nil)
+
+	reporter.SetTranslatedReasoningEffort([]byte(`{"model":"gpt-6.1-sol"}`), "openai")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if record.ReasoningEffort != usage.AutoReasoningEffort {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, usage.AutoReasoningEffort)
+	}
+}
+
+func TestUsageReporterSetTranslatedReasoningEffortPreservesRequestedEffortWhenTargetOmitsIt(t *testing.T) {
+	reporter := NewUsageReporter(usage.WithReasoningEffort(context.Background(), "high"), "openai", "gpt-6.1-sol", nil)
+
+	reporter.SetTranslatedReasoningEffort([]byte(`{"model":"gpt-6.1-sol"}`), "openai")
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 1}, false)
+	if record.ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q, want high", record.ReasoningEffort)
+	}
+}
+
 func TestUsageReporterExtractsEffectiveServiceTierFromOutboundShapes(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

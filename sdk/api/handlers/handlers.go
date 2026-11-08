@@ -396,7 +396,7 @@ func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, 
 	}
 	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
 	if effort == "" {
-		return
+		effort = coreusage.AutoReasoningEffort
 	}
 	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
 }
