@@ -421,6 +421,106 @@ func newClaudeCodeRoundTripperForDialerAndRoots(dialer proxy.Dialer, roots *x509
 	return transport
 }
 
+// utlsChatGPTFallbackRoundTripper keeps the Chrome uTLS transport as the
+// primary ChatGPT/Codex route and permits one replay on the standard Go
+// transport when the primary fails before an HTTP response exists. The
+// fallback is deliberately a separate round tripper so it cannot recurse back
+// into this wrapper.
+type utlsChatGPTFallbackRoundTripper struct {
+	mu         sync.Mutex
+	primary    http.RoundTripper
+	fallback   http.RoundTripper
+	fallbackFn func() http.RoundTripper
+}
+
+func (t *utlsChatGPTFallbackRoundTripper) fallbackRoundTripper() http.RoundTripper {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.fallback == nil && t.fallbackFn != nil {
+		t.fallback = t.fallbackFn()
+		t.fallbackFn = nil
+	}
+	return t.fallback
+}
+
+func (t *utlsChatGPTFallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	replay, replayable := cloneRequestForUtlsFallback(req)
+	resp, errPrimary := t.primary.RoundTrip(req)
+	if resp != nil || !isTransientUtlsTransportError(errPrimary) || req == nil || req.Context().Err() != nil {
+		return resp, errPrimary
+	}
+	if !replayable {
+		return nil, errPrimary
+	}
+	fallback := t.fallbackRoundTripper()
+	if fallback == nil {
+		return nil, errPrimary
+	}
+	return fallback.RoundTrip(replay)
+}
+
+// cloneRequestForUtlsFallback makes a fresh request body before the primary
+// transport is allowed to consume it. A non-replayable body cannot safely be
+// sent a second time, so the primary error is returned unchanged.
+func cloneRequestForUtlsFallback(req *http.Request) (*http.Request, bool) {
+	if req == nil {
+		return nil, false
+	}
+	clone := req.Clone(req.Context())
+	if req.Body == nil || req.Body == http.NoBody {
+		return clone, true
+	}
+	if req.GetBody == nil {
+		return nil, false
+	}
+	body, errGetBody := req.GetBody()
+	if errGetBody != nil || body == nil {
+		return nil, false
+	}
+	clone.Body = body
+	clone.GetBody = req.GetBody
+	return clone, true
+}
+
+// isTransientUtlsTransportError accepts only failures that happen before a
+// response is available and are safe to retry on another TLS implementation.
+// Caller cancellation and ordinary certificate/authentication failures stay on
+// the uTLS path so the fallback does not hide a request decision.
+func isTransientUtlsTransportError(err error) bool {
+	if err == nil || cliproxyexecutor.IsConfiguredTLSHandshakeTimeoutError(err) {
+		return err != nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr != nil && (dnsErr.IsTimeout || dnsErr.IsTemporary || dnsErr.Timeout()) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr != nil && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr != nil {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, phrase := range []string{
+		"connection reset", "connection refused", "connection aborted", "broken pipe",
+		"stream error", "stream closed", "client conn is closed", "force closed",
+		"unexpected eof", "temporary failure", "temporarily unavailable",
+	} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // fallbackRoundTripper uses provider-specific TLS fingerprints for protected
 // HTTPS hosts and falls back to the standard transport for all other requests.
 //
@@ -537,14 +637,22 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		}
 	}
 
+	routes := &fallbackRoundTripper{
+		anthropic:   anthropicRT,
+		anthropicFn: anthropicFn,
+		chrome:      chromeRT,
+		fallback:    standardTransport,
+		fallbackFn:  fallbackFn,
+	}
+	// ChatGPT/Codex keeps the uTLS Chrome fingerprint first. Its standard
+	// transport is resolved lazily through the same proxy/direct route used by
+	// all other fallback traffic.
+	routes.chrome = &utlsChatGPTFallbackRoundTripper{
+		primary:    chromeRT,
+		fallbackFn: routes.fallbackRoundTripper,
+	}
 	client := &http.Client{
-		Transport: &fallbackRoundTripper{
-			anthropic:   anthropicRT,
-			anthropicFn: anthropicFn,
-			chrome:      chromeRT,
-			fallback:    standardTransport,
-			fallbackFn:  fallbackFn,
-		},
+		Transport: routes,
 	}
 	if timeout > 0 {
 		client.Timeout = timeout
