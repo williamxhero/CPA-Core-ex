@@ -1155,6 +1155,13 @@ func (m *Manager) retrySettings() (int, int, time.Duration) {
 	return int(m.requestRetry.Load()), int(m.maxRetryCredentials.Load()), time.Duration(m.maxRetryInterval.Load())
 }
 
+func (m *Manager) configuredUpstreamErrorRetryLimit() int {
+	if m == nil {
+		return -2
+	}
+	return int(m.upstreamErrorRetryLimit.Load())
+}
+
 func effectiveRequestRetryLimit(auth *Auth, defaultRetry int) int {
 	if defaultRetry < 0 {
 		defaultRetry = 0
@@ -1473,16 +1480,47 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	}
 	status := statusCodeFromError(err)
 	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error())
+	configuredUpstreamLimit := m.configuredUpstreamErrorRetryLimit()
+	failureClass := clienterror.Classify(status, err.Error())
+	if failureClass == clienterror.FailureQuotaExhausted && m.allCandidatesQuotaTerminated(providers, model) {
+		return 0, false
+	}
+	transientUpstream := isRetryableUpstreamFailure(err, failureClass)
+	// A quota-shaped error is only terminal after both resource classes are
+	// explicitly exhausted across every eligible credential. Until then it is
+	// a retryable upstream failure, including when one class is unknown or the
+	// provider's quota read failed.
+	if failureClass == clienterror.FailureQuotaExhausted {
+		transientUpstream = true
+	}
 	if status == http.StatusOK && !hiddenRetry {
 		return 0, false
 	}
 	if isRequestInvalidError(err) || isRequestStopError(err) {
 		return 0, false
 	}
+	if configuredUpstreamLimit != -2 && transientUpstream && configuredUpstreamLimit >= 0 && attempt >= configuredUpstreamLimit {
+		return 0, false
+	}
+	// An explicit unlimited upstream policy is authoritative. It bypasses the
+	// legacy request-retry/max-retry-interval ceilings while preserving the
+	// existing credential cooldown and rotation machinery. A bounded safety gap
+	// is still required when the provider omitted Retry-After: disabling
+	// credential cooling must never turn an unlimited retry policy into a hot
+	// loop that starves the CPA process.
+	if configuredUpstreamLimit == -1 && transientUpstream {
+		if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
+			return *retryAfter, true
+		}
+		return unlimitedUpstreamRetrySafetyGap(maxWait), true
+	}
 	if hiddenRetry && defaultRequestRetry < clienterror.HiddenClientRetryMinimum {
 		defaultRequestRetry = clienterror.HiddenClientRetryMinimum
 	}
 	giveUp := func() (time.Duration, bool) {
+		if configuredUpstreamLimit != -2 && transientUpstream {
+			return 0, false
+		}
 		if hiddenRetry && attempt >= 0 && attempt < defaultRequestRetry+clienterror.HiddenClientRetryExtra {
 			return clienterror.HiddenClientRetryGap, true
 		}
@@ -1523,10 +1561,21 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 			}
 		}
 		if status != http.StatusTooManyRequests || !m.homeRetryAllowed(attempt, homeRetryLimit) {
+			if transientUpstream {
+				if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
+					return *retryAfter, true
+				}
+			}
 			return giveUp()
 		}
 		retryAfter := retryAfterFromError(err)
-		if retryAfter == nil || *retryAfter <= 0 || (maxWait <= 0 || *retryAfter > maxWait) {
+		if retryAfter == nil || *retryAfter <= 0 {
+			return giveUp()
+		}
+		if *retryAfter > maxWait && transientUpstream {
+			return *retryAfter, true
+		}
+		if maxWait <= 0 || *retryAfter > maxWait {
 			return giveUp()
 		}
 		return *retryAfter, true
@@ -1539,17 +1588,43 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	wait, found := m.closestCooldownWaitWithAttemptedForRequest(ctx, providers, model, attempt, eligibility, pinnedAuthID, defaultRequestRetry, status, attempted, opts.Headers)
 	if found {
 		if wait > 0 && (maxWait <= 0 || wait > maxWait) {
+			if maxWait > 0 && transientUpstream {
+				return wait, true
+			}
 			return giveUp()
 		}
 		return wait, true
 	}
 	if retryAfter := retryAfterFromError(err); retryAfter != nil {
-		if *retryAfter < 0 || (*retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait)) {
+		if *retryAfter < 0 {
+			return giveUp()
+		}
+		if *retryAfter > 0 && *retryAfter > maxWait && transientUpstream {
+			return *retryAfter, true
+		}
+		if *retryAfter > 0 && (maxWait <= 0 || *retryAfter > maxWait) {
 			return giveUp()
 		}
 		return *retryAfter, true
 	}
 	return 0, true
+}
+
+func isRetryableUpstreamFailure(err error, class clienterror.FailureClass) bool {
+	if err == nil || isRequestStopError(err) || isRequestTerminatedError(err) || IsTerminalAuthError(err) {
+		return false
+	}
+	if class == clienterror.FailureClientCanceled &&
+		statusCodeFromError(err) == clienterror.StatusClientClosedRequest &&
+		clienterror.IsUpstreamHTTPResponse(err) {
+		return true
+	}
+	if class == clienterror.FailureTransientUpstream {
+		return true
+	}
+	// Transport failures may not carry a status or a recognizable phrase, but
+	// the executor marks them after an upstream attempt. Keep those retryable.
+	return class == clienterror.FailureUnknown && hasUpstreamExecutionAttempt(err) && isTransientTransportError(err)
 }
 
 func (m *Manager) homeRetryAllowed(attempt int, retryLimit int) bool {
@@ -1619,6 +1694,15 @@ func isRequestRetryRoundError(err error) bool {
 	if clienterror.IsHiddenClientRetry(err.Error()) {
 		return true
 	}
+	classified := clienterror.Classify(statusCodeFromError(err), err.Error())
+	if classified == clienterror.FailureClientCanceled &&
+		statusCodeFromError(err) == clienterror.StatusClientClosedRequest &&
+		clienterror.IsUpstreamHTTPResponse(err) {
+		return true
+	}
+	if classified == clienterror.FailureTransientUpstream || classified == clienterror.FailureQuotaExhausted {
+		return true
+	}
 	return isCredentialRetryRoundStatus(statusCodeFromError(err)) || isTransientTransportError(err)
 }
 
@@ -1660,6 +1744,19 @@ func waitForCooldown(ctx context.Context, wait, maxWait time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+// unlimitedUpstreamRetrySafetyGap prevents an explicit unlimited retry policy
+// from becoming a busy loop when the upstream supplies no Retry-After hint.
+// This is deliberately separate from credential cooldown: disable-cooling may
+// be selected for routing state, but it must not allow transient provider
+// failures to starve the process or flood the upstream.
+func unlimitedUpstreamRetrySafetyGap(maxWait time.Duration) time.Duration {
+	const safetyGap = clienterror.HiddenClientRetryGap
+	if maxWait > 0 && maxWait < safetyGap {
+		return maxWait
+	}
+	return safetyGap
 }
 
 // List returns all auth entries currently known by the manager.

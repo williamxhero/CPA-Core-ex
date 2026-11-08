@@ -148,6 +148,16 @@ func TestSetReasoningEffortMetadataSupportsOpenAIResponses(t *testing.T) {
 	}
 }
 
+func TestSetReasoningEffortMetadataDefaultsToAuto(t *testing.T) {
+	meta := make(map[string]any)
+
+	setReasoningEffortMetadata(meta, "claude", "gpt-6.1-sol", []byte(`{"model":"gpt-6.1-sol"}`))
+
+	if got := meta[coreexecutor.ReasoningEffortMetadataKey]; got != coreusage.AutoReasoningEffort {
+		t.Fatalf("ReasoningEffortMetadataKey = %v, want %q", got, coreusage.AutoReasoningEffort)
+	}
+}
+
 func TestSetServiceTierMetadataExtractsValue(t *testing.T) {
 	meta := make(map[string]any)
 

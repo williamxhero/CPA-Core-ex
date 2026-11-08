@@ -301,6 +301,28 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 	h.updateIntField(c, func(v int) { h.cfg.MaxRetryInterval = v })
 }
 
+// Upstream error retry limit
+func (h *Handler) GetUpstreamErrorRetryLimit(c *gin.Context) {
+	c.JSON(200, gin.H{"upstream-error-retry-limit": h.cfg.UpstreamErrorRetryLimit})
+}
+func (h *Handler) PutUpstreamErrorRetryLimit(c *gin.Context) {
+	var body struct {
+		Value *int `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if *body.Value < -1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upstream-error-retry-limit must be -1 or greater"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.UpstreamErrorRetryLimit = *body.Value
+	h.persistLocked(c)
+}
+
 // ForceModelPrefix
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	c.JSON(200, gin.H{"force-model-prefix": h.cfg.ForceModelPrefix})

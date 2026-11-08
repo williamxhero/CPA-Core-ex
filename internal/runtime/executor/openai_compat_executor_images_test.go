@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"mime/multipart"
 	"net/http"
@@ -183,6 +184,41 @@ func TestOpenAICompatExecutor_ImageEndpointPath_HonorsOverriddenRequestPath_Issu
 	}
 	if requestedPath != "/images/generations" {
 		t.Fatalf("upstream path = %q, want /images/generations", requestedPath)
+	}
+}
+
+func TestOpenAICompatExecutorGPTImage26ChatRequestUsesImageEndpoint(t *testing.T) {
+	var got map[string]any
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"created":123,"data":[{"b64_json":"img"}]}`)
+	}))
+	defer server.Close()
+
+	exec := NewOpenAICompatExecutor("compat", &config.Config{})
+	auth := &cliproxyauth.Auth{Provider: "compat", Attributes: map[string]string{"base_url": server.URL, "api_key": "key"}}
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "gpt-image-2.6",
+		Payload: []byte(`{"model":"gpt-image-2.6","prompt":"cat","size":"1024x1024","quality":"high","background":"transparent","output_format":"png","reasoning":{"effort":"high"},"tools":[{"type":"function","name":"leak"}]}`),
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if gotPath != "/images/generations" {
+		t.Fatalf("upstream path = %q, want /images/generations", gotPath)
+	}
+	for _, field := range []string{"size", "quality", "background", "output_format"} {
+		if _, ok := got[field]; !ok {
+			t.Fatalf("image field %q was not preserved: %#v", field, got)
+		}
+	}
+	for _, field := range []string{"reasoning", "tools", "messages", "input"} {
+		if _, ok := got[field]; ok {
+			t.Fatalf("text field %q leaked into image request: %#v", field, got)
+		}
 	}
 }
 

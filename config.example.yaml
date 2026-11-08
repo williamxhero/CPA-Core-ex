@@ -237,6 +237,11 @@ routing:
     # Retry rounds that need no wait remain controlled by request-retry.
     max-retry-interval: 30
 
+    # Transient upstream failures stay inside CPA by default until success,
+    # client cancellation, or an explicit resource-exhausted result.
+    # -1 = unlimited, 0 = no additional retry, positive values count retries.
+    upstream-error-retry-limit: -1
+
   cooldown:
     # When true, disable auth/model cooldown scheduling globally (prevents blackout windows after failure states).
     # A credential/provider disable-cooling value, when present, overrides this global value.
@@ -400,7 +405,7 @@ upstream:
     # generated event. Anything else, including a server-side tool item such as web_search_call and
     # any frame not on that list, releases the stream immediately. On the SSE transport the lines that
     # are not `data:` frames - comments, `event:` lines, blank separators - are held alongside them.
-    # The hold is bounded by a frame budget and a 1 MiB byte budget, not by wall-clock time: an
+    # The hold is bounded by a frame budget and a 1 MiB byte budget, plus the optional wall-clock timeout below: an
     # upstream that trickles frames holds the response headers for as long as the client will wait.
     # Why: the upstream smuggles `server_is_overloaded` rejections *inside* an HTTP 200 stream,
     # right after those handshake events, instead of returning 503 on the wire. Buffering them
@@ -416,7 +421,7 @@ upstream:
     # keepalive, so it was rare; now it can span the whole reasoning phase.
     # Trade-off: response headers are delayed until generation starts. Because heartbeats are held
     # too, the delay now ends at the first generated token rather than at the first heartbeat. The
-    # budget bounds how much is held, not how long: 48 SSE lines, which measures out as 15 heartbeats
+    # Frame and byte budgets bound how much is held; the optional timeout bounds how long: 48 SSE lines, which measures out as 15 heartbeats
     # of the three-line event:/data:/blank shape, 23 of a two-line ": keepalive" comment followed by
     # its blank separator, or 47 of a bare ": keepalive" with no separator - one short of the obvious
     # division, because the rejection frame's own event: line comes out of the same budget before its
@@ -424,7 +429,7 @@ upstream:
     # line gets the round number instead. At a 10s upstream heartbeat that is 150s, 230s or 470s of
     # uncommitted response headers depending on the framing the upstream picks, all of it past nginx's
     # 60s default proxy_read_timeout, so raise the timeouts in front of the proxy before enabling this.
-    # Those seconds bound what the buffer holds, not when the response headers are committed. Headers
+    # Those frame and byte counts bound what the buffer holds; the optional timeout aborts a silent attempt. Headers
     # are committed on the first chunk the downstream translator actually produces, so for a format
     # that renders the handshake as nothing - Chat Completions and Gemini do - they stay uncommitted
     # past the budget, until the first generated token. That is not specific to the budget: any frame
@@ -439,17 +444,17 @@ upstream:
     # proxy_read_timeout, is what bounds them.
     # Default: false
     stream-bootstrap-buffering: false
-    # Optional maximum duration to hold back uncommitted response headers during bootstrap buffering.
-    # When set (e.g. "20s"), if the time ceiling is reached before the first generated token,
-    # the stream is released to the client and further in-stream overloads are delivered rather
-    # than failed over. This bounds how long trickled heartbeats or early empty frames can delay
-    # response headers before streaming begins.
+    # Optional maximum duration to wait for the provider's first generated token during bootstrap
+    # buffering. When set (e.g. "20s"), if the time ceiling is reached before business output,
+    # CPA closes the upstream connection and retries the request on another credential. This
+    # prevents a provider that never answers from holding the client request indefinitely.
     # Recommendation: If your CPA is deployed behind a reverse proxy with a strict read timeout
     # (e.g. Nginx default proxy_read_timeout 60s or Cloudflare 100s timeout), setting this to "20s"
     # is strongly recommended to guarantee headers commit well before proxy timeouts while retaining
     # a comfortable 20s window to fail over early scheduling overloads.
-    # Note: The timeout check is evaluated as upstream frames arrive; it never aborts the upstream
-    # connection. Downstream headers are committed as soon as the downstream translator emits chunks
+    # Note: handshake and metadata frames do not count as business output. The timeout remains
+    # active after those frames and aborts the attempt when no generated payload arrives. Downstream
+    # headers are committed as soon as the downstream translator emits chunks
     # (for formats that render handshake/heartbeats, headers commit immediately on release; for
     # formats like Chat Completions and Gemini that render nothing until the first text token, headers
     # commit when that first token arrives).

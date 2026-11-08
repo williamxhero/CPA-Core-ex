@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -101,10 +103,21 @@ func validateStreamResult(result *cliproxyexecutor.StreamResult, err error) (*cl
 }
 
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+	return readStreamBootstrapWithTimeout(ctx, ch, 0)
+}
+
+func readStreamBootstrapWithTimeout(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, timeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	var timer *time.Timer
+	var timeoutCh <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
 	for {
 		var (
 			chunk cliproxyexecutor.StreamChunk
@@ -119,11 +132,21 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 				select {
 				case <-ctx.Done():
 					return nil, false, ctx.Err()
+				case <-timeoutCh:
+					return nil, false, &Error{Code: "stream_bootstrap_timeout", Message: "upstream stream produced no payload before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}
 				case chunk, ok = <-ch:
 				}
 			}
 		} else {
-			chunk, ok = <-ch
+			if timeoutCh == nil {
+				chunk, ok = <-ch
+			} else {
+				select {
+				case <-timeoutCh:
+					return nil, false, &Error{Code: "stream_bootstrap_timeout", Message: "upstream stream produced no payload before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}
+				case chunk, ok = <-ch:
+				}
+			}
 		}
 		if !ok {
 			return buffered, true, nil
@@ -154,50 +177,133 @@ func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth
 	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
 }
 
-func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, executionSeq uint64) *cliproxyexecutor.StreamResult {
+func (m *Manager) streamBootstrapTimeout() time.Duration {
+	if m == nil {
+		return 0
+	}
+	cfg := m.runtimeConfigSnapshot()
+	if cfg == nil {
+		return 0
+	}
+	return cfg.Codex.StreamBootstrapTimeoutDuration()
+}
+
+// streamGateAttemptWithTimeout bounds the provider call that creates the
+// stream itself. A provider can stall before returning headers or a channel;
+// readStreamBootstrapWithTimeout cannot protect that phase because it has not
+// received a stream to read yet.
+func (m *Manager) streamGateAttemptWithTimeout(ctx context.Context, executor ProviderExecutor, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	timeout := m.streamBootstrapTimeout()
+	if timeout <= 0 {
+		return m.streamGateAttempt(ctx, executor, auth, req, opts)
+	}
+	type gateResult struct {
+		stream *cliproxyexecutor.StreamResult
+		err    error
+	}
+	resultCh := make(chan gateResult, 1)
+	go func() {
+		stream, err := m.streamGateAttempt(ctx, executor, auth, req, opts)
+		resultCh <- gateResult{stream: stream, err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case result := <-resultCh:
+		return result.stream, result.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, &Error{Code: "stream_bootstrap_timeout", Message: "provider did not create a stream before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}
+	}
+}
+
+func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, executionSeq uint64, cancelUpstream context.CancelFunc) *cliproxyexecutor.StreamResult {
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
 	accessToken := authAccessTokenForRequest(ctx, auth, opts.Headers)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	streamStart := time.Now()
+	replay := streamReplayCoordinatorFromContext(ctx)
 	go func() {
 		defer close(out)
 		var failed bool
 		var sawCompleted bool
 		var sawIncomplete bool
-		forward := true
+		var committed bool
+		var deliveredAny bool
+		replayed := false
+		pending := make([]cliproxyexecutor.StreamChunk, 0, len(buffered))
+		bootstrapTimeout := m.streamBootstrapTimeout()
+		var bootstrapTimer *time.Timer
+		var bootstrapTimeoutCh <-chan time.Time
+		startBootstrapTimer := func() {
+			if bootstrapTimeout > 0 && bootstrapTimer == nil {
+				bootstrapTimer = time.NewTimer(bootstrapTimeout)
+				bootstrapTimeoutCh = bootstrapTimer.C
+			}
+		}
+		stopBootstrapTimer := func() {
+			if bootstrapTimer != nil {
+				bootstrapTimer.Stop()
+				bootstrapTimer = nil
+				bootstrapTimeoutCh = nil
+			}
+		}
+		resetBootstrapTimer := func() {
+			stopBootstrapTimer()
+			startBootstrapTimer()
+		}
+		startBootstrapTimer()
+		defer func() {
+			stopBootstrapTimer()
+			if cancelUpstream != nil {
+				cancelUpstream()
+			}
+		}()
 		var rewriter *StreamRewriter
 		if aliasResult.ForceMapping && strings.TrimSpace(aliasResult.OriginalAlias) != "" {
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
-		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
-			if chunk.Err != nil && !failed {
-				failed = true
-				entry := logEntryWithRequestID(ctx)
-				warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), chunk.Err)
-				rerr := resultErrorFromError(chunk.Err)
-				action, okAction := matchRequestScopedErrorAction(auth, chunk.Err, m.runtimeConfigSnapshot())
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
-				result.RetryAfter = retryAfterFromError(chunk.Err)
-				result.CredentialScope = isCredentialScopedError(chunk.Err)
-				applyRequestScopedActionToResult(action, okAction, &result)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if ctx == nil {
+				out <- chunk
+				return true
 			}
-			if !forward {
+			select {
+			case <-ctx.Done():
+				return false
+			case out <- chunk:
+				return true
+			}
+		}
+		flushPending := func() bool {
+			for _, chunk := range pending {
+				if !send(chunk) {
+					return false
+				}
+				deliveredAny = true
+			}
+			pending = pending[:0]
+			return true
+		}
+		recordFailure := func(err error) {
+			entry := logEntryWithRequestID(ctx)
+			warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), err)
+			rerr := resultErrorFromError(err)
+			action, okAction := matchRequestScopedErrorAction(auth, err, m.runtimeConfigSnapshot())
+			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
+			result.RetryAfter = retryAfterFromError(err)
+			result.CredentialScope = isCredentialScopedError(err)
+			applyRequestScopedActionToResult(action, okAction, &result)
+			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+		}
+		retryable := func(err error) bool {
+			if err == nil || replay == nil || deliveredAny || (ctx != nil && ctx.Err() != nil) {
 				return false
 			}
-			if chunk.Err != nil {
-				if ctx == nil {
-					out <- chunk
-					return true
-				}
-				select {
-				case <-ctx.Done():
-					forward = false
-					return false
-				case out <- chunk:
-					return true
-				}
-			}
+			return isRetryableUpstreamFailure(err, clienterror.Classify(statusCodeFromError(err), err.Error()))
+		}
+		processPayload := func(chunk cliproxyexecutor.StreamChunk, applyRewrite bool) bool {
 			if chunk.Incomplete {
 				sawIncomplete = true
 			}
@@ -211,46 +317,275 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if incompleteChunk {
 				sawIncomplete = true
 			}
-			payload := rewriteForceMappedStreamChunk(rewriter, chunk.Payload)
+			payload := chunk.Payload
+			if applyRewrite {
+				payload = rewriteForceMappedStreamChunk(rewriter, payload)
+			}
 			if len(payload) == 0 {
 				return true
 			}
 			chunk.Payload = payload
-			if ctx == nil {
-				out <- chunk
+			if !committed && !streamPayloadCommitsOutput(payload) {
+				pending = append(pending, chunk)
 				return true
 			}
-			select {
-			case <-ctx.Done():
-				forward = false
-				return false
-			case out <- chunk:
-				return true
+			if !committed {
+				committed = true
+				stopBootstrapTimer()
+				if !flushPending() {
+					return false
+				}
 			}
+			deliveredAny = true
+			return send(chunk)
 		}
-		for _, chunk := range buffered {
-			if ok := emit(chunk); !ok {
-				discardStreamChunks(remaining)
+		processError := func(err error, source <-chan cliproxyexecutor.StreamChunk) (<-chan cliproxyexecutor.StreamChunk, bool) {
+			if err == nil {
+				return nil, false
+			}
+			recordFailure(err)
+			if retryable(err) {
+				// Stop the failed provider before selecting a replacement. This is
+				// essential for silent providers whose stream would otherwise remain
+				// alive while the client is waiting for recovery.
+				if cancelUpstream != nil {
+					cancelUpstream()
+				}
+				discardStreamChunks(source)
+				excludedAuthIDs := streamReplayExcludedAuthIDsFromContext(ctx)
+				if auth != nil && strings.TrimSpace(auth.ID) != "" {
+					seen := false
+					for _, authID := range excludedAuthIDs {
+						if authID == auth.ID {
+							seen = true
+							break
+						}
+					}
+					if !seen {
+						excludedAuthIDs = append(excludedAuthIDs, auth.ID)
+					}
+				}
+				retryCtx := withStreamReplayExcludedAuthIDs(ctx, excludedAuthIDs)
+				retryResult, retryErr := replay(retryCtx, err)
+				if retryErr == nil && retryResult != nil && retryResult.Chunks != nil {
+					pending = pending[:0]
+					failed = false
+					sawCompleted = false
+					sawIncomplete = false
+					replayed = true
+					resetBootstrapTimer()
+					return retryResult.Chunks, true
+				}
+				if retryErr != nil {
+					err = retryErr
+				}
+			}
+			failed = true
+			if len(pending) > 0 && !flushPending() {
+				return nil, false
+			}
+			_ = send(cliproxyexecutor.StreamChunk{Err: err})
+			return nil, false
+		}
+		processNext := func(next cliproxyexecutor.StreamChunk, ok bool, source <-chan cliproxyexecutor.StreamChunk, rewrite bool) (<-chan cliproxyexecutor.StreamChunk, bool, bool) {
+			if !ok {
+				if !flushPending() {
+					return nil, false, true
+				}
+				closed := make(chan cliproxyexecutor.StreamChunk)
+				close(closed)
+				return closed, false, false
+			}
+			if next.Err != nil {
+				retry, okRetry := processError(next.Err, source)
+				if okRetry {
+					return retry, true, false
+				}
+				return nil, false, true
+			}
+			if !processPayload(next, rewrite) {
+				discardStreamChunks(source)
+				return nil, false, true
+			}
+			return source, false, false
+		}
+
+		current := remaining
+		applyRewrite := true
+		for {
+			switched := false
+			for _, chunk := range buffered {
+				if chunk.Err != nil {
+					var retry <-chan cliproxyexecutor.StreamChunk
+					retry, okRetry := processError(chunk.Err, current)
+					if okRetry {
+						current = retry
+						applyRewrite = false
+						buffered = nil
+						switched = true
+						break
+					}
+					return
+				}
+				if !processPayload(chunk, applyRewrite) {
+					discardStreamChunks(current)
+					return
+				}
+			}
+			if buffered != nil {
+				buffered = nil
+			}
+			if !switched && !committed && len(pending) > 0 {
+				if bootstrapTimeoutCh == nil {
+					select {
+					case next, ok := <-current:
+						retry, didSwitch, stop := processNext(next, ok, current, applyRewrite)
+						if stop {
+							return
+						}
+						if didSwitch {
+							current = retry
+							applyRewrite = false
+							switched = true
+						} else {
+							current = retry
+						}
+					default:
+						if !flushPending() {
+							return
+						}
+					}
+				} else {
+					select {
+					case next, ok := <-current:
+						retry, didSwitch, stop := processNext(next, ok, current, applyRewrite)
+						if stop {
+							return
+						}
+						if didSwitch {
+							current = retry
+							applyRewrite = false
+							switched = true
+						} else {
+							current = retry
+						}
+					case <-bootstrapTimeoutCh:
+						retry, didSwitch := processError(&Error{Code: "stream_bootstrap_timeout", Message: "upstream stream produced no payload before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}, current)
+						if didSwitch {
+							current = retry
+							applyRewrite = false
+							switched = true
+						} else {
+							return
+						}
+					}
+				}
+			}
+			if switched {
+				continue
+			}
+			for {
+				var (
+					chunk cliproxyexecutor.StreamChunk
+					ok    bool
+				)
+				if !committed && bootstrapTimeoutCh != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-bootstrapTimeoutCh:
+						retry, okRetry := processError(&Error{Code: "stream_bootstrap_timeout", Message: "upstream stream produced no payload before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}, current)
+						if okRetry {
+							current = retry
+							applyRewrite = false
+							switched = true
+							break
+						}
+						return
+					case chunk, ok = <-current:
+					}
+				} else {
+					chunk, ok = <-current
+				}
+				if !ok {
+					break
+				}
+				if chunk.Err != nil {
+					retry, okRetry := processError(chunk.Err, current)
+					if okRetry {
+						current = retry
+						applyRewrite = false
+						switched = true
+						break
+					}
+					return
+				}
+				if !processPayload(chunk, applyRewrite) {
+					discardStreamChunks(current)
+					return
+				}
+			}
+			if switched {
+				continue
+			}
+			if failed {
 				return
 			}
+			break
 		}
-		for chunk := range remaining {
-			if ok := emit(chunk); !ok {
-				discardStreamChunks(remaining)
-				return
+		if !replayed {
+			if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
+				if !processPayload(cliproxyexecutor.StreamChunk{Payload: tail}, true) {
+					return
+				}
 			}
 		}
-		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
-			tailChunk := cliproxyexecutor.StreamChunk{Payload: tail}
-			if !emit(tailChunk) {
-				return
-			}
+		if !committed && len(pending) > 0 && !flushPending() {
+			return
 		}
-		if !failed && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
+		if !failed && !replayed && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true, CompletedResponse: sawCompleted && !sawIncomplete, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}, auth, ephemeralResult)
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+}
+
+func streamPayloadCommitsOutput(payload []byte) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	for _, rawLine := range bytes.Split(payload, []byte("\n")) {
+		line := bytes.TrimSpace(rawLine)
+		if len(line) == 0 || bytes.HasPrefix(line, []byte(":")) || bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("id:")) || bytes.HasPrefix(line, []byte("retry:")) {
+			continue
+		}
+		data := line
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		}
+		if bytes.Equal(data, []byte("[DONE]")) || len(data) == 0 {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(data, &obj); err != nil || len(obj) == 0 {
+			return true
+		}
+		eventType, _ := obj["type"].(string)
+		switch strings.ToLower(strings.TrimSpace(eventType)) {
+		case "response.created", "response.in_progress", "response.metadata", "codex.response.metadata", "codex.rate_limits", "rate_limits.updated", "keepalive", "ping":
+			continue
+		case "response.completed", "response.done":
+			return true
+		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.refusal.delta":
+			if delta, ok := obj["delta"].(string); ok && delta == "" {
+				continue
+			}
+			return true
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func streamPayloadCompletionFlags(payload []byte) (completed, incomplete bool) {
@@ -421,6 +756,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var lastErr error
 	var upstreamErr error
 	didRefreshOnUnauthorized := false
+	readBootstrap := func(attemptCtx context.Context, cancelAttempt context.CancelFunc, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
+		timeout := m.streamBootstrapTimeout()
+		buffered, closed, errBootstrap := readStreamBootstrapWithTimeout(attemptCtx, ch, timeout)
+		var timeoutErr *Error
+		if errors.As(errBootstrap, &timeoutErr) && timeoutErr != nil && timeoutErr.Code == "stream_bootstrap_timeout" {
+			cancelAttempt()
+		}
+		return buffered, closed, errBootstrap
+	}
 	for idx, execModel := range execModels {
 		ctx = newUpstreamAttemptContext(ctx)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
@@ -448,13 +792,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
-		streamResult, errStream := m.streamGateAttempt(ctx, executor, auth, execReq, execOpts)
+		attemptCtx, cancelAttempt := context.WithCancel(ctx)
+		streamResult, errStream := m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
 			upstreamErr = errStream
 		}
 		durationStream := time.Since(startStream)
 		if errStream != nil {
+			cancelAttempt()
 			if errCtx := ctx.Err(); errCtx != nil {
 				m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, errStream, ephemeralResult, executionSeq)
 				return nil, errCtx
@@ -470,13 +816,15 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					streamResult, errStream = m.streamGateAttempt(ctx, executor, auth, execReq, execOpts)
+					attemptCtx, cancelAttempt = context.WithCancel(ctx)
+					streamResult, errStream = m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
 						upstreamErr = errStream
 					}
 					durationRetry := time.Since(startRetry)
 					if errStream != nil {
+						cancelAttempt()
 						warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationRetry, errStream)
 						if errCtx := ctx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, errStream, ephemeralResult, executionSeq)
@@ -529,7 +877,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(ctx, streamResult.Chunks)
+		buffered, closed, bootstrapErr := readBootstrap(attemptCtx, cancelAttempt, streamResult.Chunks)
+		if bootstrapErr != nil {
+			cancelAttempt()
+		}
 		bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
 		if hasUpstreamExecutionAttempt(bootstrapErr) {
 			upstreamErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
@@ -551,11 +902,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					ctx = newUpstreamAttemptContext(ctx)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					retryStream, retryErr := m.streamGateAttempt(ctx, executor, auth, execReq, execOpts)
+					attemptCtx, cancelAttempt = context.WithCancel(ctx)
+					retryStream, retryErr := m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					if retryErr != nil {
+						cancelAttempt()
 						if errCtx := ctx.Err(); errCtx != nil {
 							m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, retryErr, ephemeralResult, executionSeq)
 							return nil, errCtx
@@ -565,7 +918,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 						streamResult = &cliproxyexecutor.StreamResult{}
 					} else {
 						streamResult = retryStream
-						buffered, closed, bootstrapErr = readStreamBootstrap(ctx, streamResult.Chunks)
+						buffered, closed, bootstrapErr = readBootstrap(attemptCtx, cancelAttempt, streamResult.Chunks)
+						if bootstrapErr != nil {
+							cancelAttempt()
+						}
 						bootstrapErr = markUpstreamExecutionAttemptFromContext(ctx, bootstrapErr)
 						if bootstrapErr != nil {
 							warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startRetry), bootstrapErr)
@@ -682,7 +1038,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			remaining = closedCh
 		}
 		attemptAliasResult := resolveAttemptAliasResult(routing, auth, routeModel, execModel, aliasResult)
-		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, executionSeq), nil
+		// Keep the replay coordinator on the request context while isolating the
+		// old upstream attempt in attemptCtx. The replay must survive the
+		// cancellation that tears down the failed provider connection.
+		return m.wrapStreamResult(ctx, auth.Clone(), provider, resultModel, routeModel, streamResult.Headers, buffered, remaining, attemptAliasResult, ephemeralResult, execOpts, executionSeq, cancelAttempt), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

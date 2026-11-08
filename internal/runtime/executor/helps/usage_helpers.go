@@ -355,7 +355,11 @@ func (r *UsageReporter) SetTranslatedRequestMetadata(payload []byte, format stri
 	if r == nil {
 		return
 	}
-	r.reasoning = thinking.ExtractTranslatedReasoningEffort(payload, format)
+	if effort := thinking.ExtractTranslatedReasoningEffort(payload, format); effort != "" {
+		r.reasoning = effort
+	} else if strings.TrimSpace(r.reasoning) == "" {
+		r.reasoning = usage.AutoReasoningEffort
+	}
 	r.effectiveServiceTier = extractEffectiveServiceTier(payload)
 }
 

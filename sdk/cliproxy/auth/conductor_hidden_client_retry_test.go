@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -134,5 +135,76 @@ func TestHiddenIncompleteStreamRetryStaysInsideCPA(t *testing.T) {
 	)
 	if !retry || waitGot != clienterror.HiddenClientRetryGap {
 		t.Fatalf("incomplete stream must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
+	}
+}
+
+func TestHiddenNestedIncompleteStreamRetryStaysInsideCPA(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	cause := incompleteStreamRequestScopedError{
+		msg: "stream disconnected before completion: stream error: stream disconnected before completion: stream closed before response.completed",
+	}
+	waitGot, retry := manager.shouldRetryAfterErrorWithAttempted(
+		context.Background(),
+		cliproxyexecutor.Options{},
+		cause,
+		0,
+		nil,
+		"gpt-5.1-codex",
+		time.Second,
+		0,
+		0,
+		nil,
+	)
+	if !retry || waitGot != clienterror.HiddenClientRetryGap {
+		t.Fatalf("nested incomplete stream must stay inside CPA, got wait=%s retry=%t", waitGot, retry)
+	}
+}
+
+func TestUnifiedUpstreamRetryLimitCountsAdditionalAttempts(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetRetryConfig(5, 0, 0)
+	manager.SetUpstreamErrorRetryLimit(2)
+	executor := &authFallbackExecutor{id: "codex"}
+	manager.RegisterExecutor(executor)
+	model := "retry-limit-unified-model"
+	authID := "retry-limit-unified-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex"}); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	cause := hiddenRetryStatusError{msg: "exceeded retry limit, last status: 429 Too Many Requests", status: http.StatusTooManyRequests}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, cause, attempt, []string{"codex"}, model, 0, -1, 5, nil); !retry {
+			t.Fatalf("attempt %d should retry under limit 2", attempt)
+		}
+	}
+	if _, retry := manager.shouldRetryAfterErrorWithAttempted(context.Background(), cliproxyexecutor.Options{}, cause, 2, []string{"codex"}, model, 0, -1, 5, nil); retry {
+		t.Fatal("attempt 2 must stop after two additional retries")
+	}
+}
+
+func TestUnlimitedTransientRetryHasSafetyBackoff(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	cause := &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "inference admission unavailable or restricted", Retryable: true}
+
+	wait, retry := manager.shouldRetryAfterErrorWithAttempted(
+		context.Background(),
+		cliproxyexecutor.Options{},
+		cause,
+		0,
+		nil,
+		"gpt-6.1-sol",
+		0,
+		-1,
+		0,
+		nil,
+	)
+	if !retry {
+		t.Fatal("unlimited transient retry must remain enabled")
+	}
+	if wait != clienterror.HiddenClientRetryGap {
+		t.Fatalf("unlimited transient retry wait = %s, want safety gap %s", wait, clienterror.HiddenClientRetryGap)
 	}
 }

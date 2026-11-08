@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -232,17 +233,46 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	// delivered as an in-stream chunk after the buffered handshake so downstream behaviour stays
 	// identical to the unbuffered path instead of silently turning into a credential failover.
 	var bootstrapTerminalErr error
+	var bootstrapTimedOut atomic.Bool
+	var bootstrapTimeoutTimer *time.Timer
 
 	closeBootstrapBody := func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
 	}
+	if buffering && bootstrapTimeout > 0 {
+		bootstrapTimeoutTimer = time.AfterFunc(bootstrapTimeout, func() {
+			bootstrapTimedOut.Store(true)
+			closeBootstrapBody()
+		})
+	}
+	stopBootstrapTimeout := func() {
+		if bootstrapTimeoutTimer != nil {
+			bootstrapTimeoutTimer.Stop()
+			bootstrapTimeoutTimer = nil
+		}
+	}
+	defer stopBootstrapTimeout()
 
 	sawOutputDelta := false
 	if buffering {
 		for scanner.Scan() {
+			if bootstrapTimedOut.Load() {
+				closeBootstrapBody()
+				errTimeout := newCodexBootstrapTimeoutError()
+				helps.RecordAPIResponseError(ctx, e.cfg, errTimeout)
+				reporter.PublishFailure(ctx, errTimeout)
+				return nil, errTimeout
+			}
 			line := scanner.Bytes()
+			if bootstrapTimeout > 0 && nowCodexBootstrap().Sub(bootstrapStart) >= bootstrapTimeout {
+				closeBootstrapBody()
+				errTimeout := newCodexBootstrapTimeoutError()
+				helps.RecordAPIResponseError(ctx, e.cfg, errTimeout)
+				reporter.PublishFailure(ctx, errTimeout)
+				return nil, errTimeout
+			}
 			if budgetExhausted {
 				helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap %s exhausted after %d lines / %d bytes / %v, releasing stream without overload probing", exhaustedReason, bufferedFrames, bufferedBytes, nowCodexBootstrap().Sub(bootstrapStart))
 				initialChunks = nil
@@ -289,6 +319,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
 					sawOutputDelta = true
+					stopBootstrapTimeout()
 				}
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
 					closeBootstrapBody()
@@ -311,6 +342,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed", "response.incomplete", "response.done":
 					terminalSuccess = true
+					stopBootstrapTimeout()
 					immediateIncomplete = eventType == "response.incomplete"
 					data = normalizeCodexWebsocketCompletion(data)
 					if detail, ok := helps.ParseCodexUsageWithOutputItems(data, outputItemsByIndex, outputItemsFallback); ok {
@@ -375,6 +407,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 		if !streamStarted && bootstrapTerminalErr == nil {
 			closeBootstrapBody()
+			if bootstrapTimedOut.Load() {
+				errTimeout := newCodexBootstrapTimeoutError()
+				helps.RecordAPIResponseError(ctx, e.cfg, errTimeout)
+				reporter.PublishFailure(ctx, errTimeout)
+				return nil, errTimeout
+			}
 			if errScan := scanner.Err(); errScan != nil {
 				// A cancelled downstream request must not be recorded as an upstream failure or
 				// penalise the credential; mirror the unbuffered goroutine's guard.

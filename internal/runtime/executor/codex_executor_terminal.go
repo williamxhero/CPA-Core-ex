@@ -28,6 +28,10 @@ func newCodexIncompleteStreamError() codexIncompleteStreamError {
 	}}
 }
 
+func newCodexBootstrapTimeoutError() statusErr {
+	return statusErr{code: http.StatusGatewayTimeout, msg: "upstream stream produced no payload before bootstrap timeout"}
+}
+
 func (codexIncompleteStreamError) IsRequestScoped() bool {
 	return true
 }

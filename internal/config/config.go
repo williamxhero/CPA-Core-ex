@@ -128,6 +128,10 @@ type Config struct {
 	// forbids positive cooldown waits; it does not disable same-round credential
 	// failover or immediate additional rounds allowed by RequestRetry.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+	// UpstreamErrorRetryLimit controls retries for transient upstream failures.
+	// -1 means unlimited; 0 means no additional retry; positive values count
+	// additional attempts. The default is -1.
+	UpstreamErrorRetryLimit int `yaml:"upstream-error-retry-limit" json:"upstream-error-retry-limit"`
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`

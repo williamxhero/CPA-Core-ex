@@ -142,6 +142,16 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
+		if limit < 0 {
+			defaultRequestRetry = int(^uint(0) >> 1)
+		} else if limit > defaultRequestRetry {
+			defaultRequestRetry = limit
+		}
+	}
+	if streamReplayDisabled(ctx) {
+		defaultRequestRetry = 0
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -160,6 +170,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
+		if !m.HomeEnabled() && maxRetryCredentials > 0 && defaultRequestRetry == 0 {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -204,7 +217,13 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
-
+	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
+		if limit < 0 {
+			defaultRequestRetry = int(^uint(0) >> 1)
+		} else if limit > defaultRequestRetry {
+			defaultRequestRetry = limit
+		}
+	}
 	var lastErr error
 	var preferredUpstreamErr error
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
@@ -222,6 +241,9 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			preferredUpstreamErr = errExec
 		}
 		lastErr = errExec
+		if !m.HomeEnabled() && maxRetryCredentials > 0 && defaultRequestRetry == 0 {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errExec, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -258,8 +280,59 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	// A replay is one unit in the request-wide upstream retry budget. Do not
+	// add a second legacy request-retry round around the replayed execution,
+	// otherwise a finite upstream limit can be exceeded by nested loops.
+	if streamReplayDisabled(ctx) {
+		defaultRequestRetry = 0
+	}
+	if !streamReplayDisabled(ctx) && streamReplayCoordinatorFromContext(ctx) == nil && !m.HomeEnabled() {
+		replayProviders := append([]string(nil), normalized...)
+		replayReq := req
+		replayReq.Payload = bytes.Clone(req.Payload)
+		replayOpts := opts
+		replayOpts.Headers = cloneRequestHeaders(opts.Headers)
+		replayOpts.Query = cloneStreamReplayQuery(opts.Query)
+		replayOpts.OriginalRequest = bytes.Clone(opts.OriginalRequest)
+		replayOpts.Metadata = cloneRequestMetadata(opts.Metadata)
+		replayState := streamReplayStateFromContext(ctx)
+		if replayState == nil {
+			replayState = &streamReplayState{}
+			ctx = withStreamReplayState(ctx, replayState)
+		}
+		ctx = withStreamReplayCoordinator(ctx, func(replayCtx context.Context, cause error) (*cliproxyexecutor.StreamResult, error) {
+			limit := m.configuredUpstreamErrorRetryLimit()
+			if limit == -2 {
+				limit, _, _ = m.retrySettings()
+				if limit < 0 {
+					limit = 0
+				}
+			}
+			attempt := int(replayState.attempts.Load())
+			if limit >= 0 && attempt >= limit {
+				return nil, cause
+			}
+			replayAttempt := int(replayState.attempts.Add(1))
+			replayCtx = withStreamReplayAttempt(withStreamReplayDisabled(replayCtx), replayAttempt)
+			return m.ExecuteStream(replayCtx, replayProviders, replayReq, replayOpts)
+		})
+	}
+
+	if limit := m.configuredUpstreamErrorRetryLimit(); limit != -2 {
+		if limit < 0 {
+			defaultRequestRetry = int(^uint(0) >> 1)
+		} else if limit > defaultRequestRetry {
+			defaultRequestRetry = limit
+		}
+	}
+	// Replay executions consume the request-wide upstream retry budget. Keep
+	// the legacy retry loop disabled after applying the configured limit above;
+	// otherwise one replay can start an additional retry round and exceed the
+	// finite budget.
+	if streamReplayDisabled(ctx) {
+		defaultRequestRetry = 0
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -304,6 +377,9 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			return nil, unwrapExecutionBoundaryError(errStream)
 		}
 		lastErr = errStream
+		if !m.HomeEnabled() && maxRetryCredentials > 0 && defaultRequestRetry == 0 {
+			break
+		}
 		wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, errStream, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry, roundAttempted)
 		if !shouldRetry {
 			break
@@ -535,6 +611,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	for _, authID := range streamReplayExcludedAuthIDsFromContext(ctx) {
+		if authID = strings.TrimSpace(authID); authID != "" {
+			tried[authID] = struct{}{}
+		}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
@@ -753,6 +834,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	for _, authID := range streamReplayExcludedAuthIDsFromContext(ctx) {
+		if strings.TrimSpace(authID) != "" {
+			tried[authID] = struct{}{}
+		}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
@@ -977,12 +1063,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	for _, authID := range streamReplayExcludedAuthIDsFromContext(ctx) {
+		if strings.TrimSpace(authID) != "" {
+			tried[authID] = struct{}{}
+		}
+	}
 	if !homeMode {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
 		}
 	}
 	homeExcludedAuthIDs := make(map[string]struct{})
+	for _, authID := range streamReplayExcludedAuthIDsFromContext(ctx) {
+		if strings.TrimSpace(authID) != "" {
+			homeExcludedAuthIDs[authID] = struct{}{}
+		}
+	}
 	homeSameAuthRetries := make(map[string]int)
 	lastHomeAuthID := ""
 	homeSameAuthRetryPending := false

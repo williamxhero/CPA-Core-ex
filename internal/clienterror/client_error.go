@@ -90,6 +90,15 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
 		return false
 	}
+	// Some providers return transient capacity/admission failures with HTTP 400
+	// and a generic request-error envelope. The body is authoritative here:
+	// rotating the credential is still required for these failures.
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if isCapacityPressure(lower) || isTransientText(lower) {
+			return false
+		}
+	}
 	// DeepSeek reports an invalid API key as 401 with the authentication_error
 	// type alongside the same generic code. Preserve that credential failure
 	// classification without weakening generic request-fault handling.
@@ -465,9 +474,15 @@ func hasRequestFaultBody(err error) bool {
 // a client-initiated cancellation (HTTP 499 StatusClientClosedRequest or context.Canceled).
 func IsClientCancellation(status int, err error) bool {
 	if status == StatusClientClosedRequest {
+		if IsUpstreamHTTPResponse(err) {
+			return false
+		}
 		return true
 	}
 	if err != nil {
+		if IsUpstreamHTTPResponse(err) {
+			return false
+		}
 		if errors.Is(err, context.Canceled) {
 			return true
 		}
