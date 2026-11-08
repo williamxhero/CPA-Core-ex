@@ -456,7 +456,76 @@ func (t *utlsChatGPTFallbackRoundTripper) RoundTrip(req *http.Request) (*http.Re
 	if fallback == nil {
 		return nil, errPrimary
 	}
-	return fallback.RoundTrip(replay)
+	resp, errFallback := fallback.RoundTrip(replay)
+	if resp != nil || errFallback == nil {
+		log.Debugf("codex TLS fallback succeeded via standard TLS")
+		return resp, errFallback
+	}
+	// Keep the client-facing error safe while retaining both underlying errors
+	// for the conductor's transient transport classifier. The aggregate never
+	// includes URLs, headers, credentials, or request content.
+	return nil, newUtlsTLSFallbackError(errPrimary, errFallback)
+}
+
+// utlsTLSFallbackError is the terminal error after both protected transports
+// fail before an HTTP response. Its Error string is deliberately a redacted
+// diagnostic summary; Unwrap preserves the original causes for retry and
+// credential rotation decisions.
+type utlsTLSFallbackError struct {
+	primary  error
+	fallback error
+}
+
+func newUtlsTLSFallbackError(primary, fallback error) error {
+	return &utlsTLSFallbackError{primary: primary, fallback: fallback}
+}
+
+func (e *utlsTLSFallbackError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("codex upstream transport unavailable after TLS fallback (uTLS: %s; standard TLS: %s)",
+		safeUtlsTransportCategory(e.primary), safeUtlsTransportCategory(e.fallback))
+}
+
+func (e *utlsTLSFallbackError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	return []error{e.primary, e.fallback}
+}
+
+func safeUtlsTransportCategory(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || isConfiguredTLSHandshakeTimeoutErrorForDiagnostics(err) {
+		return "timeout"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return "eof"
+	}
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "tls handshake") && strings.Contains(lower, "eof") {
+		return "eof"
+	}
+	switch {
+	case strings.Contains(lower, "connection reset"), strings.Contains(lower, "connection aborted"), strings.Contains(lower, "broken pipe"):
+		return "connection_reset"
+	case strings.Contains(lower, "connection refused"):
+		return "connection_refused"
+	case strings.Contains(lower, "stream closed"), strings.Contains(lower, "stream error"), strings.Contains(lower, "client conn is closed"):
+		return "remote_close"
+	default:
+		return "transport"
+	}
+}
+
+func isConfiguredTLSHandshakeTimeoutErrorForDiagnostics(err error) bool {
+	return cliproxyexecutor.IsConfiguredTLSHandshakeTimeoutError(err)
 }
 
 // cloneRequestForUtlsFallback makes a fresh request body before the primary
@@ -509,6 +578,9 @@ func isTransientUtlsTransportError(err error) bool {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "tls handshake") && (strings.Contains(lower, "eof") || strings.Contains(lower, "closed") || strings.Contains(lower, "reset") || strings.Contains(lower, "timeout")) {
+		return true
+	}
 	for _, phrase := range []string{
 		"connection reset", "connection refused", "connection aborted", "broken pipe",
 		"stream error", "stream closed", "client conn is closed", "force closed",

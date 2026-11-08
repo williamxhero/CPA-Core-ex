@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -77,6 +78,37 @@ func TestUtlsChatGPTFallbackDoesNotReplayWithoutBodyFactory(t *testing.T) {
 	}
 	if fallbackCalls.Load() != 0 {
 		t.Fatalf("fallback calls = %d, want zero", fallbackCalls.Load())
+	}
+}
+
+func TestUtlsChatGPTFallbackAggregatesBothTransportFailuresSafely(t *testing.T) {
+	primaryErr := fmt.Errorf(`utls: TLS handshake: EOF; Authorization: Bearer secret-token: %w`, io.EOF)
+	fallbackErr := errors.New(`standard tls: connection reset; cookie=session-secret`)
+	primary := utlsClientRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, primaryErr
+	})
+	fallback := utlsClientRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, fallbackErr
+	})
+	req, errRequest := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/codex/responses", nil)
+	if errRequest != nil {
+		t.Fatal(errRequest)
+	}
+	_, errRoundTrip := (&utlsChatGPTFallbackRoundTripper{primary: primary, fallback: fallback}).RoundTrip(req)
+	if errRoundTrip == nil {
+		t.Fatal("RoundTrip error = nil, want aggregate")
+	}
+	message := errRoundTrip.Error()
+	if !strings.Contains(message, "uTLS: eof") || !strings.Contains(message, "standard TLS: connection_reset") {
+		t.Fatalf("aggregate message = %q, want safe path categories", message)
+	}
+	for _, secret := range []string{"secret-token", "session-secret", "Authorization", "cookie"} {
+		if strings.Contains(message, secret) {
+			t.Fatalf("aggregate message leaked %q: %q", secret, message)
+		}
+	}
+	if !errors.Is(errRoundTrip, io.EOF) {
+		t.Fatal("aggregate did not preserve the primary EOF for retry classification")
 	}
 }
 
