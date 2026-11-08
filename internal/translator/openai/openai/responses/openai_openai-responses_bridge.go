@@ -38,7 +38,22 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 	}
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		converted := make([]json.RawMessage, 0, len(tools.Array()))
-		for _, t := range tools.Array() {
+		allTools := tools.Array()
+		deferred := make([]string, 0)
+		limit := len(allTools)
+		if limit > 120 {
+			limit = 120
+			for _, t := range allTools[limit:] {
+				name := t.Get("function.name").String()
+				if name == "" {
+					name = t.Get("name").String()
+				}
+				if name != "" {
+					deferred = append(deferred, name)
+				}
+			}
+		}
+		for _, t := range allTools[:limit] {
 			if t.Get("type").String() != "function" {
 				converted = append(converted, json.RawMessage(t.Raw))
 				continue
@@ -57,6 +72,11 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 				_ = d.SetRaw("parameters", v.Raw)
 			}
 			converted = append(converted, json.RawMessage(d.Bytes()))
+		}
+		if len(deferred) > 0 {
+			search := ojson.NewDocString(`{"type":"function","name":"tool_search","description":"Search deferred tools by name. Deferred tools: ","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}`)
+			_ = search.Set("description", "Search deferred tools by name. Deferred tools: "+strings.Join(deferred, ", "))
+			converted = append(converted, json.RawMessage(search.Bytes()))
 		}
 		b, _ := json.Marshal(converted)
 		_ = out.SetRawBytes("tools", b)
