@@ -1009,6 +1009,24 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 	contentType = strings.TrimSpace(contentType)
 	if json.Valid(payload) {
 		doc := ojson.NewDoc(payload)
+		// Chat-shaped image requests still need a prompt after the text fields
+		// are removed. Preserve the latest user text as the image prompt.
+		if !doc.Get("prompt").Exists() {
+			for _, message := range doc.Get("messages").Array() {
+				if message.Get("role").String() != "user" {
+					continue
+				}
+				content := message.Get("content")
+				if content.Type == ojson.String {
+					_ = doc.Set("prompt", content.String())
+				}
+				if len(content.Array()) > 0 {
+					if text := content.Get("0.text"); text.Exists() {
+						_ = doc.Set("prompt", text.String())
+					}
+				}
+			}
+		}
 		// Image upstreams must receive image semantics only. In particular, a
 		// text-model interceptor must not leak reasoning or function tools into
 		// an image generation/edit request.

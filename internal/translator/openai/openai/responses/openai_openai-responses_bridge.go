@@ -10,6 +10,15 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 )
 
+type chatBridgeStreamState struct {
+	ID       string
+	Model    string
+	ToolName map[int]string
+	ToolID   map[int]string
+	ToolOrd  map[int]int
+	NextTool int
+}
+
 // ConvertOpenAIChatCompletionsRequestToOpenAIResponses keeps the downstream
 // Chat Completions contract while sending the equivalent Responses request
 // upstream. It intentionally uses a small JSON seam so provider routing does
@@ -31,7 +40,13 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 		_ = out.SetRaw("max_output_tokens", v.Raw)
 	}
 	if v := root.Get("tool_choice"); v.Exists() {
-		_ = out.SetRaw("tool_choice", v.Raw)
+		if v.Get("type").String() == "function" && v.Get("function.name").String() != "" {
+			choice := ojson.NewDocString(`{"type":"function","name":""}`)
+			_ = choice.Set("name", v.Get("function.name").String())
+			_ = out.SetRawBytes("tool_choice", choice.Bytes())
+		} else {
+			_ = out.SetRaw("tool_choice", v.Raw)
+		}
 	}
 	if v := root.Get("parallel_tool_calls"); v.Exists() {
 		_ = out.SetRaw("parallel_tool_calls", v.Raw)
@@ -85,9 +100,11 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 	for _, m := range root.Get("messages").Array() {
 		role := m.Get("role").String()
 		if role == "system" || role == "developer" {
-			if out.Get("instructions").String() == "" {
-				_ = out.Set("instructions", m.Get("content").String())
+			instruction := m.Get("content").String()
+			if prior := out.Get("instructions").String(); prior != "" {
+				instruction = prior + "\n" + instruction
 			}
+			_ = out.Set("instructions", instruction)
 			continue
 		}
 		if role == "tool" {
@@ -105,7 +122,26 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 		if content.Type == ojson.String {
 			_ = item.SetRawBytes("content", []byte(fmt.Sprintf(`[{"type":"input_text","text":%q}]`, content.String())))
 		} else if content.Exists() {
-			_ = item.SetRaw("content", content.Raw)
+			parts := make([]json.RawMessage, 0, len(content.Array()))
+			for _, part := range content.Array() {
+				p := ojson.NewDoc([]byte(part.Raw))
+				switch p.Get("type").String() {
+				case "text":
+					_ = p.Set("type", "input_text")
+				case "image_url":
+					_ = p.Set("type", "input_image")
+					if u := p.Get("image_url.url"); u.Exists() {
+						_ = p.Set("image_url", u.String())
+					}
+				}
+				parts = append(parts, json.RawMessage(p.Bytes()))
+			}
+			if len(parts) > 0 {
+				b, _ := json.Marshal(parts)
+				_ = item.SetRawBytes("content", b)
+			} else {
+				_ = item.SetRaw("content", content.Raw)
+			}
 		}
 		input = append(input, json.RawMessage(item.Bytes()))
 		for _, tc := range m.Get("tool_calls").Array() {
@@ -132,6 +168,29 @@ func ConvertOpenAIResponsesResponseToOpenAIChatCompletionsNonStream(_ context.Co
 	_ = out.Set("id", root.Get("id").String())
 	_ = out.Set("model", model)
 	_ = out.Set("choices.0.message.content", text)
+	toolCalls := make([]json.RawMessage, 0)
+	for _, item := range root.Get("output").Array() {
+		if item.Get("type").String() != "function_call" && item.Get("type").String() != "custom_tool_call" {
+			continue
+		}
+		call := ojson.NewDocString(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+		_ = call.Set("id", item.Get("call_id").String())
+		_ = call.Set("function.name", item.Get("name").String())
+		args := item.Get("arguments").String()
+		if args == "" {
+			args = item.Get("input").String()
+		}
+		_ = call.Set("function.arguments", args)
+		toolCalls = append(toolCalls, json.RawMessage(call.Bytes()))
+	}
+	if len(toolCalls) > 0 {
+		b, _ := json.Marshal(toolCalls)
+		_ = out.SetRawBytes("choices.0.message.tool_calls", b)
+		_ = out.Set("choices.0.finish_reason", "tool_calls")
+	}
+	if v := root.Get("output.0.summary.0.text"); v.Exists() {
+		_ = out.Set("choices.0.message.reasoning_content", v.String())
+	}
 	if v := root.Get("usage.input_tokens"); v.Exists() {
 		_ = out.Set("usage.prompt_tokens", v.Int())
 	}
@@ -145,6 +204,10 @@ func ConvertOpenAIResponsesResponseToOpenAIChatCompletions(ctx context.Context, 
 	if bytes := strings.TrimSpace(string(raw)); bytes == "" {
 		return nil
 	}
+	if *param == nil {
+		*param = &chatBridgeStreamState{Model: model, ToolName: map[int]string{}, ToolID: map[int]string{}, ToolOrd: map[int]int{}}
+	}
+	state, _ := (*param).(*chatBridgeStreamState)
 	if strings.HasPrefix(strings.TrimSpace(string(raw)), "data:") {
 		raw = []byte(strings.TrimSpace(strings.TrimSpace(string(raw))[5:]))
 	}
@@ -160,7 +223,42 @@ func ConvertOpenAIResponsesResponseToOpenAIChatCompletions(ctx context.Context, 
 		_ = out.Set("choices.0.delta.content", root.Get("delta").String())
 		return [][]byte{[]byte("data: " + string(out.Bytes()) + "\n\n")}
 	}
+	if typ == "response.output_item.added" {
+		item := root.Get("item")
+		if item.Get("type").String() == "function_call" || item.Get("type").String() == "custom_tool_call" {
+			ix := int(root.Get("output_index").Int())
+			state.ToolName[ix] = item.Get("name").String()
+			state.ToolID[ix] = item.Get("call_id").String()
+			if _, ok := state.ToolOrd[ix]; !ok {
+				state.ToolOrd[ix] = state.NextTool
+				state.NextTool++
+			}
+			out := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}]},"finish_reason":null}]}`)
+			_ = out.Set("id", root.Get("response_id").String())
+			_ = out.Set("model", model)
+			_ = out.Set("choices.0.delta.tool_calls.0.id", state.ToolID[ix])
+			_ = out.Set("choices.0.delta.tool_calls.0.function.name", state.ToolName[ix])
+			_ = out.Set("choices.0.delta.tool_calls.0.index", state.ToolOrd[ix])
+			return [][]byte{[]byte("data: " + string(out.Bytes()) + "\n\n")}
+		}
+	}
+	if typ == "response.function_call_arguments.delta" || typ == "response.custom_tool_call_input.delta" {
+		ix := int(root.Get("output_index").Int())
+		out := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":""}}]},"finish_reason":null}]}`)
+		_ = out.Set("id", root.Get("response_id").String())
+		_ = out.Set("model", model)
+		if _, ok := state.ToolOrd[ix]; !ok {
+			state.ToolOrd[ix] = state.NextTool
+			state.NextTool++
+		}
+		_ = out.Set("choices.0.delta.tool_calls.0.index", state.ToolOrd[ix])
+		_ = out.Set("choices.0.delta.tool_calls.0.function.arguments", root.Get("delta").String())
+		return [][]byte{[]byte("data: " + string(out.Bytes()) + "\n\n")}
+	}
 	if typ == "response.completed" || typ == "response.failed" {
+		if typ == "response.failed" {
+			return [][]byte{[]byte("data: {\"error\":{\"message\":\"upstream Responses request failed\",\"type\":\"upstream_error\"}}\n\n")}
+		}
 		out := ojson.NewDocString(`{"id":"","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
 		_ = out.Set("id", root.Get("response.id").String())
 		_ = out.Set("model", model)

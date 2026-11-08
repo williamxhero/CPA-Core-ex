@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -44,5 +45,28 @@ func TestConvertOpenAIChatCompletionsRequestToOpenAIResponsesDefersOverflowTools
 	}
 	if !strings.Contains(root.Get("tools.120.description").String(), "tool_128") {
 		t.Fatalf("overflow manifest missing: %s", root.Get("tools.120.description").String())
+	}
+}
+
+func TestConvertOpenAIResponsesToolStreamToChatSSE(t *testing.T) {
+	var state any
+	added := ConvertOpenAIResponsesResponseToOpenAIChatCompletions(context.Background(), "gpt-6.1-sol", nil, nil, []byte(`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call-1","name":"lookup"}}`), &state)
+	delta := ConvertOpenAIResponsesResponseToOpenAIChatCompletions(context.Background(), "gpt-6.1-sol", nil, nil, []byte(`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"q\":1}"}`), &state)
+	completed := ConvertOpenAIResponsesResponseToOpenAIChatCompletions(context.Background(), "gpt-6.1-sol", nil, nil, []byte(`{"type":"response.completed","response":{"id":"resp-1"}}`), &state)
+	var joined []byte
+	for _, frame := range append(append(added, delta...), completed...) {
+		joined = append(joined, frame...)
+	}
+	text := string(joined)
+	if !strings.Contains(text, `"id":"call-1"`) || !strings.Contains(text, `"name":"lookup"`) || !strings.Contains(text, `q`) || !strings.Contains(text, `"finish_reason":"stop"`) {
+		t.Fatalf("tool stream was not bridged: %s", text)
+	}
+}
+
+func TestConvertOpenAIResponsesFailedStreamRemainsError(t *testing.T) {
+	var state any
+	out := ConvertOpenAIResponsesResponseToOpenAIChatCompletions(context.Background(), "gpt-6.1-sol", nil, nil, []byte(`{"type":"response.failed","response":{"id":"resp-1"}}`), &state)
+	if len(out) != 1 || !strings.Contains(string(out[0]), `"error"`) || strings.Contains(string(out[0]), "[DONE]") {
+		t.Fatalf("failed Responses event was masked: %q", out)
 	}
 }
