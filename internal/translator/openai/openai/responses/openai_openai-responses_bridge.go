@@ -70,6 +70,13 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 			}
 			continue
 		}
+		if role == "tool" {
+			item := ojson.NewDocString(`{"type":"function_call_output","call_id":"","output":""}`)
+			_ = item.Set("call_id", m.Get("tool_call_id").String())
+			_ = item.Set("output", m.Get("content").String())
+			input = append(input, json.RawMessage(item.Bytes()))
+			continue
+		}
 		item := ojson.NewDocString(`{"type":"message","role":"user","content":[]}`)
 		if role == "assistant" {
 			_ = item.Set("role", "assistant")
@@ -88,11 +95,6 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 			_ = call.Set("name", fn.Get("name").String())
 			_ = call.Set("arguments", fn.Get("arguments").String())
 			input = append(input, json.RawMessage(call.Bytes()))
-		}
-		if role == "tool" {
-			_ = item.Set("type", "function_call_output")
-			_ = item.Set("call_id", m.Get("tool_call_id").String())
-			_ = item.Set("output", m.Get("content").String())
 		}
 	}
 	b, _ := json.Marshal(input)
