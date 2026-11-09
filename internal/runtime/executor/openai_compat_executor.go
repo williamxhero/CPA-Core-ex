@@ -430,7 +430,10 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
-	helps.SetBoolIfDifferentDoc(doc, "stream_options.include_usage", true)
+	// The Responses API has its own usage event shape and rejects this field.
+	if endpoint == "/chat/completions" {
+		helps.SetBoolIfDifferentDoc(doc, "stream_options.include_usage", true)
+	}
 
 	url := helps.AppendInferencePath(baseURL, endpoint)
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, requestedModel, requestPath, opts.Headers)
@@ -1305,6 +1308,9 @@ func openAICompatErrorEvent(eventName string) bool {
 }
 
 func openAICompatChunkHasFinishReason(payload []byte) bool {
+	if strings.EqualFold(ojson.GetBytesNoCopy(payload, "type").String(), "response.completed") {
+		return true
+	}
 	for _, choice := range ojson.GetBytesNoCopy(payload, "choices").Array() {
 		if reason := choice.Get("finish_reason"); reason.Exists() && reason.Type != ojson.Null && strings.TrimSpace(reason.String()) != "" {
 			return true

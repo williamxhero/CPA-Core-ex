@@ -100,7 +100,10 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 	for _, m := range root.Get("messages").Array() {
 		role := m.Get("role").String()
 		if role == "system" || role == "developer" {
-			instruction := m.Get("content").String()
+			instruction := openAIChatInstructionText(m.Get("content"))
+			if instruction == "" {
+				continue
+			}
 			if prior := out.Get("instructions").String(); prior != "" {
 				instruction = prior + "\n" + instruction
 			}
@@ -120,14 +123,22 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 		}
 		content := m.Get("content")
 		if content.Type == ojson.String {
-			_ = item.SetRawBytes("content", []byte(fmt.Sprintf(`[{"type":"input_text","text":%q}]`, content.String())))
+			textType := "input_text"
+			if role == "assistant" {
+				textType = "output_text"
+			}
+			_ = item.SetRawBytes("content", []byte(fmt.Sprintf(`[{"type":"%s","text":%q}]`, textType, content.String())))
 		} else if content.Exists() {
 			parts := make([]json.RawMessage, 0, len(content.Array()))
 			for _, part := range content.Array() {
 				p := ojson.NewDoc([]byte(part.Raw))
 				switch p.Get("type").String() {
-				case "text":
-					_ = p.Set("type", "input_text")
+				case "text", "input_text", "output_text":
+					textType := "input_text"
+					if role == "assistant" {
+						textType = "output_text"
+					}
+					_ = p.Set("type", textType)
 				case "image_url":
 					_ = p.Set("type", "input_image")
 					if u := p.Get("image_url.url"); u.Exists() {
@@ -156,6 +167,26 @@ func ConvertOpenAIChatCompletionsRequestToOpenAIResponses(model string, raw []by
 	b, _ := json.Marshal(input)
 	_ = out.SetRawBytes("input", b)
 	return out.Bytes(), nil
+}
+
+func openAIChatInstructionText(content ojson.Result) string {
+	if content.Type == ojson.String {
+		return content.String()
+	}
+	if !content.IsArray() {
+		return ""
+	}
+	var parts []string
+	content.ForEach(func(_, part ojson.Result) bool {
+		switch part.Get("type").String() {
+		case "text", "input_text", "output_text":
+			if text := part.Get("text").String(); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return true
+	})
+	return strings.Join(parts, "\n")
 }
 
 func ConvertOpenAIResponsesResponseToOpenAIChatCompletionsNonStream(_ context.Context, model string, _ []byte, _ []byte, raw []byte, _ *any) []byte {

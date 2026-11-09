@@ -56,3 +56,12 @@ func TestOpenAICompatModelModeSurvivesRetryFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAICompatResponsesCompletionCountsAsTerminalClaudeStream(t *testing.T) {
+	if !openAICompatChunkHasFinishReason([]byte(`{"type":"response.completed","response":{"status":"completed"}}`)) {
+		t.Fatal("Responses completion event was not recognized as a terminal stream signal")
+	}
+	if openAICompatChunkHasFinishReason([]byte(`{"type":"response.output_text.delta","delta":"ok"}`)) {
+		t.Fatal("non-terminal Responses event was recognized as terminal")
+	}
+}

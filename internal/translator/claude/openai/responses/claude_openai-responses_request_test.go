@@ -13,6 +13,45 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestConvertClaudeRequestToOpenAIResponsesUsesInput(t *testing.T) {
+	input := []byte(`{"model":"claude-sonnet-5-5","max_tokens":1024,"system":"Be concise","messages":[{"role":"user","content":"hello"}]}`)
+	got, err := ConvertClaudeRequestToOpenAIResponses("gpt-6.1-sol", input, true)
+	if err != nil {
+		t.Fatalf("ConvertClaudeRequestToOpenAIResponses returned error: %v", err)
+	}
+	root := util.ParseGJSONBytesNoCopy(got)
+	if root.Get("messages").Exists() {
+		t.Fatalf("Responses payload still contains messages: %s", got)
+	}
+	if !root.Get("input").IsArray() || root.Get("input.#").Int() != 1 {
+		t.Fatalf("input = %s, want one Responses message", root.Get("input").Raw)
+	}
+	if root.Get("instructions").String() != "Be concise" {
+		t.Fatalf("instructions = %q", root.Get("instructions").String())
+	}
+	if root.Get("input.0.type").String() != "message" || root.Get("input.0.content.0.type").String() != "input_text" {
+		t.Fatalf("input message = %s", root.Get("input.0").Raw)
+	}
+	if !root.Get("stream").Bool() {
+		t.Fatal("stream = false, want true")
+	}
+}
+
+func TestConvertOpenAIResponsesResponseToClaudeNonStreamBridgesOutput(t *testing.T) {
+	raw := []byte(`{"id":"resp_1","model":"gpt-6.1-sol","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":2}}`)
+	got := ConvertOpenAIResponsesResponseToClaudeNonStream(context.Background(), "gpt-6.1-sol", nil, nil, raw, nil)
+	root := util.ParseGJSONBytesNoCopy(got)
+	if root.Get("type").String() != "message" || root.Get("role").String() != "assistant" {
+		t.Fatalf("Claude response envelope = %s", got)
+	}
+	if root.Get("content.0.type").String() != "text" || root.Get("content.0.text").String() != "hello" {
+		t.Fatalf("Claude response content = %s", root.Get("content").Raw)
+	}
+	if root.Get("usage.input_tokens").Int() != 3 || root.Get("usage.output_tokens").Int() != 2 {
+		t.Fatalf("Claude usage = %s", root.Get("usage").Raw)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaude_SanitizesToolCallIDsForClaude(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

@@ -29,6 +29,24 @@ func TestConvertOpenAIChatCompletionsRequestToOpenAIResponsesPreservesReasoningT
 	}
 }
 
+func TestConvertOpenAIChatCompletionsRequestToOpenAIResponsesUsesOutputTextForAssistantHistory(t *testing.T) {
+	raw := []byte(`{"model":"gpt-6.1-sol","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":"hi"},{"role":"user","content":[{"type":"text","text":"next"}]}]}`)
+	out, err := ConvertOpenAIChatCompletionsRequestToOpenAIResponses("gpt-6.1-sol", raw, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := ojson.NewDoc(out)
+	if got := root.Get("input.0.content.0.type").String(); got != "input_text" {
+		t.Fatalf("user history content type = %q, want input_text: %s", got, out)
+	}
+	if got := root.Get("input.1.content.0.type").String(); got != "output_text" {
+		t.Fatalf("assistant history content type = %q, want output_text: %s", got, out)
+	}
+	if got := root.Get("input.2.content.0.type").String(); got != "input_text" {
+		t.Fatalf("later user content type = %q, want input_text: %s", got, out)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsRequestToOpenAIResponsesDefersOverflowTools(t *testing.T) {
 	tools := make([]map[string]any, 129)
 	for i := range tools {
