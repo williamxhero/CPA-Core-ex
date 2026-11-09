@@ -3053,6 +3053,9 @@ func isRequestInvalidError(err error) bool {
 		return false
 	}
 	status := statusCodeFromError(err)
+	if clienterror.Classify(status, err.Error()) == clienterror.FailureQuotaExhausted {
+		return false
+	}
 	if clienterror.IsRequestFault(status, err) {
 		return true
 	}

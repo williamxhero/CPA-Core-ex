@@ -83,17 +83,17 @@ func Classify(status int, text string) FailureClass {
 	if status == StatusClientClosedRequest || strings.Contains(lower, "context canceled") || strings.Contains(lower, "client canceled") {
 		return FailureClientCanceled
 	}
+	// Provider quota identifiers are authoritative even when the upstream uses
+	// a generic 400/500 envelope. Check them before request-fault heuristics so
+	// quota exhaustion can rotate to another credential/provider.
+	if isQuotaExhausted(lower) {
+		return FailureQuotaExhausted
+	}
 	if isCapacityPressure(lower) || isTransientText(lower) || status >= http.StatusInternalServerError || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests {
-		if isQuotaExhausted(lower) {
-			return FailureQuotaExhausted
-		}
 		return FailureTransientUpstream
 	}
 	if raw != "" && IsRequestFault(status, nil) {
 		return FailureRequestInvalid
-	}
-	if isQuotaExhausted(lower) {
-		return FailureQuotaExhausted
 	}
 	if status == http.StatusUnauthorized || (status == http.StatusForbidden && isPermanentAuthText(lower)) {
 		return FailurePermanentAuth
@@ -103,7 +103,8 @@ func Classify(status int, text string) FailureClass {
 
 func isQuotaExhausted(lower string) bool {
 	for _, phrase := range []string{
-		"usage_limit_reached", "quota exhausted", "quota_exceeded", "quota exceeded",
+		"usage_limit_reached", "insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached",
+		"quota exhausted", "quota_exceeded", "quota exceeded",
 		"usage limit has been reached", "credit balance too low", "insufficient credits",
 		"overage_limit_reached", "no credits remaining", "you've reached your usage limit",
 	} {

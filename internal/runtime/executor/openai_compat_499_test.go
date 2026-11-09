@@ -15,3 +15,10 @@ func TestOpenAICompat499IsMarkedAsUpstreamResponse(t *testing.T) {
 		t.Fatal("OpenAI-compatible HTTP 499 must not be classified as downstream cancellation")
 	}
 }
+
+func TestOpenAICompatQuotaErrorIsCredentialScoped(t *testing.T) {
+	err := newOpenAICompatStatusError(400, nil, []byte(`{"error":{"type":"invalid_request_error","code":"insufficient_quota"}}`))
+	if !err.IsCredentialScoped() {
+		t.Fatal("OpenAI-compatible quota error must be credential scoped")
+	}
+}

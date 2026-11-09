@@ -18,6 +18,7 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialassociation"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
@@ -1348,7 +1349,7 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 	if status < http.StatusBadRequest || status > 599 {
 		status = http.StatusBadGateway
 	}
-	return statusErr{code: status, msg: string(payload)}, true
+	return newOpenAICompatStatusError(status, nil, payload), true
 }
 
 type statusErr struct {
@@ -1391,9 +1392,10 @@ const openAICompatTPMFallbackRetryAfter = time.Minute
 
 func newOpenAICompatStatusError(status int, headers http.Header, body []byte) statusErr {
 	return statusErr{
-		code:       status,
-		msg:        string(body),
-		retryAfter: openAICompatRetryAfter(status, headers, body, time.Now()),
+		code:             status,
+		msg:              string(body),
+		retryAfter:       openAICompatRetryAfter(status, headers, body, time.Now()),
+		credentialScoped: clienterror.Classify(status, string(body)) == clienterror.FailureQuotaExhausted,
 	}
 }
 

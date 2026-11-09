@@ -58,6 +58,20 @@ func TestClassifyDoesNotUseHTTPStatusAsQuotaMeaning(t *testing.T) {
 	}
 }
 
+func TestClassifyQuotaErrorCodesWithoutQuotaMessage(t *testing.T) {
+	for _, text := range []string{
+		`{"error":{"type":"insufficient_quota","code":"credit_balance_exhausted"}}`,
+		`{"error":{"code":"billing_hard_limit_reached"}}`,
+	} {
+		if got := Classify(http.StatusBadGateway, text); got != FailureQuotaExhausted {
+			t.Fatalf("Classify(502, %q) = %v, want quota exhausted", text, got)
+		}
+		if got := Classify(http.StatusBadRequest, text); got != FailureQuotaExhausted {
+			t.Fatalf("Classify(400, %q) = %v, want quota exhausted", text, got)
+		}
+	}
+}
+
 func TestClassifyTransientUpstreamFailureVariants(t *testing.T) {
 	tests := []struct {
 		name   string

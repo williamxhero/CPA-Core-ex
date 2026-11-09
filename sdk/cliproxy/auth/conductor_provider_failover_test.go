@@ -115,3 +115,86 @@ func TestExecuteFallsBackFromUpstream499ContextCanceledToCodexCredential(t *test
 		t.Fatalf("Codex calls = %v, want one fallback attempt", calls)
 	}
 }
+
+func TestExecuteFallsBackFromOpenAICompatQuotaToCodexCredential(t *testing.T) {
+	model := "gpt-6.1-sol-quota-failover"
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}})
+	manager := NewManager(nil, selector, nil)
+	manager.SetRetryConfig(1, 0, 0)
+
+	openAIAuth := &Auth{ID: "api-wxh", Provider: "openai-compatible-api-wxh", Status: StatusActive, Attributes: map[string]string{"priority": "250"}}
+	codexAuth := &Auth{ID: "OAI-WXH", Provider: "codex", Status: StatusActive, Attributes: map[string]string{"priority": "200"}}
+	for _, auth := range []*Auth{openAIAuth, codexAuth} {
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+	}
+
+	openAIExecutor := &authFallbackExecutor{
+		id: "openai-compatible-api-wxh",
+		executeErrors: map[string]error{
+			openAIAuth.ID: &Error{
+				HTTPStatus: http.StatusTooManyRequests,
+				Message:    `{"error":{"type":"insufficient_quota","code":"credit_balance_exhausted","message":"You have no credits remaining."}}`,
+			},
+		},
+	}
+	codexExecutor := &authFallbackExecutor{id: "codex"}
+	manager.RegisterExecutor(openAIExecutor)
+	manager.RegisterExecutor(codexExecutor)
+
+	opts := cliproxyexecutor.Options{Headers: http.Header{"Session-Id": []string{"quota-failover-session"}}}
+	response, err := manager.Execute(context.Background(), []string{"openai-compatible-api-wxh", "codex"}, cliproxyexecutor.Request{Model: model}, opts)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want Codex fallback", err)
+	}
+	if got := string(response.Payload); got != codexAuth.ID {
+		t.Fatalf("response payload = %q, want %q", got, codexAuth.ID)
+	}
+	if calls := openAIExecutor.ExecuteCalls(); len(calls) != 1 || calls[0] != openAIAuth.ID {
+		t.Fatalf("OpenAI compatibility calls = %v, want one failed attempt", calls)
+	}
+	if calls := codexExecutor.ExecuteCalls(); len(calls) != 1 || calls[0] != codexAuth.ID {
+		t.Fatalf("Codex calls = %v, want one fallback attempt", calls)
+	}
+}
+
+func TestExecuteFallsBackFromOpenAICompatBadRequestQuotaToCodexCredential(t *testing.T) {
+	model := "gpt-6.1-sol-quota-failover-400"
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: &FillFirstSelector{}})
+	manager := NewManager(nil, selector, nil)
+	manager.SetRetryConfig(1, 0, 0)
+
+	openAIAuth := &Auth{ID: "api-wxh-400", Provider: "openai-compatible-api-wxh", Status: StatusActive}
+	codexAuth := &Auth{ID: "OAI-WXH-400", Provider: "codex", Status: StatusActive}
+	for _, auth := range []*Auth{openAIAuth, codexAuth} {
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+	}
+
+	openAIExecutor := &authFallbackExecutor{
+		id: "openai-compatible-api-wxh",
+		executeErrors: map[string]error{
+			openAIAuth.ID: &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    `{"error":{"type":"invalid_request_error","code":"insufficient_quota"}}`,
+			},
+		},
+	}
+	codexExecutor := &authFallbackExecutor{id: "codex"}
+	manager.RegisterExecutor(openAIExecutor)
+	manager.RegisterExecutor(codexExecutor)
+
+	response, err := manager.Execute(context.Background(), []string{"openai-compatible-api-wxh", "codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want Codex fallback", err)
+	}
+	if got := string(response.Payload); got != codexAuth.ID {
+		t.Fatalf("response payload = %q, want %q", got, codexAuth.ID)
+	}
+}
