@@ -360,7 +360,7 @@ func (c *Catalog) reconcileLocked() error {
 				if candidate.ResourceID == related.row.ResourceID {
 					if row.Identity == "valid" && candidate.Identity == "valid" && row.Readiness == "ready" && candidate.Readiness == "ready" {
 						row.SourceBindings = append(row.SourceBindings, candidate.Target)
-					} else if candidate.Identity == "valid" {
+					} else if !source.file.json || candidate.Identity == "valid" {
 						// A blocked or deleted config record is not a second valid
 						// source. It must not take a matching auth file offline.
 						row.BindingState = "ambiguous_projection"

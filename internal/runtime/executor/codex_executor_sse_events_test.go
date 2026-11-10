@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -277,38 +278,22 @@ func TestCodexExecuteStreamEventExceedsTimeBudgetWhileAssemblingAbortsAttempt(t 
 	t0 := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
 	clock := withMockClock(t, t0)
 
-	bootstrapStarted := make(chan struct{})
-	var once sync.Once
-	cleanup := setCodexBootstrapNowForTest(func() time.Time {
-		now := clock.now()
-		once.Do(func() {
-			close(bootstrapStarted)
-		})
-		return now
-	})
+	cleanup := setCodexBootstrapNowForTest(clock.now)
 	t.Cleanup(cleanup)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_t\"}}\n\n"))
-		_, _ = w.Write([]byte("data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_t\",\"items\":[\n"))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-
-		<-bootstrapStarted
-		clock.advance(11 * time.Second)
-
-		_, _ = w.Write([]byte("data: {\"t_item\":1}\ndata: ]}}\n\n"))
-		_, _ = w.Write([]byte("event: error\ndata: " + codexOverloadEvent + "\n\n"))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
-		}
-	}))
-	defer server.Close()
-
+	prefix := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_t\"}}\n\n" +
+		"data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_t\",\"items\":[\n"
+	tail := "data: {\"t_item\":1}\ndata: ]}}\n\nevent: error\ndata: " + codexOverloadEvent + "\n\n"
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		// Advance only when the decoder asks for the continuation. The created
+		// event must first have been consumed at t0; scheduling cannot expire it.
+		body := io.MultiReader(strings.NewReader(prefix), &codexClockStepReader{
+			Reader: strings.NewReader(tail), step: func() { clock.advance(11 * time.Second) },
+		})
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(body), Request: r}, nil
+	})
+	ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", transport)
 	req, opts := codexTestRequest()
-	result, err := NewCodexExecutor(codexBufferingConfigWithTimeout(true, "10s")).ExecuteStream(context.Background(), codexTestAuth(server.URL), req, opts)
+	result, err := NewCodexExecutor(codexBufferingConfigWithTimeout(true, "10s")).ExecuteStream(ctx, codexTestAuth("https://clock.invalid"), req, opts)
 	if err == nil || !strings.Contains(err.Error(), "bootstrap timeout") {
 		t.Fatalf("expected bootstrap timeout, got %v", err)
 	}
@@ -565,7 +550,7 @@ func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue578
 	}
 	cfg.Codex.StreamBootstrapBuffering = false
 
-	// 2. Real completed stream succeeds and the translated body preserves VerifyInference's max_output_tokens=1 while setting stream=true.
+	// 2. Real completed stream succeeds and the translated body carries VerifyInference's max_output_tokens=16 while setting stream=true.
 	sseResponse = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\"}}\n\n" +
 		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r2\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\"}]}]}}\n\n"
@@ -583,8 +568,8 @@ func TestCodexVerifyInferenceTranslatesPayloadAndRequiresCompletedEvent_Issue578
 	if upstreamJSON["stream"] != true || upstreamJSON["store"] != false {
 		t.Fatalf("expected translated Codex body with stream=true and store=false, got: %s", string(capturedBody))
 	}
-	if maxOutputTokens := upstreamJSON["max_output_tokens"]; maxOutputTokens != float64(1) {
-		t.Fatalf("translated Codex body must preserve max_output_tokens=1, got: %s", string(capturedBody))
+	if maxOutputTokens := upstreamJSON["max_output_tokens"]; maxOutputTokens != float64(16) {
+		t.Fatalf("translated Codex body must carry max_output_tokens=16, got: %s", string(capturedBody))
 	}
 }
 
@@ -592,4 +577,16 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// codexClockStepReader advances a fake clock exactly at a body-read boundary.
+type codexClockStepReader struct {
+	io.Reader
+	step func()
+	once sync.Once
+}
+
+func (r *codexClockStepReader) Read(p []byte) (int, error) {
+	r.once.Do(r.step)
+	return r.Reader.Read(p)
 }

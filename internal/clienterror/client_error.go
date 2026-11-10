@@ -90,6 +90,19 @@ func IsRequestFault(status int, err error) bool {
 	if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
 		return false
 	}
+	// Specific request codes outrank diagnostic text mentioning capacity.
+	// Generic invalid_request_error envelopes can still carry real overloads.
+	if err != nil {
+		body := strings.TrimSpace(err.Error())
+		if ojson.Valid(body) {
+			for _, path := range []string{"error.code", "code", "response.error.code", "body.error.code"} {
+				code := strings.ToLower(strings.TrimSpace(ojson.Get(body, path).String()))
+				if _, known := requestFaultCodes[code]; known && code != "invalid_request_error" {
+					return true
+				}
+			}
+		}
+	}
 	// Some providers return transient capacity/admission failures with HTTP 400
 	// and a generic request-error envelope. The body is authoritative here:
 	// rotating the credential is still required for these failures.

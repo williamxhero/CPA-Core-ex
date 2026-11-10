@@ -61,7 +61,7 @@ func TestExecuteStreamQuotaFailurePreservesCooldownAndScope(t *testing.T) {
 					streamFn: func(_ context.Context, selected *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 						attempts = append(attempts, selected.ID)
 						chunks := make(chan cliproxyexecutor.StreamChunk, 2)
-						chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.created\"}\n\n")}
+						chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\"}\n\n")}
 						chunks <- cliproxyexecutor.StreamChunk{Err: quotaErr}
 						close(chunks)
 						return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil

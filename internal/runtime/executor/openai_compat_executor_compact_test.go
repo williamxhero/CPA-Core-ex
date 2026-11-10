@@ -994,7 +994,7 @@ func TestOpenAICompatMissingDoneDoesNotCooldownPool(t *testing.T) {
 			status:            http.StatusOK,
 			body:              "",
 			requests:          1,
-			wantCalls:         1,
+			wantCalls:         3,
 			wantCooled:        0,
 			wantLastErrorText: "upstream stream closed before [DONE]",
 			forbidAuthUnavail: true,

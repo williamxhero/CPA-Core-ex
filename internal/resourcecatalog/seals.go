@@ -139,9 +139,9 @@ func rowSeals(key []byte, r *sourceRow) (string, string, error) {
 		}
 		conf["host-source-bindings"] = ids
 		conf["host-binding-state"] = r.row.BindingState
-		if r.file.json {
-			conf["host-plugin-config"] = nodeValue(r.pluginConfig, map[string]bool{"resource-id": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
-		}
+	}
+	if r.plugin && r.file.json {
+		conf["host-plugin-config"] = nodeValue(r.pluginConfig, map[string]bool{"resource-id": true, "api-keys": true, "quota-resource-bindings": queryEnrollment})
 	}
 	var parent any
 	if r.parent != nil {

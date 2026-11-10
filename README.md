@@ -2,6 +2,26 @@
 
 # CLIProxyAPI-EX 主要能力
 
+## 开始使用
+
+Core 负责请求路由、协议转换、凭证选择与推理门禁。配合 CPA-Manager-Plus-ex 管理配置，配合 CPA-Usage-Keeper-ex 保存用量。
+
+- 配置入口：[config.example.yaml](config.example.yaml)。完整上游说明见 [README-source.md](README-source.md)。
+- 额度耗尽自动停止独立于冷却开关：启用自动启停后，首次确认凭证额度耗尽就提交停止状态；普通限流沿用重试策略。
+- 流恢复以正文输出为边界；正文输出前可以切换凭证，正文输出后保留原错误，避免重复输出。
+
+需要 Go 1.26 或更高。在仓库根目录执行：
+
+```powershell
+go test ./...
+go build -o cli-proxy-api.exe ./cmd/server
+.\cli-proxy-api.exe --config config.yaml
+```
+
+本项目运行在本机 Windows。正式替换使用父项目的 `ops/deploy-local-cpa-core.ps1`，由脚本备份、重启、检查就绪状态，并在失败时自动回退。
+
+## Fork 功能记录
+
 本页只列相对上游 router-for-me/CLIProxyAPI 的主要功能。上游已经提供代理、账号轮换和协议转换，但资源身份、额度证据和上游异常恢复仍容易在边界处丢失；本 fork 将这些能力放进 Core 的统一门禁和运行时。
 
 - **资源目录与身份围栏**：上游缺少一套贯穿资源发现、凭证主体和实际请求的身份绑定。本 fork 建立资源目录、能力协商和身份围栏，让额度查询、刷新和请求都只能使用当前已登记的真实来源。对应 [issue #23](https://github.com/williamxhero/CPA-Core-ex/issues/23)。

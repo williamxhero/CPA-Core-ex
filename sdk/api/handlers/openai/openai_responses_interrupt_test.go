@@ -274,6 +274,8 @@ type blockingHTTPInterruptExecutor struct {
 	canceled             atomic.Bool
 	firstContext         chan context.Context
 	cancellationObserved chan struct{}
+	canceledCh           chan struct{}
+	cancelOnce           sync.Once
 }
 
 func (*blockingHTTPInterruptExecutor) Identifier() string { return "codex" }
@@ -288,6 +290,16 @@ func (e *blockingHTTPInterruptExecutor) ExecuteStream(ctx context.Context, _ *co
 		e.firstContext <- ctx
 	}
 	chunks := make(chan coreexecutor.StreamChunk, 2)
+	if call == 1 {
+		context.AfterFunc(ctx, func() {
+			e.canceled.Store(true)
+			e.cancelOnce.Do(func() {
+				if e.canceledCh != nil {
+					close(e.canceledCh)
+				}
+			})
+		})
+	}
 	go func() {
 		defer close(chunks)
 		if call > 1 {
@@ -299,6 +311,11 @@ func (e *blockingHTTPInterruptExecutor) ExecuteStream(ctx context.Context, _ *co
 		<-ctx.Done()
 		e.canceled.Store(true)
 		close(e.cancellationObserved)
+		e.cancelOnce.Do(func() {
+			if e.canceledCh != nil {
+				close(e.canceledCh)
+			}
+		})
 	}()
 	return &coreexecutor.StreamResult{Chunks: chunks}, nil
 }
@@ -319,6 +336,40 @@ func (*blockingHTTPInterruptExecutor) InterruptExecutionSession(context.Context,
 	return coreexecutor.ErrNoActiveUpstreamWebsocket
 }
 
+type cancelOrderTimelineAppender struct {
+	onAppend func(eventType string)
+}
+
+func (a cancelOrderTimelineAppender) Append(eventType string, _ []byte, _ time.Time) {
+	if a.onAppend != nil {
+		a.onAppend(eventType)
+	}
+}
+
+func TestCompleteResponsesWebsocketLocalInterruptCancelsBeforeWritingIncomplete(t *testing.T) {
+	canceled := false
+	cancelCalledBeforeWrite := false
+	timeline := cancelOrderTimelineAppender{
+		onAppend: func(eventType string) {
+			if eventType == "response" {
+				cancelCalledBeforeWrite = canceled
+			}
+		},
+	}
+	_, _, _, _, _ = completeResponsesWebsocketLocalInterrupt(
+		&responsesWebsocketWriter{},
+		timeline,
+		func(...any) { canceled = true },
+		[]byte(`{"type":"response.interrupt","response_id":"r-http"}`),
+		nil,
+		nil,
+		nil,
+	)
+	if !cancelCalledBeforeWrite {
+		t.Fatal("expected completeResponsesWebsocketLocalInterrupt to cancel upstream HTTP context before writing response.incomplete downstream")
+	}
+}
+
 // TestResponsesInterruptStopsHTTPUpstream verifies that an in-flight interrupt
 // cancels an HTTP upstream turn and lets the same socket continue.
 func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
@@ -326,6 +377,7 @@ func TestResponsesInterruptStopsHTTPUpstream(t *testing.T) {
 	executor := &blockingHTTPInterruptExecutor{
 		firstContext:         make(chan context.Context, 1),
 		cancellationObserved: make(chan struct{}),
+		canceledCh:           make(chan struct{}),
 	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(&config.Config{})

@@ -21,7 +21,8 @@ import (
 // TestGeminiMissingTerminalUpstreamRepro is the regression test for issue #7005:
 // an HTTP 200 Gemini stream that ends by clean EOF without finishReason must stay
 // a failure, but it must not cool the credential/model pair or replay the already
-// submitted generation on another credential. A genuine HTTP 502 keeps existing
+// visible generation on another credential. An empty stream may retry before output.
+// A genuine HTTP 502 keeps existing
 // failover and cooldown behavior.
 func TestGeminiMissingTerminalUpstreamRepro(t *testing.T) {
 	const model = "gemini-3.1-pro-preview"
@@ -38,7 +39,7 @@ func TestGeminiMissingTerminalUpstreamRepro(t *testing.T) {
 	}{
 		{name: "normal_terminal", status: 200, body: complete, wantCalls: 1},
 		{name: "partial_then_missing_terminal", status: 200, body: partial, wantError: true, wantCalls: 1, wantErrorText: "before finishReason"},
-		{name: "empty_200_missing_terminal", status: 200, wantError: true, wantCalls: 1, wantErrorText: "before finishReason"},
+		{name: "empty_200_missing_terminal", status: 200, wantError: true, wantCalls: 2, wantErrorText: "before finishReason"},
 		{name: "real_http_502_control", status: 502, body: `{"error":{"code":502,"message":"mock upstream rejection","status":"UNAVAILABLE"}}`, wantError: true, wantCalls: 2, wantCooled: 2, wantErrorText: "mock upstream rejection"},
 	}
 	for _, tc := range cases {
