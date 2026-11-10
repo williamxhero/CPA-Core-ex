@@ -993,6 +993,14 @@ func TestInferenceGateActualModelPoolRetryAndFailover(t *testing.T) {
 }
 
 func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsReplacement(t *testing.T) {
+	runHealthyRefreshContinuity(t, false)
+}
+
+func TestInferenceGateRefreshContinuityAcrossPriorityEdits(t *testing.T) {
+	runHealthyRefreshContinuity(t, true)
+}
+
+func runHealthyRefreshContinuity(t *testing.T, editPriority bool) {
 	var rotations atomic.Int32
 	tokenServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/oauth/token" {
@@ -1079,10 +1087,34 @@ func TestInferenceGateHealthyRefreshContinuityReadSurvivesRestartAndRejectsRepla
 	if interim.Scope == previous.Scope || !reflect.DeepEqual(interim.Targets, previous.Targets) {
 		t.Fatal("unrelated publication did not preserve target tuple while advancing scope")
 	}
+	patchPriority := func(raw string) {
+		t.Helper()
+		req := httptest.NewRequest("PATCH", "/v8/management/credentials/fields", strings.NewReader(raw))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		w := httptest.NewRecorder()
+		f.server.engine.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("priority update failed: status=%d", w.Code)
+		}
+	}
+	if editPriority {
+		patchPriority(`{"name":"oauth.json","priority":210}`)
+		changed := selectedSource()
+		if changed.Targets[0].ConfigVersion <= previous.Targets[0].ConfigVersion || changed.Targets[0].Incarnation != previous.Targets[0].Incarnation {
+			t.Fatal("priority edit did not preserve the native credential lifecycle")
+		}
+		if out := query(previous.Binding, changed, 200); out["proven"] != false {
+			t.Fatal("priority edit alone invented a native grant certificate")
+		}
+	}
 	for range 2 {
 		if _, err := f.manager.ForceRefreshAuth(context.Background(), id); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if editPriority {
+		patchPriority(`{"name":"oauth.json","priority":220}`)
 	}
 	current := selectedSource()
 	if reflect.DeepEqual(previous.Targets, current.Targets) {

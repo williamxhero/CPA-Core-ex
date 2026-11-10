@@ -24,12 +24,13 @@ type QuotaQuery struct {
 }
 
 type QuotaWindow struct {
-	Name              string  `json:"name"`
-	Model             string  `json:"model,omitempty"`
-	UsedPercent       float64 `json:"usedPercent"`
-	RemainingFraction float64 `json:"remainingFraction"`
-	ResetAt           string  `json:"resetAt,omitempty"`
-	SourceStatus      string  `json:"sourceStatus,omitempty"`
+	Name               string  `json:"name"`
+	Model              string  `json:"model,omitempty"`
+	UsedPercent        float64 `json:"usedPercent"`
+	RemainingFraction  float64 `json:"remainingFraction"`
+	ResetAt            string  `json:"resetAt,omitempty"`
+	SourceStatus       string  `json:"sourceStatus,omitempty"`
+	LimitWindowSeconds int64   `json:"limitWindowSeconds,omitempty"`
 }
 
 // QuotaCredits is the Codex wallet observed with the same usage read.

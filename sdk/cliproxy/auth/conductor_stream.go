@@ -574,6 +574,24 @@ func streamPayloadCommitsOutput(payload []byte) bool {
 		switch strings.ToLower(strings.TrimSpace(eventType)) {
 		case "response.created", "response.in_progress", "response.metadata", "codex.response.metadata", "codex.rate_limits", "rate_limits.updated", "keepalive", "ping":
 			continue
+		case "message_start":
+			// Codex-to-Claude translation emits this envelope before any model
+			// output. Keep it pending so an incomplete upstream can be replayed
+			// without exposing a failed message ID to the Claude client.
+			message, _ := obj["message"].(map[string]any)
+			content, _ := message["content"].([]any)
+			if len(content) == 0 {
+				continue
+			}
+			return true
+		case "content_block_start":
+			block, _ := obj["content_block"].(map[string]any)
+			blockType, _ := block["type"].(string)
+			if (blockType == "text" && block["text"] == "") ||
+				(blockType == "thinking" && block["thinking"] == "") {
+				continue
+			}
+			return true
 		case "response.completed", "response.done":
 			return true
 		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.refusal.delta":

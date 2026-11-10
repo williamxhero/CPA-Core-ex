@@ -116,6 +116,10 @@ func Codex(ctx context.Context, b resource.Binding, metadata map[string]any, n N
 		obs.ErrorCode = "QUOTA_" + strings.ToUpper(status)
 		return obs
 	}
+	return codexUsageWindows(obs, data)
+}
+
+func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.QuotaObservation {
 	var root struct {
 		RateLimit  *codexLimit `json:"rate_limit"`
 		Additional []struct {
@@ -152,7 +156,7 @@ func Codex(ctx context.Context, b resource.Binding, metadata map[string]any, n N
 				status = "rate-limited"
 				remaining = 0
 			}
-			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, UsedPercent: *w.Used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status})
+			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, UsedPercent: *w.Used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
 		}
 		return true
 	}

@@ -436,8 +436,10 @@ func (c *Catalog) GateBindingReady(b *resource.Binding) error {
 	return nil
 }
 
-// GateRefreshContinuity proves an exact host-certified native rotation chain.
-// It never infers ownership from account labels or token/key content.
+// GateRefreshContinuity proves a host-certified native rotation chain. Config
+// edits may advance within one unchanged credential lifecycle between grants.
+// A lifecycle transition still requires an exact producer-owned refresh edge;
+// configuration changes alone never certify a rotation or a new principal.
 func (c *Catalog) GateRefreshContinuity(previous, current resource.Binding) (bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -453,14 +455,24 @@ func (c *Catalog) GateRefreshContinuity(previous, current resource.Binding) (boo
 	cursor := previous.Targets
 	traversed := false
 	for _, edge := range c.state.Gates.Refreshes {
-		if edge.From.Scope.InstanceID != previous.Scope.InstanceID || edge.From.Scope.InstanceIncarnation != previous.Scope.InstanceIncarnation || !reflect.DeepEqual(edge.From.Targets, cursor) {
+		if edge.From.Scope.InstanceID != previous.Scope.InstanceID || edge.From.Scope.InstanceIncarnation != previous.Scope.InstanceIncarnation || !gateRefreshConfigurationForward(cursor, edge.From.Targets) {
 			continue
 		}
 		cursor = edge.To
 		traversed = true
-		if reflect.DeepEqual(cursor, current.Targets) {
+		if gateRefreshConfigurationForward(cursor, current.Targets) {
 			return traversed, nil
 		}
 	}
 	return false, nil
+}
+
+// Configuration versions do not rotate the credential's sealed lifecycle.
+// Require its full identity, credential and membership tuple to remain exact,
+// and never accept a historical configuration newer than the witnessed source.
+func gateRefreshConfigurationForward(previous, current []resource.Target) bool {
+	if len(previous) != 1 || len(current) != 1 {
+		return false
+	}
+	return sameGateLifecycle(previous[0], current[0]) && previous[0].ConfigVersion > 0 && previous[0].ConfigVersion <= current[0].ConfigVersion
 }
