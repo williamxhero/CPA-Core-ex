@@ -123,6 +123,10 @@ func (c *Catalog) GateState() (resource.GateState, error) {
 func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.applyGateLocked(op)
+}
+
+func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResult, error) {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateResult{}, ErrUnavailable
 	}

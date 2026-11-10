@@ -29,6 +29,7 @@ const capacityRouteError = `{"type":"error","error":{"type":"service_unavailable
 // selection, protocol translation and Codex executors are the real components.
 type capacityRouteFixture struct {
 	t        *testing.T
+	manager  *coreauth.Manager
 	url      string
 	model    string
 	mu       sync.Mutex
@@ -37,7 +38,7 @@ type capacityRouteFixture struct {
 	finished chan struct{}
 }
 
-func newCapacityRouteFixture(t *testing.T, transport string, limit int, upstreamReply func(string) (int, []string)) *capacityRouteFixture {
+func newCapacityRouteFixture(t *testing.T, transport string, limit int, upstreamReply func(string) (int, []string), configure ...func(*config.Config)) *capacityRouteFixture {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	f := &capacityRouteFixture{t: t, model: "capacity-route-model", finished: make(chan struct{}, 1)}
@@ -98,7 +99,11 @@ func newCapacityRouteFixture(t *testing.T, transport string, limit int, upstream
 	}))
 	t.Cleanup(upstream.Close)
 	cfg := &config.Config{Codex: config.CodexConfig{StreamBootstrapBuffering: true}}
+	for _, apply := range configure {
+		apply(cfg)
+	}
 	manager := coreauth.NewManager(nil, &coreauth.FillFirstSelector{}, nil)
+	f.manager = manager
 	manager.SetConfig(cfg)
 	manager.SetRetryConfig(0, 0, limit)
 	manager.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
@@ -206,6 +211,38 @@ func capacityRouteSuccess() []string {
 	return []string{`{"type":"response.completed","response":{"id":"healthy","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"success-marker"}]}]}}`}
 }
 
+func TestResponsesIncompletePreambleRetriesInsideCPA(t *testing.T) {
+	for _, event := range []string{
+		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[]}}`,
+		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
+		`{"type":"response.output_item.done","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
+		`{"type":"response.output_item.added","item":{"id":"discarded","type":"message","content":[]}}`,
+		`{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`,
+	} {
+		for _, buffering := range []bool{false, true} {
+			t.Run(fmt.Sprintf("buffering=%t/%s", buffering, event), func(t *testing.T) {
+				f := newCapacityRouteFixture(t, "sse", 3, func(key string) (int, []string) {
+					if key == "a" {
+						// The real upstream closes without response.completed. All components
+						// between this HTTP boundary and the downstream client stay real.
+						return 200, []string{`{"type":"response.created","response":{"id":"discarded"}}`, event}
+					}
+					return 200, capacityRouteSuccess()
+				}, func(cfg *config.Config) {
+					cfg.Codex.StreamBootstrapTimeout = "5m"
+					cfg.Codex.StreamBootstrapBuffering = buffering
+				})
+				f.manager.SetUpstreamErrorRetryLimit(3)
+				status, body := f.request("sse")
+				if status != 200 || !strings.Contains(body, "success-marker") || strings.Contains(body, "discarded") || strings.Contains(body, "stream disconnected") {
+					t.Fatalf("pre-output disconnect leaked to client: status=%d body=%s", status, body)
+				}
+				f.assertAttempts("a,b")
+			})
+		}
+	}
+}
+
 func TestCapacityRoutingBeforeOutput(t *testing.T) {
 	for _, transport := range []string{"http", "sse", "ws"} {
 		t.Run(transport, func(t *testing.T) {
@@ -283,6 +320,8 @@ func TestCapacityRoutingNeverReplaysOutput(t *testing.T) {
 		{"reasoning_summary", `{"type":"response.reasoning_summary_text.delta","delta":"summary-once"}`, "summary-once"},
 		{"tool_arguments", `{"type":"response.function_call_arguments.delta","delta":"tool-once"}`, "tool-once"},
 		{"custom_tool", `{"type":"response.custom_tool_call_input.delta","delta":"custom-once"}`, "custom-once"},
+		{"server_tool", `{"type":"response.output_item.added","item":{"id":"search-once","type":"web_search_call","status":"in_progress"}}`, "search-once"},
+		{"unknown_event", `{"type":"response.future_operation","id":"future-once"}`, "future-once"},
 		{"tool_item", `{"type":"response.output_item.added","output_index":0,"item":{"id":"tool-once","type":"function_call","call_id":"call-once","name":"write_file","arguments":"{}"}}`, "call-once"},
 	}
 	for _, output := range outputs {

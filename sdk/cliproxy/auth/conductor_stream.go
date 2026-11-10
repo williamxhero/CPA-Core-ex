@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -574,6 +575,11 @@ func streamPayloadCommitsOutput(payload []byte) bool {
 		switch strings.ToLower(strings.TrimSpace(eventType)) {
 		case "response.created", "response.in_progress", "response.metadata", "codex.response.metadata", "codex.rate_limits", "rate_limits.updated", "keepalive", "ping":
 			continue
+		case "response.output_item.added", "response.output_item.done", "response.content_part.added", "response.reasoning_summary_part.added":
+			if util.IsResponsesBootstrapEvent(eventType, data) {
+				continue
+			}
+			return true
 		case "message_start":
 			// Codex-to-Claude translation emits this envelope before any model
 			// output. Keep it pending so an incomplete upstream can be replayed
@@ -592,6 +598,21 @@ func streamPayloadCommitsOutput(payload []byte) bool {
 				continue
 			}
 			return true
+		case "content_block_delta":
+			delta, _ := obj["delta"].(map[string]any)
+			deltaType, _ := delta["type"].(string)
+			// Encrypted reasoning signatures carry replay state, not visible
+			// output. Do not let a signature-only thinking block disable retry.
+			if deltaType == "signature_delta" ||
+				(deltaType == "text_delta" && delta["text"] == "") ||
+				(deltaType == "thinking_delta" && delta["thinking"] == "") {
+				continue
+			}
+			return true
+		case "content_block_stop":
+			// A visible block already committed at its content event. Closing
+			// an empty or signature-only block does not commit new output.
+			continue
 		case "response.completed", "response.done":
 			return true
 		case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.refusal.delta":

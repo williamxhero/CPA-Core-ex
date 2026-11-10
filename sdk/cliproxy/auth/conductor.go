@@ -180,6 +180,7 @@ type Manager struct {
 	hook                      Hook
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	inferenceAdmission        atomic.Pointer[inferenceAdmissionHolder]
+	quotaExhaustion           atomic.Pointer[quotaExhaustionHolder]
 	ownedAuthSave             atomic.Pointer[ownedAuthSaveHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex

@@ -37,6 +37,7 @@ type Catalog struct {
 	writeFile                           func(string, []byte) error
 	state                               *diskState
 	snapshot                            resource.Snapshot
+	quotaAutoStops                      []quotaAutoStopEntry
 }
 
 // Open explicitly opts into source marker migration. GET never calls Open.
@@ -106,6 +107,9 @@ func Open(configPath, authDir, stateDir string) (*Catalog, error) {
 	}
 	c.state = state
 	if err = c.initializeGates(); err != nil {
+		return nil, err
+	}
+	if err = c.loadQuotaAutoStops(); err != nil {
 		return nil, err
 	}
 	if err = c.reconcileLocked(); errors.Is(err, ErrSuperseded) {

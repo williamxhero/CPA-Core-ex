@@ -66,11 +66,16 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 32<<10)
 	d := json.NewDecoder(c.Request.Body)
 	d.DisallowUnknownFields()
-	var op resource.GateOperation
-	if d.Decode(&op) != nil || d.Decode(new(any)) != io.EOF || !resourcecatalog.ValidGateOperation(op) {
+	var request struct {
+		resource.GateOperation
+		ObservedAtMS int64 `json:"observedAtMs,omitempty"`
+		ManualResume bool  `json:"manualResume,omitempty"`
+	}
+	if d.Decode(&request) != nil || d.Decode(new(any)) != io.EOF || !resourcecatalog.ValidGateOperation(request.GateOperation) {
 		c.JSON(400, gin.H{"error": "invalid_operation"})
 		return
 	}
+	op := request.GateOperation
 	if op.Model != "" {
 		c.JSON(422, gin.H{"error": "model_scope_unsupported"})
 		return
@@ -109,7 +114,7 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 	} else if !h.credentialGateOperationReady(c, op) {
 		return
 	}
-	result, err = h.resourceCatalog.ApplyGate(op)
+	result, err = h.resourceCatalog.ApplyObservedGate(op, request.ObservedAtMS, request.ManualResume)
 	if errors.Is(err, resourcecatalog.ErrGateRevisionConflict) {
 		c.JSON(409, gin.H{"error": "gate_conflict", "conflict": "gate_revision"})
 		return

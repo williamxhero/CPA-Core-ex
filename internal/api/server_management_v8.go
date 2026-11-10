@@ -25,6 +25,8 @@ func (s *Server) registerManagementV8Routes() {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
 	v8.POST("/inference-gates/continuity", s.mgmt.InferenceGateContinuity)
+	v8.POST("/inference-gates/quota-auto-stop", s.mgmt.QuotaAutoStop)
+	v8.POST("/inference-gates/quota-auto-stop/status", s.mgmt.QuotaAutoStop)
 	v8.POST("/inference-gates/eligibility", s.mgmt.InferenceGateEligibility)
 	v8.POST("/inference-gates/providers/eligibility", s.mgmt.ProviderInferenceGateEligibility)
 	v8.POST("/inference-gates/providers/key-match", s.mgmt.ProviderKeyMatch)
