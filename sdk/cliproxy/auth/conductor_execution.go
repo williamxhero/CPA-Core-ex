@@ -437,13 +437,24 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 				if errReplay == nil {
 					return result, nil
 				}
+				// ExecuteStream failures (including inference admission) also
+				// note exclusions inside executeStreamMixedOnce; sync here so
+				// stage accounting sees them before the next ladder decision.
+				replayState.syncExcludedFromContext(childCtx)
+				if authID := selectedAuthIDFromMetadata(replayOpts.Metadata); authID != "" {
+					replayState.noteExcluded(authID)
+				}
 				stageModel := authSelectionModelFromOptions(replayOpts, replayReq.Model)
 				exhaustionProviders := replayState.exhaustionProviders(replayProviders)
-				if limit == -1 && isCredentialSelectionFailure(errReplay) &&
-					m.streamReplayStageExhausted(exhaustionProviders, stageModel, replayState.excludedAuthIDs()) &&
+				stageExhausted := m.streamReplayStageExhausted(exhaustionProviders, stageModel, replayState.excludedAuthIDs())
+				if limit == -1 && stageExhausted &&
+					(isCredentialSelectionFailure(errReplay) || isInferenceAdmissionFailure(errReplay)) &&
 					replayState.advanceOnAuthExhaustion() {
 					replayState.attempts.Add(-1)
 					continue
+				}
+				if isInferenceAdmissionFailure(errReplay) {
+					return nil, errReplay
 				}
 				if !isCredentialSelectionFailure(errReplay) {
 					return nil, errReplay
@@ -1415,6 +1426,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			} else {
 				m.MarkResult(execCtx, result)
 			}
+			noteStreamReplayExcludedAuth(ctx, auth.ID)
 			lastErr = errPrepare
 			if homeMode {
 				roundTiming.Observe(lastErr)
@@ -1477,6 +1489,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
+			noteStreamReplayExcludedAuth(ctx, auth.ID)
 			if hasUpstreamExecutionAttempt(errStream) {
 				upstreamErr = errStream
 			}
@@ -2077,6 +2090,46 @@ func publishSelectedAuthMetadata(meta map[string]any, auth *Auth) {
 			callback(authIndex)
 		}
 	}
+}
+
+func selectedAuthIDFromMetadata(meta map[string]any) string {
+	if len(meta) == 0 {
+		return ""
+	}
+	raw, _ := meta[cliproxyexecutor.SelectedAuthMetadataKey].(string)
+	return strings.TrimSpace(raw)
+}
+
+func noteStreamReplayExcludedAuth(ctx context.Context, authID string) {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	if state := streamReplayStateFromContext(ctx); state != nil {
+		state.noteExcluded(authID)
+	}
+}
+
+func isInferenceAdmissionFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if cliproxyexecutor.IsInferenceAdmissionError(err) {
+		return true
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch strings.ToLower(strings.TrimSpace(authErr.Code)) {
+		case "inference_gate_denied":
+			return true
+		}
+		if strings.Contains(strings.ToLower(authErr.Message), "inference admission unavailable") ||
+			strings.Contains(strings.ToLower(authErr.Message), "admission unavailable") {
+			return true
+		}
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "inference admission unavailable") || strings.Contains(lower, "admission unavailable")
 }
 
 func (m *Manager) executorFor(provider string) ProviderExecutor {

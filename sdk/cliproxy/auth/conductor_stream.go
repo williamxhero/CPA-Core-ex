@@ -362,6 +362,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					return true
 				}
 			}
+			// Gate denials must still rotate once via stream recovery even when
+			// the client-facing hidden-retry phrase list excludes them.
+			if isInferenceAdmissionFailure(err) {
+				return true
+			}
 			return isRetryableUpstreamFailure(err, clienterror.Classify(statusCodeFromError(err), err.Error()))
 		}
 		var bufferLimitErr error
@@ -452,6 +457,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					replayState.syncExcludedFromContext(ctx)
 					if auth != nil {
 						replayState.noteExcluded(auth.ID)
+					}
+					// Mid-stream admission failures may be reported under the
+					// outer wrapStreamResult auth; also exclude the scheduler's
+					// selected auth so gated credentials cannot be re-picked.
+					if isInferenceAdmissionFailure(err) {
+						if authID := selectedAuthIDFromMetadata(opts.Metadata); authID != "" {
+							replayState.noteExcluded(authID)
+						}
 					}
 				}
 				excludedAuthIDs := streamReplayExcludedAuthIDsFromContext(ctx)

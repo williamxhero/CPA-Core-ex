@@ -60,8 +60,11 @@ type streamReplayStateKey struct{}
 // streamReplayState is shared by nested stream executions so the request-wide
 // upstream retry budget cannot be reset by a replayed ExecuteStream call.
 type streamReplayState struct {
-	attempts          atomic.Int64
-	mode              atomic.Int32
+	attempts atomic.Int64
+	mode     atomic.Int32
+	// forceUnbuffered sticks after stream_recovery_buffer_limit so this request
+	// never re-enters hold-until-complete buffering (including buffered_cross).
+	forceUnbuffered   atomic.Bool
 	preferredProvider atomic.Value
 	excludedAuthStore atomic.Value
 	replayProviders   atomic.Value
@@ -110,6 +113,9 @@ func (s *streamReplayState) setRecoveryMode(mode streamRecoveryMode) {
 }
 
 func (s *streamReplayState) holdUntilComplete() bool {
+	if s != nil && s.forceUnbuffered.Load() {
+		return false
+	}
 	switch s.recoveryMode() {
 	case streamRecoveryBufferedSame, streamRecoveryBufferedCross:
 		return true
@@ -122,6 +128,7 @@ func (s *streamReplayState) advancePastBufferLimit() streamRecoveryMode {
 	if s == nil {
 		return streamRecoveryUnbufferedSame
 	}
+	s.forceUnbuffered.Store(true)
 	switch s.recoveryMode() {
 	case streamRecoveryBufferedSame:
 		s.setRecoveryMode(streamRecoveryUnbufferedSame)
@@ -277,9 +284,19 @@ func (s *streamReplayState) advanceOnAuthExhaustion() bool {
 	switch s.recoveryMode() {
 	case streamRecoveryBufferedSame:
 		s.setRecoveryMode(streamRecoveryUnbufferedSame)
-		s.clearExcludedAuthIDs()
+		// After a hold-buffer overflow the failed credential must stay excluded;
+		// clearing would let the same auth re-enter a multi-minute buffered loop.
+		if !s.forceUnbuffered.Load() {
+			s.clearExcludedAuthIDs()
+		}
 		return true
 	case streamRecoveryUnbufferedSame:
+		if s.forceUnbuffered.Load() {
+			// This request already exceeded the hold buffer; skipping
+			// buffered_cross avoids another multi-minute accumulate/discard loop.
+			s.setRecoveryMode(streamRecoveryUnbufferedCross)
+			return true
+		}
 		s.setRecoveryMode(streamRecoveryBufferedCross)
 		return true
 	case streamRecoveryBufferedCross:

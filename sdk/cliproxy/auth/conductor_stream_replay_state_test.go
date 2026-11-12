@@ -45,6 +45,38 @@ func TestStreamReplayStateAdvanceOnAuthExhaustion(t *testing.T) {
 	}
 }
 
+func TestStreamReplayStateBufferLimitSticksUnbuffered(t *testing.T) {
+	t.Parallel()
+	var state streamReplayState
+
+	if !state.holdUntilComplete() {
+		t.Fatal("initial buffered_same must hold until complete")
+	}
+	if got := state.advancePastBufferLimit(); got != streamRecoveryUnbufferedSame {
+		t.Fatalf("advancePastBufferLimit = %v, want unbuffered_same", got)
+	}
+	if state.holdUntilComplete() {
+		t.Fatal("holdUntilComplete must stay false after buffer limit")
+	}
+
+	state.noteExcluded("auth-a")
+	state.noteExcluded("auth-b")
+	if !state.advanceOnAuthExhaustion() {
+		t.Fatal("unbuffered_same should advance after buffer limit")
+	}
+	if state.recoveryMode() != streamRecoveryUnbufferedCross {
+		t.Fatalf("mode = %v, want unbuffered_cross (skip buffered_cross)", state.recoveryMode())
+	}
+	if state.holdUntilComplete() {
+		t.Fatal("holdUntilComplete must remain false on unbuffered_cross after buffer limit")
+	}
+	// Even if mode were forced back to a buffered stage, sticky must win.
+	state.setRecoveryMode(streamRecoveryBufferedCross)
+	if state.holdUntilComplete() {
+		t.Fatal("sticky forceUnbuffered must suppress buffered_cross hold")
+	}
+}
+
 func TestStreamReplayStateFilterProvidersSameMode(t *testing.T) {
 	t.Parallel()
 	var state streamReplayState

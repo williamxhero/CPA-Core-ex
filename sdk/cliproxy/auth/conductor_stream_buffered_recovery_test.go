@@ -1,4 +1,4 @@
-﻿package auth
+package auth
 
 import (
 	"context"
@@ -168,6 +168,183 @@ func TestExecuteStreamBufferedRecoveryCrossProviderFallback(t *testing.T) {
 	mu.Unlock()
 	if len(gotAttempts) < 2 || gotAttempts[len(gotAttempts)-1] != openAuth {
 		t.Fatalf("attempts = %v", gotAttempts)
+	}
+}
+
+func TestExecuteStreamBufferLimitStaysUnbufferedAcrossFailover(t *testing.T) {
+	const (
+		model = "stream-buffer-limit-sticky-model"
+		authA = "stream-buffer-limit-sticky-a"
+		authB = "stream-buffer-limit-sticky-b"
+	)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("Register(%s): %v", id, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	var mu sync.Mutex
+	var attempts []string
+	oversized := strings.Repeat("x", (1<<20)/3)
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "codex",
+		streamFn: func(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			mu.Lock()
+			attempts = append(attempts, auth.ID)
+			n := len(attempts)
+			mu.Unlock()
+			chunks := make(chan cliproxyexecutor.StreamChunk, 8)
+			switch {
+			case n == 1 && auth.ID == authA:
+				// Hold-until-complete accumulates past 1MiB → buffer_limit.
+				for i := 0; i < 4; i++ {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_text.delta","delta":"` + oversized + `"}\n\n`)}
+				}
+				go func() {
+					<-ctx.Done()
+					close(chunks)
+				}()
+			default:
+				// Failover auth recovers. Sticky forceUnbuffered keeps this
+				// attempt from holding again (covered with ladder unit test).
+				_ = n
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"after-limit\"}}\n\n")}
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"sticky-unbuffered\"}\n\n")}
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
+				close(chunks)
+			}
+			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	})
+
+	stream, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if errExecute != nil {
+		t.Fatalf("ExecuteStream(): %v", errExecute)
+	}
+	var payload strings.Builder
+	var streamErr error
+	for chunk := range stream.Chunks {
+		payload.Write(chunk.Payload)
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr != nil {
+		t.Fatalf("sticky unbuffered recovery leaked terminal error: %v", streamErr)
+	}
+	got := payload.String()
+	if !strings.Contains(got, "sticky-unbuffered") {
+		t.Fatalf("expected recovered unbuffered payload, got %q", got)
+	}
+	mu.Lock()
+	gotAttempts := append([]string(nil), attempts...)
+	mu.Unlock()
+	if len(gotAttempts) < 2 {
+		t.Fatalf("attempts = %v, want failover after buffer limit", gotAttempts)
+	}
+	if gotAttempts[0] != authA {
+		t.Fatalf("first attempt = %s, want %s", gotAttempts[0], authA)
+	}
+}
+
+func TestExecuteStreamBufferLimitThenGatedAdmissionFailsClosed(t *testing.T) {
+	const (
+		model = "stream-buffer-limit-gated-model"
+		authA = "stream-buffer-limit-gated-a"
+		authB = "stream-buffer-limit-gated-b"
+	)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	for _, id := range []string{authA, authB} {
+		if _, errRegister := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive}); errRegister != nil {
+			t.Fatalf("Register(%s): %v", id, errRegister)
+		}
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+
+	var mu sync.Mutex
+	var attempts []string
+	oversized := strings.Repeat("x", (1<<20)/3)
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "codex",
+		streamFn: func(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			mu.Lock()
+			attempts = append(attempts, auth.ID)
+			n := len(attempts)
+			mu.Unlock()
+			if opts.Metadata == nil {
+				opts.Metadata = map[string]any{}
+			}
+			opts.Metadata[cliproxyexecutor.SelectedAuthMetadataKey] = auth.ID
+			if auth.ID == authB {
+				return nil, &cliproxyexecutor.InferenceAdmissionError{}
+			}
+			chunks := make(chan cliproxyexecutor.StreamChunk, 8)
+			if n == 1 && auth.ID == authA {
+				for i := 0; i < 4; i++ {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_text.delta","delta":"` + oversized + `"}\n\n`)}
+				}
+				go func() {
+					<-ctx.Done()
+					close(chunks)
+				}()
+				return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+			}
+			// A second buffered hold on authA would hang the test; fail loudly.
+			t.Errorf("unexpected retry on %s (attempt %d); recovery must fail closed", auth.ID, n)
+			close(chunks)
+			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	})
+
+	stream, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
+		Stream:   true,
+		Metadata: map[string]any{},
+	})
+	if errExecute != nil {
+		// Fail-closed may surface before a stream handle is returned.
+		if !cliproxyexecutor.IsInferenceAdmissionError(errExecute) &&
+			!strings.Contains(strings.ToLower(errExecute.Error()), "admission") &&
+			!strings.Contains(strings.ToLower(errExecute.Error()), "auth") {
+			t.Fatalf("ExecuteStream(): %v", errExecute)
+		}
+	} else {
+		var streamErr error
+		for chunk := range stream.Chunks {
+			if chunk.Err != nil {
+				streamErr = chunk.Err
+			}
+		}
+		if streamErr == nil {
+			t.Fatal("expected terminal failure after buffer limit + gated admission")
+		}
+		if !strings.Contains(strings.ToLower(streamErr.Error()), "admission") &&
+			!strings.Contains(strings.ToLower(streamErr.Error()), "auth") &&
+			!strings.Contains(strings.ToLower(streamErr.Error()), "stream_recovery_buffer_limit") {
+			t.Fatalf("terminal error = %v, want admission/auth/buffer-limit failure", streamErr)
+		}
+	}
+	mu.Lock()
+	gotAttempts := append([]string(nil), attempts...)
+	mu.Unlock()
+	authACount := 0
+	for _, id := range gotAttempts {
+		if id == authA {
+			authACount++
+		}
+	}
+	if authACount != 1 {
+		t.Fatalf("authA attempts = %d in %v, want exactly 1 (no re-buffered loop)", authACount, gotAttempts)
+	}
+	if len(gotAttempts) < 2 || gotAttempts[0] != authA {
+		t.Fatalf("attempts = %v, want authA then gated failover", gotAttempts)
 	}
 }
 
