@@ -235,6 +235,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	}
 	go func() {
 		defer close(out)
+		if state := streamReplayStateFromContext(ctx); state != nil {
+			ctx = withStreamReplayState(ctx, state)
+		}
+		replayState = streamReplayStateFromContext(ctx)
 		var failed bool
 		var sawCompleted bool
 		var sawIncomplete bool
@@ -282,13 +286,19 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if entry == nil {
 				return
 			}
+			recoveryMode := ""
+			if replayState != nil {
+				recoveryMode = replayState.recoveryMode().String()
+			}
 			fields := map[string]any{
 				"event":            event,
 				"attempt":          streamReplayAttemptFromContext(ctx) + 1,
 				"provider":         provider,
 				"auth_id":          "",
 				"buffer_mode":      holdUntilComplete,
-				"committed_output": deliveredAny,
+				"recovery_mode":    recoveryMode,
+				"committed_output": committed,
+				"delivered_output": deliveredAny,
 				"pending_bytes":    pendingBytes,
 				"stop_reason":      stopReason,
 			}
@@ -339,7 +349,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
 		}
 		retryable := func(err error) bool {
-			if err == nil || replay == nil || deliveredAny || (ctx != nil && ctx.Err() != nil) {
+			activeReplay := streamReplayCoordinatorFromContext(ctx)
+			if activeReplay == nil {
+				activeReplay = replay
+			}
+			if err == nil || activeReplay == nil || deliveredAny || (ctx != nil && ctx.Err() != nil) {
 				return false
 			}
 			if statusCodeFromError(err) == http.StatusInsufficientStorage {
@@ -420,6 +434,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return nil, false
 			}
 			recordFailure(err)
+			activeReplay := streamReplayCoordinatorFromContext(ctx)
+			if activeReplay == nil {
+				activeReplay = replay
+			}
 			if retryable(err) {
 				// Stop the failed provider before selecting a replacement. This is
 				// essential for silent providers whose stream would otherwise remain
@@ -429,8 +447,17 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				}
 				discardStreamChunks(source)
 				discardPending()
+				replayState = streamReplayStateFromContext(ctx)
+				if replayState != nil {
+					replayState.syncExcludedFromContext(ctx)
+					if auth != nil {
+						replayState.noteExcluded(auth.ID)
+					}
+				}
 				excludedAuthIDs := streamReplayExcludedAuthIDsFromContext(ctx)
-				if auth != nil && strings.TrimSpace(auth.ID) != "" {
+				if replayState != nil {
+					excludedAuthIDs = replayState.excludedAuthIDs()
+				} else if auth != nil && strings.TrimSpace(auth.ID) != "" {
 					seen := false
 					for _, authID := range excludedAuthIDs {
 						if authID == auth.ID {
@@ -442,31 +469,88 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 						excludedAuthIDs = append(excludedAuthIDs, auth.ID)
 					}
 				}
-				retryCtx := withStreamReplayExcludedAuthIDs(ctx, excludedAuthIDs)
-				logRecovery("stream_recovery_retry", "replay", err)
-				retryResult, retryErr := replay(retryCtx, err)
-				if retryErr == nil && retryResult != nil && retryResult.Chunks != nil {
-					pending = pending[:0]
-					pendingBytes = 0
-					failed = false
-					sawCompleted = false
-					sawIncomplete = false
-					committed = false
-					replayed = true
-					holdUntilComplete = replay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState.holdUntilComplete()
-					resetBootstrapTimer()
-					return retryResult.Chunks, true
+				if replayState != nil && m.configuredUpstreamErrorRetryLimit() == -1 {
+					scopeProviders := replayState.replayProvidersSnapshot()
+					stageModel := replayState.replayModelSnapshot()
+					if stageModel == "" {
+						stageModel = routeModel
+					}
+					exhaustionProviders := replayState.exhaustionProviders(scopeProviders)
+					stageExhausted := m.streamReplayStageExhausted(exhaustionProviders, stageModel, replayState.excludedAuthIDs())
+					for len(exhaustionProviders) > 0 && stageExhausted {
+						stageExhausted = false
+						nextMode := replayState.recoveryMode()
+						if !replayState.advanceOnAuthExhaustion() {
+							break
+						}
+						if advanced := replayState.recoveryMode(); advanced != nextMode {
+							logRecovery("stream_recovery_advance", advanced.String(), err)
+						}
+						exhaustionProviders = replayState.exhaustionProviders(scopeProviders)
+						stageExhausted = m.streamReplayStageExhausted(exhaustionProviders, stageModel, replayState.excludedAuthIDs())
+					}
+					excludedAuthIDs = replayState.excludedAuthIDs()
+					holdUntilComplete = activeReplay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState.holdUntilComplete()
 				}
-				if retryErr != nil && !isCredentialSelectionFailure(retryErr) {
-					err = retryErr
+				retryCtx := withStreamReplayExcludedAuthIDs(ctx, excludedAuthIDs)
+				if replayState != nil {
+					retryCtx = withStreamReplayState(retryCtx, replayState)
+				}
+				for {
+					logRecovery("stream_recovery_retry", "replay", err)
+					retryResult, retryErr := activeReplay(retryCtx, err)
+					if retryErr == nil && retryResult != nil && retryResult.Chunks != nil {
+						pending = pending[:0]
+						pendingBytes = 0
+						failed = false
+						sawCompleted = false
+						sawIncomplete = false
+						committed = false
+						deliveredAny = false
+						replayed = true
+						replayState = streamReplayStateFromContext(retryCtx)
+						holdUntilComplete = activeReplay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState != nil && replayState.holdUntilComplete()
+						resetBootstrapTimer()
+						return retryResult.Chunks, true
+					}
+					if retryErr != nil && !isCredentialSelectionFailure(retryErr) {
+						err = retryErr
+					}
+					if replayState == nil || m.configuredUpstreamErrorRetryLimit() != -1 {
+						break
+					}
+					scopeProviders := replayState.replayProvidersSnapshot()
+					stageModel := replayState.replayModelSnapshot()
+					if stageModel == "" {
+						stageModel = routeModel
+					}
+					exhaustionProviders := replayState.exhaustionProviders(scopeProviders)
+					if !m.streamReplayStageExhausted(exhaustionProviders, stageModel, replayState.excludedAuthIDs()) {
+						break
+					}
+					nextMode := replayState.recoveryMode()
+					if !replayState.advanceOnAuthExhaustion() {
+						break
+					}
+					if advanced := replayState.recoveryMode(); advanced != nextMode {
+						logRecovery("stream_recovery_advance", advanced.String(), err)
+					}
+					excludedAuthIDs = replayState.excludedAuthIDs()
+					holdUntilComplete = replayState.holdUntilComplete()
+					retryCtx = withStreamReplayExcludedAuthIDs(ctx, excludedAuthIDs)
+					retryCtx = withStreamReplayState(retryCtx, replayState)
 				}
 			}
 			failed = true
 			logRecovery("stream_recovery_stop", "terminal_error", err)
 			if holdUntilComplete {
 				discardPending()
-			} else if len(pending) > 0 && !flushPending() {
-				return nil, false
+			} else if len(pending) > 0 {
+				if shouldDeferUnbufferedBootstrapFlush(activeReplay, m) {
+					discardPending()
+				} else if !flushPending() {
+					return nil, false
+				}
 			}
 			_ = send(cliproxyexecutor.StreamChunk{Err: err})
 			// Home owns the selection until the original producer terminates.
@@ -572,7 +656,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 							current = retry
 						}
 					default:
-						if !holdUntilComplete {
+						if !holdUntilComplete && !shouldDeferUnbufferedBootstrapFlush(replay, m) {
 							if !flushPending() {
 								return
 							}
@@ -643,8 +727,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					select {
 					case chunk, ok = <-current:
 					default:
-						if !flushPending() {
-							return
+						if !shouldDeferUnbufferedBootstrapFlush(replay, m) {
+							if !flushPending() {
+								return
+							}
 						}
 						chunk, ok = <-current
 					}
@@ -713,6 +799,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
+}
+
+func shouldDeferUnbufferedBootstrapFlush(replay streamReplayCoordinator, m *Manager) bool {
+	return replay != nil && m != nil && m.configuredUpstreamErrorRetryLimit() == -1
 }
 
 func streamPayloadCommitsOutput(payload []byte) bool {

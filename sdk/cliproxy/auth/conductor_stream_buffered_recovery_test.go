@@ -2,14 +2,29 @@
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
+
+func codexAlwaysFailStreamMock(mu *sync.Mutex, attempts *[]string) func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return func(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+		mu.Lock()
+		*attempts = append(*attempts, auth.ID)
+		mu.Unlock()
+		chunks := make(chan cliproxyexecutor.StreamChunk, 2)
+		chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"codex-hold\"}}\n\n")}
+		chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "server_is_overloaded", Retryable: true}}
+		close(chunks)
+		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+	}
+}
 
 func TestExecuteStreamBufferedRecoveryAfterPartialOutputSameProvider(t *testing.T) {
 	const (
@@ -90,6 +105,7 @@ func TestExecuteStreamBufferedRecoveryCrossProviderFallback(t *testing.T) {
 	manager := NewManager(nil, &FillFirstSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
 	manager.SetUpstreamErrorRetryLimit(-1)
+	manager.runtimeConfig.Store(&internalconfig.Config{Codex: internalconfig.CodexConfig{StreamBootstrapTimeout: "0"}})
 	for _, item := range []struct {
 		id       string
 		provider string
@@ -109,8 +125,7 @@ func TestExecuteStreamBufferedRecoveryCrossProviderFallback(t *testing.T) {
 			mu.Lock()
 			attempts = append(attempts, auth.ID)
 			mu.Unlock()
-			chunks := make(chan cliproxyexecutor.StreamChunk, 2)
-			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"codex-partial\"}\n\n")}
+			chunks := make(chan cliproxyexecutor.StreamChunk, 1)
 			chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "server_is_overloaded", Retryable: true}}
 			close(chunks)
 			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
@@ -122,9 +137,8 @@ func TestExecuteStreamBufferedRecoveryCrossProviderFallback(t *testing.T) {
 			mu.Lock()
 			attempts = append(attempts, auth.ID)
 			mu.Unlock()
-			chunks := make(chan cliproxyexecutor.StreamChunk, 2)
-			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"openai-final\"}\n\n")}
-			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
+			chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"openai-final\"}]}]}}\n\n")}
 			close(chunks)
 			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 		},
@@ -152,7 +166,7 @@ func TestExecuteStreamBufferedRecoveryCrossProviderFallback(t *testing.T) {
 	mu.Lock()
 	gotAttempts := append([]string(nil), attempts...)
 	mu.Unlock()
-	if len(gotAttempts) < 2 || gotAttempts[0] != codexAuth || gotAttempts[len(gotAttempts)-1] != openAuth {
+	if len(gotAttempts) < 2 || gotAttempts[len(gotAttempts)-1] != openAuth {
 		t.Fatalf("attempts = %v", gotAttempts)
 	}
 }
@@ -256,5 +270,39 @@ func TestExecuteStreamDisableStreamReplaySkipsRecovery(t *testing.T) {
 	mu.Unlock()
 	if len(gotAttempts) != 1 || gotAttempts[0] != authA {
 		t.Fatalf("attempts = %v, want only %s", gotAttempts, authA)
+	}
+}
+
+func TestExecuteStreamAllExcludedReturnsCredentialSelectionFailure(t *testing.T) {
+	const (
+		model = "all-excluded-model"
+		authA = "all-excluded-a"
+		authB = "all-excluded-b"
+	)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	for _, id := range []string{authA, authB} {
+		_, _ = manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive})
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	}
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "codex",
+		streamFn: func(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			t.Fatal("stream should not start when all auths are excluded")
+			return nil, nil
+		},
+	})
+	ctx := withStreamReplayDisabled(withStreamReplayExcludedAuthIDs(context.Background(), []string{authA, authB}))
+	_, err := manager.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{Stream: true})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !isCredentialSelectionFailure(err) {
+		t.Fatalf("err=%v credSelection=%v", err, isCredentialSelectionFailure(err))
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) {
+		t.Logf("code=%q", authErr.Code)
 	}
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"net/url"
 	"strings"
@@ -62,6 +63,36 @@ type streamReplayState struct {
 	attempts          atomic.Int64
 	mode              atomic.Int32
 	preferredProvider atomic.Value
+	excludedAuthStore atomic.Value
+	replayProviders   atomic.Value
+	replayModel       atomic.Value
+}
+
+func (s *streamReplayState) setReplayScope(providers []string, model string) {
+	if s == nil {
+		return
+	}
+	s.replayProviders.Store(append([]string(nil), providers...))
+	s.replayModel.Store(strings.TrimSpace(model))
+}
+
+func (s *streamReplayState) replayProvidersSnapshot() []string {
+	if s == nil {
+		return nil
+	}
+	providers, _ := s.replayProviders.Load().([]string)
+	if len(providers) == 0 {
+		return nil
+	}
+	return append([]string(nil), providers...)
+}
+
+func (s *streamReplayState) replayModelSnapshot() string {
+	if s == nil {
+		return ""
+	}
+	model, _ := s.replayModel.Load().(string)
+	return strings.TrimSpace(model)
 }
 
 func (s *streamReplayState) recoveryMode() streamRecoveryMode {
@@ -123,22 +154,141 @@ func (s *streamReplayState) noteProvider(provider string) {
 	preferred, _ := s.preferredProvider.Load().(string)
 	if preferred == "" {
 		s.preferredProvider.Store(provider)
+	}
+}
+
+func (s *streamReplayState) exhaustionProviders(providers []string) []string {
+	if s == nil {
+		return providers
+	}
+	if s.sameProviderPreferred() {
+		return s.filterProviders(providers)
+	}
+	preferred, _ := s.preferredProvider.Load().(string)
+	if preferred == "" {
+		return providers
+	}
+	filtered := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), preferred) {
+			filtered = append(filtered, provider)
+		}
+	}
+	if len(filtered) == 0 {
+		return providers
+	}
+	return filtered
+}
+
+func (s *streamReplayState) filterProviders(providers []string) []string {
+	if s == nil || !s.sameProviderPreferred() {
+		return providers
+	}
+	preferred, _ := s.preferredProvider.Load().(string)
+	if preferred == "" {
+		return providers
+	}
+	filtered := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), preferred) {
+			filtered = append(filtered, provider)
+		}
+	}
+	if len(filtered) == 0 {
+		return providers
+	}
+	return filtered
+}
+
+func (s *streamReplayState) excludedAuthIDs() []string {
+	if s == nil {
+		return nil
+	}
+	ids, _ := s.excludedAuthStore.Load().([]string)
+	if len(ids) == 0 {
+		return nil
+	}
+	return append([]string(nil), ids...)
+}
+
+func (s *streamReplayState) syncExcludedFromContext(ctx context.Context) {
+	if s == nil {
 		return
 	}
-	if strings.EqualFold(preferred, provider) {
+	ids := streamReplayExcludedAuthIDsFromContext(ctx)
+	if len(ids) == 0 {
 		return
+	}
+	merged := s.excludedAuthIDs()
+	for _, authID := range ids {
+		authID = strings.TrimSpace(authID)
+		if authID == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range merged {
+			if existing == authID {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			merged = append(merged, authID)
+		}
+	}
+	s.excludedAuthStore.Store(append([]string(nil), merged...))
+}
+
+func (s *streamReplayState) noteExcluded(authID string) {
+	if s == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	merged := s.excludedAuthIDs()
+	for _, existing := range merged {
+		if existing == authID {
+			return
+		}
+	}
+	merged = append(merged, authID)
+	s.excludedAuthStore.Store(append([]string(nil), merged...))
+}
+
+func (s *streamReplayState) clearExcludedAuthIDs() {
+	if s == nil {
+		return
+	}
+	s.excludedAuthStore.Store([]string(nil))
+}
+
+// advanceOnAuthExhaustion moves to the next recovery stage when every eligible
+// credential in the current stage has been excluded.
+func (s *streamReplayState) advanceOnAuthExhaustion() bool {
+	if s == nil {
+		return false
 	}
 	switch s.recoveryMode() {
 	case streamRecoveryBufferedSame:
-		s.setRecoveryMode(streamRecoveryBufferedCross)
+		s.setRecoveryMode(streamRecoveryUnbufferedSame)
+		s.clearExcludedAuthIDs()
+		return true
 	case streamRecoveryUnbufferedSame:
+		s.setRecoveryMode(streamRecoveryBufferedCross)
+		return true
+	case streamRecoveryBufferedCross:
 		s.setRecoveryMode(streamRecoveryUnbufferedCross)
+		return true
+	default:
+		return false
 	}
 }
 
 func streamReplayForbidden(opts cliproxyexecutor.Options) bool {
 	if len(opts.Metadata) == 0 {
-		return false
+		return streamReplayForbiddenPayload(opts)
 	}
 	if disabled, ok := opts.Metadata["disable_stream_replay"].(bool); ok && disabled {
 		return true
@@ -149,7 +299,28 @@ func streamReplayForbidden(opts cliproxyexecutor.Options) bool {
 			return true
 		}
 	}
-	return false
+	if committed, ok := opts.Metadata["stream_replay_side_effects_committed"].(bool); ok && committed {
+		return true
+	}
+	if raw, ok := opts.Metadata["stream_replay_side_effects_committed"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "1", "true", "yes", "on":
+			return true
+		}
+	}
+	return streamReplayForbiddenPayload(opts)
+}
+
+func streamReplayForbiddenPayload(opts cliproxyexecutor.Options) bool {
+	payload := opts.OriginalRequest
+	if len(payload) == 0 {
+		return false
+	}
+	lower := bytes.ToLower(payload)
+	if !bytes.Contains(lower, []byte(`"tool_use"`)) {
+		return false
+	}
+	return bytes.Contains(lower, []byte(`"tool_result"`)) || bytes.Contains(lower, []byte(`"function_result"`))
 }
 
 func withStreamReplayCoordinator(ctx context.Context, coordinator streamReplayCoordinator) context.Context {
