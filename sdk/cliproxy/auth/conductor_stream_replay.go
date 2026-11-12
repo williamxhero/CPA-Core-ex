@@ -164,13 +164,17 @@ func (s *streamReplayState) exhaustionProviders(providers []string) []string {
 	if s.sameProviderPreferred() {
 		return s.filterProviders(providers)
 	}
+	// Cross-provider stages are exhausted only when every non-preferred
+	// provider has no remaining credentials. Checking the preferred provider
+	// here would skip buffered_cross as soon as same-provider auths were
+	// excluded for the earlier ladder stages.
 	preferred, _ := s.preferredProvider.Load().(string)
 	if preferred == "" {
 		return providers
 	}
 	filtered := make([]string, 0, len(providers))
 	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider), preferred) {
+		if !strings.EqualFold(strings.TrimSpace(provider), preferred) {
 			filtered = append(filtered, provider)
 		}
 	}

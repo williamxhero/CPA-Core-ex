@@ -60,6 +60,22 @@ func TestStreamReplayStateFilterProvidersSameMode(t *testing.T) {
 	}
 }
 
+func TestStreamReplayStateExhaustionProvidersCrossMode(t *testing.T) {
+	t.Parallel()
+	var state streamReplayState
+	state.noteProvider("codex")
+	state.setRecoveryMode(streamRecoveryBufferedCross)
+	got := state.exhaustionProviders([]string{"codex", "openai", "gemini"})
+	if len(got) != 2 || got[0] != "openai" || got[1] != "gemini" {
+		t.Fatalf("cross exhaustion providers = %v, want non-preferred only", got)
+	}
+	state.setRecoveryMode(streamRecoveryBufferedSame)
+	got = state.exhaustionProviders([]string{"codex", "openai"})
+	if len(got) != 1 || got[0] != "codex" {
+		t.Fatalf("same-stage exhaustion providers = %v, want preferred only", got)
+	}
+}
+
 func TestStreamReplayStageExhaustedLadderFixture(t *testing.T) {
 	const (
 		model = "stream-ladder-unbuffered-model"
