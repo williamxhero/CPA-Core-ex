@@ -64,7 +64,7 @@ func isResponsesBufferableOutputItem(payload []byte) bool {
 	case "message":
 		return isResponsesEmptyContentList(item.Get("content"))
 	case "reasoning":
-		return isResponsesEmptyContentList(item.Get("summary")) && isResponsesEmptyContentList(item.Get("content"))
+		return isResponsesReasoningItemEmpty(item)
 	case "function_call":
 		return item.Get("arguments").String() == ""
 	case "custom_tool_call":
@@ -72,6 +72,22 @@ func isResponsesBufferableOutputItem(payload []byte) bool {
 	default:
 		return false
 	}
+}
+
+// isResponsesReasoningItemEmpty ignores provider-private signature and replay
+// metadata. Only visible text or refusal content commits a Responses stream.
+func isResponsesReasoningItemEmpty(item ojson.Result) bool {
+	for _, list := range []ojson.Result{item.Get("summary"), item.Get("content")} {
+		for _, part := range list.Array() {
+			if text := part.Get("text"); text.Type == ojson.String && text.String() != "" {
+				return false
+			}
+			if refusal := part.Get("refusal"); refusal.Type == ojson.String && refusal.String() != "" {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // isResponsesEmptyContentList reports whether every entry of an item's content or summary array is a

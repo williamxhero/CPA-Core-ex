@@ -54,7 +54,7 @@ func TestExecuteStreamIncompleteClaudeSignatureOnlyReasoningRetries(t *testing.T
 	testClaudeReasoningStreamRetry(t, false)
 }
 
-func TestExecuteStreamIncompleteClaudeVisibleOutputIsNotReplayed(t *testing.T) {
+func TestExecuteStreamIncompleteClaudeVisibleOutputBufferedRecovery(t *testing.T) {
 	testClaudeReasoningStreamRetry(t, true)
 }
 
@@ -119,17 +119,12 @@ func testClaudeReasoningStreamRetry(t *testing.T, visible bool) {
 		}
 		payload.Write(chunk.Payload)
 	}
-	if visible {
-		if streamErr == nil || attempts != 1 || !strings.Contains(payload.String(), "already delivered answer") || strings.Contains(payload.String(), "recovered answer") {
-			t.Fatalf("committed output must not be duplicated: attempts=%d error=%v payload=%q", attempts, streamErr, payload.String())
-		}
-		return
-	}
 	if streamErr != nil {
-		t.Fatalf("signature-only reasoning leaked incomplete stream after %d attempts: %v", attempts, streamErr)
+		t.Fatalf("incomplete stream leaked after %d attempts: %v", attempts, streamErr)
 	}
-	if attempts != 2 || !strings.Contains(payload.String(), "recovered answer") || strings.Contains(payload.String(), "discarded") {
-		t.Fatalf("attempts=%d payload=%q", attempts, payload.String())
+	got := payload.String()
+	if attempts != 2 || !strings.Contains(got, "recovered answer") || strings.Contains(got, "discarded") || strings.Contains(got, "already delivered answer") {
+		t.Fatalf("buffered recovery failed: attempts=%d payload=%q", attempts, got)
 	}
 }
 

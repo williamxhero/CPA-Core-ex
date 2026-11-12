@@ -25,6 +25,50 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+func (m *Manager) streamReplayStageExhausted(providers []string, model string, excluded []string) bool {
+	if m == nil || len(excluded) == 0 {
+		return false
+	}
+	excludedSet := make(map[string]struct{}, len(excluded))
+	for _, authID := range excluded {
+		authID = strings.TrimSpace(authID)
+		if authID != "" {
+			excludedSet[authID] = struct{}{}
+		}
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		providerKey := canonicalSchedulingProvider(provider)
+		if providerKey != "" {
+			providerSet[providerKey] = struct{}{}
+		}
+	}
+	if len(providerSet) == 0 {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	registryRef := registry.GetGlobalRegistry()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	matched := 0
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		if _, ok := providerSet[canonicalSchedulingProvider(auth.Provider)]; !ok {
+			continue
+		}
+		if model != "" && !registryRef.ClientSupportsModel(auth.ID, model) {
+			continue
+		}
+		matched++
+		if _, seen := excludedSet[auth.ID]; !seen {
+			return false
+		}
+	}
+	return matched > 0
+}
+
 func (m *Manager) newUpstreamAttemptContext(ctx context.Context) context.Context {
 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
 	if RequestScopedErrorConfigFromContext(ctx) == nil {
@@ -338,6 +382,14 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		}
 	}
 	normalized := m.normalizeProviders(providers)
+	if streamReplayDisabled(ctx) {
+		if replayState := streamReplayStateFromContext(ctx); replayState != nil {
+			ctx = withStreamReplayState(ctx, replayState)
+			if m.configuredUpstreamErrorRetryLimit() == -1 {
+				normalized = replayState.filterProviders(normalized)
+			}
+		}
+	}
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -348,7 +400,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if streamReplayDisabled(ctx) {
 		defaultRequestRetry = 0
 	}
-	if !streamReplayDisabled(ctx) && streamReplayCoordinatorFromContext(ctx) == nil && !m.HomeEnabled() {
+	if !streamReplayDisabled(ctx) && streamReplayCoordinatorFromContext(ctx) == nil && !m.HomeEnabled() && !streamReplayForbidden(opts) {
 		replayProviders := append([]string(nil), normalized...)
 		replayReq := req
 		replayReq.Payload = bytes.Clone(req.Payload)
@@ -362,6 +414,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 			replayState = &streamReplayState{}
 			ctx = withStreamReplayState(ctx, replayState)
 		}
+		replayState.setReplayScope(replayProviders, authSelectionModelFromOptions(replayOpts, replayReq.Model))
 		ctx = withStreamReplayCoordinator(ctx, func(replayCtx context.Context, cause error) (*cliproxyexecutor.StreamResult, error) {
 			limit := m.configuredUpstreamErrorRetryLimit()
 			if limit == -2 {
@@ -370,13 +423,33 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 					limit = 0
 				}
 			}
-			attempt := int(replayState.attempts.Load())
-			if limit >= 0 && attempt >= limit {
+			for {
+				replayState.syncExcludedFromContext(replayCtx)
+				if limit >= 0 && int(replayState.attempts.Load()) >= limit {
+					return nil, cause
+				}
+				replayAttempt := int(replayState.attempts.Add(1))
+				childCtx := withStreamReplayAttempt(withStreamReplayDisabled(replayCtx), replayAttempt)
+				childCtx = withStreamReplayState(childCtx, replayState)
+				childCtx = withStreamReplayExcludedAuthIDs(childCtx, replayState.excludedAuthIDs())
+				stageProviders := replayState.filterProviders(replayProviders)
+				result, errReplay := m.ExecuteStream(childCtx, stageProviders, replayReq, replayOpts)
+				if errReplay == nil {
+					return result, nil
+				}
+				stageModel := authSelectionModelFromOptions(replayOpts, replayReq.Model)
+				exhaustionProviders := replayState.exhaustionProviders(replayProviders)
+				if limit == -1 && isCredentialSelectionFailure(errReplay) &&
+					m.streamReplayStageExhausted(exhaustionProviders, stageModel, replayState.excludedAuthIDs()) &&
+					replayState.advanceOnAuthExhaustion() {
+					replayState.attempts.Add(-1)
+					continue
+				}
+				if !isCredentialSelectionFailure(errReplay) {
+					return nil, errReplay
+				}
 				return nil, cause
 			}
-			replayAttempt := int(replayState.attempts.Add(1))
-			replayCtx = withStreamReplayAttempt(withStreamReplayDisabled(replayCtx), replayAttempt)
-			return m.ExecuteStream(replayCtx, replayProviders, replayReq, replayOpts)
 		})
 	}
 
