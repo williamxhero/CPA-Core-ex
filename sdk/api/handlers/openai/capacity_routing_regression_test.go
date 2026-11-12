@@ -216,6 +216,7 @@ func TestResponsesIncompletePreambleRetriesInsideCPA(t *testing.T) {
 		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[]}}`,
 		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
 		`{"type":"response.output_item.done","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
+		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[{"type":"signature","signature":"synthetic-signature"}],"content":[]}}`,
 		`{"type":"response.output_item.added","item":{"id":"discarded","type":"message","content":[]}}`,
 		`{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`,
 	} {

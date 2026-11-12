@@ -348,7 +348,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if streamReplayDisabled(ctx) {
 		defaultRequestRetry = 0
 	}
-	if !streamReplayDisabled(ctx) && streamReplayCoordinatorFromContext(ctx) == nil && !m.HomeEnabled() {
+	if !streamReplayDisabled(ctx) && streamReplayCoordinatorFromContext(ctx) == nil && !m.HomeEnabled() && !streamReplayForbidden(opts) {
 		replayProviders := append([]string(nil), normalized...)
 		replayReq := req
 		replayReq.Payload = bytes.Clone(req.Payload)

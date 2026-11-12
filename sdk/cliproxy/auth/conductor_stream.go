@@ -225,6 +225,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	out := make(chan cliproxyexecutor.StreamChunk)
 	streamStart := time.Now()
 	replay := streamReplayCoordinatorFromContext(ctx)
+	replayState := streamReplayStateFromContext(ctx)
+	// Unlimited upstream retries prefer hold-until-complete buffering so a
+	// mid-stream transient failure can discard partial output and replay
+	// without duplicating content already shown to the client.
+	holdUntilComplete := replay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState.holdUntilComplete()
+	if replayState != nil {
+		replayState.noteProvider(provider)
+	}
 	go func() {
 		defer close(out)
 		var failed bool
@@ -234,6 +242,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		var deliveredAny bool
 		replayed := false
 		pending := make([]cliproxyexecutor.StreamChunk, 0, len(buffered))
+		pendingBytes := 0
+		for _, chunk := range buffered {
+			pendingBytes += len(chunk.Payload)
+		}
 		bootstrapTimeout := m.streamBootstrapTimeout()
 		var bootstrapTimer *time.Timer
 		var bootstrapTimeoutCh <-chan time.Time
@@ -265,6 +277,29 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		if aliasResult.ForceMapping && strings.TrimSpace(aliasResult.OriginalAlias) != "" {
 			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
 		}
+		logRecovery := func(event, stopReason string, err error) {
+			entry := logEntryWithRequestID(ctx)
+			if entry == nil {
+				return
+			}
+			fields := map[string]any{
+				"event":            event,
+				"attempt":          streamReplayAttemptFromContext(ctx) + 1,
+				"provider":         provider,
+				"auth_id":          "",
+				"buffer_mode":      holdUntilComplete,
+				"committed_output": deliveredAny,
+				"pending_bytes":    pendingBytes,
+				"stop_reason":      stopReason,
+			}
+			if auth != nil {
+				fields["auth_id"] = auth.ID
+			}
+			if err != nil {
+				fields["error"] = err.Error()
+			}
+			entry.WithFields(fields).Info("stream recovery")
+		}
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if ctx == nil {
 				out <- chunk
@@ -285,7 +320,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				deliveredAny = true
 			}
 			pending = pending[:0]
+			pendingBytes = 0
 			return true
+		}
+		discardPending := func() {
+			pending = pending[:0]
+			pendingBytes = 0
 		}
 		recordFailure := func(err error) {
 			entry := logEntryWithRequestID(ctx)
@@ -302,9 +342,17 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if err == nil || replay == nil || deliveredAny || (ctx != nil && ctx.Err() != nil) {
 				return false
 			}
+			if statusCodeFromError(err) == http.StatusInsufficientStorage {
+				var authErr *Error
+				if errors.As(err, &authErr) && authErr != nil && authErr.Code == "stream_recovery_buffer_limit" {
+					return true
+				}
+			}
 			return isRetryableUpstreamFailure(err, clienterror.Classify(statusCodeFromError(err), err.Error()))
 		}
+		var bufferLimitErr error
 		processPayload := func(chunk cliproxyexecutor.StreamChunk, applyRewrite bool) bool {
+			bufferLimitErr = nil
 			if chunk.Incomplete {
 				sawIncomplete = true
 			}
@@ -326,8 +374,35 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return true
 			}
 			chunk.Payload = payload
+			if holdUntilComplete {
+				if pendingBytes+len(payload) > defaultStreamRecoveryBufferLimit {
+					nextMode := replayState.advancePastBufferLimit()
+					logRecovery("stream_recovery_buffer_limit", nextMode.String(), nil)
+					discardPending()
+					stopBootstrapTimer()
+					bufferLimitErr = &Error{
+						Code:       "stream_recovery_buffer_limit",
+						Message:    "stream recovery buffer exceeded memory limit",
+						Retryable:  true,
+						HTTPStatus: http.StatusInsufficientStorage,
+					}
+					return false
+				}
+				pending = append(pending, chunk)
+				pendingBytes += len(payload)
+				if streamPayloadCommitsOutput(payload) {
+					committed = true
+					stopBootstrapTimer()
+				}
+				if sawCompleted && !sawIncomplete {
+					logRecovery("stream_recovery_release", "completed", nil)
+					return flushPending()
+				}
+				return true
+			}
 			if !committed && !streamPayloadCommitsOutput(payload) {
 				pending = append(pending, chunk)
+				pendingBytes += len(payload)
 				return true
 			}
 			if !committed {
@@ -353,6 +428,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					cancelUpstream()
 				}
 				discardStreamChunks(source)
+				discardPending()
 				excludedAuthIDs := streamReplayExcludedAuthIDsFromContext(ctx)
 				if auth != nil && strings.TrimSpace(auth.ID) != "" {
 					seen := false
@@ -367,13 +443,17 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					}
 				}
 				retryCtx := withStreamReplayExcludedAuthIDs(ctx, excludedAuthIDs)
+				logRecovery("stream_recovery_retry", "replay", err)
 				retryResult, retryErr := replay(retryCtx, err)
 				if retryErr == nil && retryResult != nil && retryResult.Chunks != nil {
 					pending = pending[:0]
+					pendingBytes = 0
 					failed = false
 					sawCompleted = false
 					sawIncomplete = false
+					committed = false
 					replayed = true
+					holdUntilComplete = replay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState.holdUntilComplete()
 					resetBootstrapTimer()
 					return retryResult.Chunks, true
 				}
@@ -382,7 +462,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				}
 			}
 			failed = true
-			if len(pending) > 0 && !flushPending() {
+			logRecovery("stream_recovery_stop", "terminal_error", err)
+			if holdUntilComplete {
+				discardPending()
+			} else if len(pending) > 0 && !flushPending() {
 				return nil, false
 			}
 			_ = send(cliproxyexecutor.StreamChunk{Err: err})
@@ -404,7 +487,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		processNext := func(next cliproxyexecutor.StreamChunk, ok bool, source <-chan cliproxyexecutor.StreamChunk, rewrite bool) (<-chan cliproxyexecutor.StreamChunk, bool, bool) {
 			if !ok {
-				if !flushPending() {
+				if holdUntilComplete && !sawCompleted && !failed {
+					retry, okRetry := processError(&Error{Code: "incomplete_stream", Message: "upstream stream closed before response.completed", Retryable: true}, source)
+					if okRetry {
+						return retry, true, false
+					}
+					return nil, false, true
+				}
+				if !holdUntilComplete && !flushPending() {
 					return nil, false, true
 				}
 				closed := make(chan cliproxyexecutor.StreamChunk)
@@ -419,6 +509,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return nil, false, true
 			}
 			if !processPayload(next, rewrite) {
+				if bufferLimitErr != nil {
+					retry, okRetry := processError(bufferLimitErr, source)
+					if okRetry {
+						return retry, true, false
+					}
+				}
 				discardStreamChunks(source)
 				return nil, false, true
 			}
@@ -443,6 +539,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					return
 				}
 				if !processPayload(chunk, applyRewrite) {
+					if bufferLimitErr != nil {
+						retry, okRetry := processError(bufferLimitErr, current)
+						if okRetry {
+							current = retry
+							applyRewrite = false
+							buffered = nil
+							switched = true
+							break
+						}
+					}
 					discardStreamChunks(current)
 					return
 				}
@@ -466,8 +572,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 							current = retry
 						}
 					default:
-						if !flushPending() {
-							return
+						if !holdUntilComplete {
+							if !flushPending() {
+								return
+							}
 						}
 					}
 				} else {
@@ -507,6 +615,8 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				if !committed && bootstrapTimeoutCh != nil {
 					select {
 					case <-ctx.Done():
+						discardPending()
+						logRecovery("stream_recovery_stop", "client_canceled", ctx.Err())
 						return
 					case <-bootstrapTimeoutCh:
 						retry, okRetry := processError(&Error{Code: "stream_bootstrap_timeout", Message: "upstream stream produced no payload before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}, current)
@@ -516,6 +626,14 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 							switched = true
 							break
 						}
+						return
+					case chunk, ok = <-current:
+					}
+				} else if holdUntilComplete {
+					select {
+					case <-ctx.Done():
+						discardPending()
+						logRecovery("stream_recovery_stop", "client_canceled", ctx.Err())
 						return
 					case chunk, ok = <-current:
 					}
@@ -532,6 +650,16 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					}
 				}
 				if !ok {
+					if holdUntilComplete && !sawCompleted && !failed {
+						retry, okRetry := processError(&Error{Code: "incomplete_stream", Message: "upstream stream closed before response.completed", Retryable: true}, current)
+						if okRetry {
+							current = retry
+							applyRewrite = false
+							switched = true
+							break
+						}
+						return
+					}
 					break
 				}
 				if chunk.Err != nil {
@@ -545,6 +673,15 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 					return
 				}
 				if !processPayload(chunk, applyRewrite) {
+					if bufferLimitErr != nil {
+						retry, okRetry := processError(bufferLimitErr, current)
+						if okRetry {
+							current = retry
+							applyRewrite = false
+							switched = true
+							break
+						}
+					}
 					discardStreamChunks(current)
 					return
 				}
@@ -564,7 +701,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				}
 			}
 		}
-		if !committed && len(pending) > 0 && !flushPending() {
+		if holdUntilComplete {
+			if !failed && sawCompleted && len(pending) > 0 && !flushPending() {
+				return
+			}
+		} else if !committed && len(pending) > 0 && !flushPending() {
 			return
 		}
 		if !failed && !replayed && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
