@@ -350,7 +350,11 @@ func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header,
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
 	credentialScoped := isUsageLimit && !modelLevelCooling
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(body)
+	// Generic per-minute rate limits (rate_limit_exceeded / "Rate limit exceeded")
+	// are transient and must share the capacity cooldown path. Treating them as
+	// usage quota exhausts the only usable credential and surfaces a premature
+	// 429 to Codex ("exceeded retry limit").
+	transientCapacity := !isUsageLimit && (isCodexTransientCapacityError(body) || isCodexGenericRateLimitError(body))
 	if transientCapacity || isUsageLimit {
 		errCode = http.StatusTooManyRequests
 	}
@@ -489,8 +493,9 @@ func codexErrorCodeOf(errorBody []byte) string {
 // isCodexTransientCapacityError covers every Codex capacity rejection that
 // is transient and model-scoped: the legacy model-at-capacity wording and
 // the per-turn admission rejection. An explicit error code other than the
-// capacity codes keeps its existing handling, so a generic
-// rate_limit_exceeded rejection is never downgraded by message text.
+// capacity codes keeps its existing handling here; generic
+// rate_limit_exceeded bodies are classified separately by
+// isCodexGenericRateLimitError so they still receive transient cooling.
 func isCodexTransientCapacityError(errorBody []byte) bool {
 	if code := codexErrorCodeOf(errorBody); code != "" &&
 		!strings.EqualFold(code, "turn_rate_limit_exceeded") &&
@@ -499,6 +504,36 @@ func isCodexTransientCapacityError(errorBody []byte) bool {
 		return false
 	}
 	return isCodexModelCapacityError(errorBody) || isCodexTurnRateLimitError(errorBody)
+}
+
+// isCodexGenericRateLimitError reports a short-lived ChatGPT/Codex request
+// throttle that is not plan quota exhaustion. These bodies arrive as typed
+// rate_limit_error/rate_limit_exceeded envelopes or as the FastAPI-shaped
+// {"detail":"Rate limit exceeded"} response seen on chatgpt.com relays.
+// They must cool as transient rate limits and be retried, never as
+// credential quota (issue #50).
+func isCodexGenericRateLimitError(errorBody []byte) bool {
+	if len(errorBody) == 0 || isCodexUsageLimitError(errorBody) {
+		return false
+	}
+	if code := codexErrorCodeOf(errorBody); strings.EqualFold(code, "rate_limit_exceeded") {
+		return true
+	}
+	for _, path := range []string{"error.type", "type", "body.error.type"} {
+		if strings.EqualFold(strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String()), "rate_limit_error") {
+			return true
+		}
+	}
+	for _, path := range []string{"detail", "error.detail", "error.message", "message", "body.error.message"} {
+		lower := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String()))
+		if lower == "" {
+			continue
+		}
+		if strings.Contains(lower, "rate limit exceeded") {
+			return true
+		}
+	}
+	return false
 }
 
 func isCodexModelCapacityError(errorBody []byte) bool {
@@ -666,6 +701,8 @@ func isCodexOverloadBootstrapFailure(body []byte) bool {
 	case errorType == "rate_limit_error", errorCode == "rate_limit_exceeded":
 		return true
 	case (errorType == "server_error" || errorCode == "server_error") && strings.Contains(errorMessage, "you can retry your request"):
+		return true
+	case isCodexGenericRateLimitError(body):
 		return true
 	default:
 		return false

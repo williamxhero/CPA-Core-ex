@@ -260,8 +260,21 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if previousErr != nil && isCredentialSelectionFailure(errExec) {
+			// Under an explicit upstream retry policy, wait out cooldown instead
+			// of returning the previous 429 while credentials can still recover.
+			wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, previousErr, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
+			if !shouldRetry {
+				lastErr = previousErr
+				break
+			}
 			lastErr = previousErr
-			break
+			if preferredUpstreamErr == nil {
+				preferredUpstreamErr = previousErr
+			}
+			if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
+			continue
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
@@ -337,8 +350,19 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
 		if previousErr != nil && isCredentialSelectionFailure(errExec) {
+			wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, previousErr, attempt, normalized, retryModel, maxWait, -1, defaultRequestRetry, roundAttempted)
+			if !shouldRetry {
+				lastErr = previousErr
+				break
+			}
 			lastErr = previousErr
-			break
+			if preferredUpstreamErr == nil {
+				preferredUpstreamErr = previousErr
+			}
+			if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+				return cliproxyexecutor.Response{}, errWait
+			}
+			continue
 		}
 		if hasUpstreamExecutionAttempt(errExec) {
 			preferredUpstreamErr = errExec
@@ -497,9 +521,23 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		// A retry round may have no immediately eligible credential after the
 		// previous upstream attempt put every credential into cooldown. Preserve
 		// that real upstream error instead of replacing it with the selector's
-		// synthetic auth_not_found/auth_unavailable result.
+		// synthetic auth_not_found/auth_unavailable result — but under an
+		// explicit upstream retry policy keep waiting for cooldown recovery
+		// instead of surfacing a premature 429 to the Codex client.
 		if !m.HomeEnabled() && previousErr != nil && isCredentialSelectionFailure(errStream) {
-			return nil, previousErr
+			wait, shouldRetry := m.shouldRetryAfterErrorWithAttempted(ctx, opts, previousErr, attempt, normalized, retryModel, maxWait, homeRetryLimit, defaultRequestRetry, roundAttempted)
+			if !shouldRetry {
+				return nil, previousErr
+			}
+			if errWait := waitForCooldown(ctx, wait, maxWait); errWait != nil {
+				return nil, errWait
+			}
+			lastErr = previousErr
+			if preferredUpstreamErr == nil {
+				preferredUpstreamErr = previousErr
+			}
+			attempt++
+			continue
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
 			preferredUpstreamErr = errStream

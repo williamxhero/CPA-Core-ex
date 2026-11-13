@@ -47,7 +47,7 @@ func parseCodexWebsocketErrorWithCooling(payload []byte, modelLevelCooling bool)
 	out := buildCodexWebsocketErrorPayload(payload, status)
 	headers := parseCodexWebsocketErrorHeaders(payload)
 	isUsageLimit := isCodexUsageLimitError(out)
-	transientCapacity := !isUsageLimit && isCodexTransientCapacityError(out)
+	transientCapacity := !isUsageLimit && (isCodexTransientCapacityError(out) || isCodexGenericRateLimitError(out))
 	statusError := statusErr{
 		code:               status,
 		msg:                string(out),
