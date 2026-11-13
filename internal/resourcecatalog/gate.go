@@ -161,10 +161,12 @@ func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResul
 	ledger := next.Gates
 	ledger.Revision++
 	// Provider reconciliation replaces only its own stable parent lineage.
-	// Credential matching remains the original issued lifecycle group.
+	// Credential pause/clear replaces any prior owner+model row on the same
+	// primary credential slot, including drifted incarnations and projection
+	// membership changes left after rotation or child delete.
 	filtered := []resource.Gate{}
 	for _, g := range ledger.Gates {
-		matching := g.Subject != "provider" && op.Subject == "credential" && sameGateSubjects(g.Targets, targets)
+		matching := g.Subject != "provider" && op.Subject == "credential" && sameGateCredentialSlot(g.Targets, targets)
 		if g.Subject == "provider" && op.Subject == "provider" && len(g.Targets) > 0 {
 			matching = sameProviderLineage(g.Targets[0], targets[0])
 		}
@@ -204,6 +206,24 @@ func sameGateSubjects(a, b []resource.Target) bool {
 		}
 	}
 	return true
+}
+
+func sameGateResourceIDs(a, b []resource.Target) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ResourceID == "" || a[i].ResourceID != b[i].ResourceID {
+			return false
+		}
+	}
+	return true
+}
+
+// sameGateCredentialSlot ties pause/clear to the parent credential resource id.
+// Projection children may appear or disappear without creating a second slot.
+func sameGateCredentialSlot(a, b []resource.Target) bool {
+	return len(a) > 0 && len(b) > 0 && a[0].ResourceID != "" && a[0].ResourceID == b[0].ResourceID
 }
 
 func (c *Catalog) GateOperation(id string) (resource.GateOperation, resource.GateResult, error) {
@@ -254,12 +274,12 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 			}
 			continue
 		}
+		// Only a current-lifecycle gate denies traffic. A resource-id hit with a
+		// drifted incarnation is GateState "reconciliation_required" and must not
+		// fail-closed as ErrUnavailable after quota has recovered.
 		for _, gt := range g.Targets {
 			for _, t := range b.Targets {
-				if gt.ResourceID == t.ResourceID {
-					if !sameGateLifecycle(gt, t) {
-						return ErrUnavailable
-					}
+				if gt.ResourceID == t.ResourceID && sameGateLifecycle(gt, t) {
 					return ErrGateDenied
 				}
 			}
@@ -423,18 +443,11 @@ func (c *Catalog) GateBindingReady(b *resource.Binding) error {
 		return err
 	}
 	for _, g := range c.state.Gates.Gates {
-		if g.Subject == "provider" {
-			if _, err := c.providerGateAppliesLocked(g, parents, b); err != nil {
-				return err
-			}
+		if g.Subject != "provider" {
 			continue
 		}
-		for _, old := range g.Targets {
-			for _, t := range b.Targets {
-				if old.ResourceID == t.ResourceID && !sameGateLifecycle(old, t) {
-					return ErrUnavailable
-				}
-			}
+		if _, err := c.providerGateAppliesLocked(g, parents, b); err != nil {
+			return err
 		}
 	}
 	return nil
