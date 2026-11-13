@@ -128,7 +128,7 @@ func TestIssue7017CapacityClassificationBoundaries(t *testing.T) {
 		{name: "other code blocks legacy model capacity via raw body", body: `{"model":"gpt-6.1-sol","error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Codex is at capacity"}}`, want: true},
 		{name: "explicit model capacity code", body: `{"error":{"code":"model_at_capacity","message":"busy"}}`, want: true},
 		{name: "capacity message without rate type", body: `{"error":{"type":"server_error","message":"Codex is at capacity"}}`, want: false},
-		{name: "message in nested param", body: `{"error":{"type":"rate_limit_error","param":"Codex is at capacity"}}`, want: false},
+		{name: "message in nested param", body: `{"error":{"type":"rate_limit_error","param":"Codex is at capacity"}}`, want: true},
 		{name: "selected model at capacity stays model capacity", body: `{"error":{"message":"Selected model is at capacity. Please try a different model."}}`, want: true},
 	}
 	for _, tc := range tests {
