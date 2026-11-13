@@ -409,11 +409,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		replayOpts.Query = cloneStreamReplayQuery(opts.Query)
 		replayOpts.OriginalRequest = bytes.Clone(opts.OriginalRequest)
 		replayOpts.Metadata = cloneRequestMetadata(opts.Metadata)
-		replayState := streamReplayStateFromContext(ctx)
-		if replayState == nil {
-			replayState = &streamReplayState{}
-			ctx = withStreamReplayState(ctx, replayState)
-		}
+		var replayState *streamReplayState
+		ctx, replayState = bindStreamReplayState(ctx, &opts)
+		// Keep the cloned replay opts on the same state pointer so nested
+		// ExecuteStream calls and HTTP bootstrap retries share sticky recovery.
+		replayOpts.Metadata = storeStreamReplayStateMetadata(replayOpts.Metadata, replayState)
 		replayState.setReplayScope(replayProviders, authSelectionModelFromOptions(replayOpts, replayReq.Model))
 		ctx = withStreamReplayCoordinator(ctx, func(replayCtx context.Context, cause error) (*cliproxyexecutor.StreamResult, error) {
 			limit := m.configuredUpstreamErrorRetryLimit()
@@ -1209,6 +1209,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
+	// Only honor exclusions already installed on the context (for example by the
+	// stream-replay coordinator). Do not also seed from streamReplayState:
+	// request-scoped incomplete retries call executeStreamMixedOnce again with a
+	// fresh tried map while the state still remembers the previous auth, and
+	// seeding tried from that state would block the same-auth recovery.
 	for _, authID := range streamReplayExcludedAuthIDsFromContext(ctx) {
 		if strings.TrimSpace(authID) != "" {
 			tried[authID] = struct{}{}

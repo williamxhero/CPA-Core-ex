@@ -337,7 +337,17 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			pending = pending[:0]
 			pendingBytes = 0
 		}
+		isStreamRecoveryBufferLimit := func(err error) bool {
+			var authErr *Error
+			return errors.As(err, &authErr) && authErr != nil && authErr.Code == "stream_recovery_buffer_limit"
+		}
 		recordFailure := func(err error) {
+			// Hold-buffer overflow is an internal recovery signal, not an upstream
+			// credential fault. Recording it would cool the healthy auth and force
+			// an immediate hop onto gated credentials.
+			if isStreamRecoveryBufferLimit(err) {
+				return
+			}
 			entry := logEntryWithRequestID(ctx)
 			warnLogUpstreamFailure(ctx, entry, provider, resultModel, auth, time.Since(streamStart), err)
 			rerr := resultErrorFromError(err)
@@ -453,9 +463,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				discardStreamChunks(source)
 				discardPending()
 				replayState = streamReplayStateFromContext(ctx)
+				bufferLimitOnly := isStreamRecoveryBufferLimit(err)
 				if replayState != nil {
 					replayState.syncExcludedFromContext(ctx)
-					if auth != nil {
+					// Hold overflow means the credential was producing tokens;
+					// keep it eligible and retry unbuffered on the same auth.
+					if auth != nil && !bufferLimitOnly {
 						replayState.noteExcluded(auth.ID)
 					}
 					// Mid-stream admission failures may be reported under the

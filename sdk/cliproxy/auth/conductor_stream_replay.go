@@ -57,6 +57,11 @@ type streamReplayAttemptKey struct{}
 type streamReplayExcludedAuthIDsKey struct{}
 type streamReplayStateKey struct{}
 
+// streamReplayStateMetadataKey keeps the request-wide recovery state on
+// Options.Metadata so HTTP bootstrap retries reuse forceUnbuffered / exclusions
+// instead of restarting at buffered_same and hanging for multi-minute loops.
+const streamReplayStateMetadataKey = "cpa_stream_replay_state"
+
 // streamReplayState is shared by nested stream executions so the request-wide
 // upstream retry budget cannot be reset by a replayed ExecuteStream call.
 type streamReplayState struct {
@@ -273,6 +278,43 @@ func (s *streamReplayState) clearExcludedAuthIDs() {
 		return
 	}
 	s.excludedAuthStore.Store([]string(nil))
+}
+
+func streamReplayStateFromMetadata(meta map[string]any) *streamReplayState {
+	if len(meta) == 0 {
+		return nil
+	}
+	state, _ := meta[streamReplayStateMetadataKey].(*streamReplayState)
+	return state
+}
+
+func storeStreamReplayStateMetadata(meta map[string]any, state *streamReplayState) map[string]any {
+	if state == nil {
+		return meta
+	}
+	if meta == nil {
+		meta = make(map[string]any, 1)
+	}
+	meta[streamReplayStateMetadataKey] = state
+	return meta
+}
+
+// bindStreamReplayState reuses any request-scoped recovery state already attached
+// to ctx or opts.Metadata, then writes the pointer back into Metadata so later
+// ExecuteStream calls on the same HTTP request keep sticky unbuffered mode.
+func bindStreamReplayState(ctx context.Context, opts *cliproxyexecutor.Options) (context.Context, *streamReplayState) {
+	state := streamReplayStateFromContext(ctx)
+	if state == nil && opts != nil {
+		state = streamReplayStateFromMetadata(opts.Metadata)
+	}
+	if state == nil {
+		state = &streamReplayState{}
+	}
+	if opts != nil {
+		opts.EnsureMetadata()
+		storeStreamReplayStateMetadata(opts.Metadata, state)
+	}
+	return withStreamReplayState(ctx, state), state
 }
 
 // advanceOnAuthExhaustion moves to the next recovery stage when every eligible

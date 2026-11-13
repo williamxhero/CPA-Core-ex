@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
@@ -577,6 +578,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	bootstrapEligible := func(err error) bool {
+		// Stream recovery already advanced past hold-buffer overflow inside the
+		// auth manager. Restarting ExecuteStream here would drop sticky
+		// forceUnbuffered state (unless Metadata carries it) and re-enter a
+		// multi-minute buffered accumulate loop.
+		var authErr *coreauth.Error
+		if errors.As(err, &authErr) && authErr != nil && authErr.Code == "stream_recovery_buffer_limit" {
+			return false
+		}
 		status := statusFromError(err)
 		if status == 0 {
 			return true

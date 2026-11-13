@@ -245,10 +245,19 @@ func TestExecuteStreamBufferLimitStaysUnbufferedAcrossFailover(t *testing.T) {
 	gotAttempts := append([]string(nil), attempts...)
 	mu.Unlock()
 	if len(gotAttempts) < 2 {
-		t.Fatalf("attempts = %v, want failover after buffer limit", gotAttempts)
+		t.Fatalf("attempts = %v, want same-auth unbuffered retry after buffer limit", gotAttempts)
 	}
-	if gotAttempts[0] != authA {
-		t.Fatalf("first attempt = %s, want %s", gotAttempts[0], authA)
+	if gotAttempts[0] != authA || gotAttempts[1] != authA {
+		t.Fatalf("attempts = %v, want %s then same-auth unbuffered retry (must not cool/hop away)", gotAttempts, authA)
+	}
+	// Issue #48: hold overflow is an internal recovery signal. Recording it as an
+	// upstream fault would cool the healthy auth and force a hop onto gated peers.
+	authState, okAuth := manager.GetByID(authA)
+	if !okAuth || authState == nil {
+		t.Fatal("authA missing after recovery")
+	}
+	if authState.Unavailable || !authState.NextRetryAfter.IsZero() {
+		t.Fatalf("buffer_limit cooled authA: unavailable=%v next_retry=%v", authState.Unavailable, authState.NextRetryAfter)
 	}
 }
 
@@ -287,7 +296,8 @@ func TestExecuteStreamBufferLimitThenGatedAdmissionFailsClosed(t *testing.T) {
 				return nil, &cliproxyexecutor.InferenceAdmissionError{}
 			}
 			chunks := make(chan cliproxyexecutor.StreamChunk, 8)
-			if n == 1 && auth.ID == authA {
+			switch {
+			case n == 1 && auth.ID == authA:
 				for i := 0; i < 4; i++ {
 					chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_text.delta","delta":"` + oversized + `"}\n\n`)}
 				}
@@ -296,17 +306,24 @@ func TestExecuteStreamBufferLimitThenGatedAdmissionFailsClosed(t *testing.T) {
 					close(chunks)
 				}()
 				return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+			case auth.ID == authA:
+				// Same-auth unbuffered retry after buffer_limit; fail so recovery
+				// can move to the gated credential and then fail closed.
+				chunks <- cliproxyexecutor.StreamChunk{Err: errors.New("stream disconnected before completion: stream closed before response.completed")}
+				close(chunks)
+				return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+			default:
+				t.Errorf("unexpected auth %s attempt %d", auth.ID, n)
+				close(chunks)
+				return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 			}
-			// A second buffered hold on authA would hang the test; fail loudly.
-			t.Errorf("unexpected retry on %s (attempt %d); recovery must fail closed", auth.ID, n)
-			close(chunks)
-			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 		},
 	})
 
+	meta := map[string]any{}
 	stream, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
 		Stream:   true,
-		Metadata: map[string]any{},
+		Metadata: meta,
 	})
 	if errExecute != nil {
 		// Fail-closed may surface before a stream handle is returned.
@@ -327,7 +344,8 @@ func TestExecuteStreamBufferLimitThenGatedAdmissionFailsClosed(t *testing.T) {
 		}
 		if !strings.Contains(strings.ToLower(streamErr.Error()), "admission") &&
 			!strings.Contains(strings.ToLower(streamErr.Error()), "auth") &&
-			!strings.Contains(strings.ToLower(streamErr.Error()), "stream_recovery_buffer_limit") {
+			!strings.Contains(strings.ToLower(streamErr.Error()), "stream_recovery_buffer_limit") &&
+			!strings.Contains(strings.ToLower(streamErr.Error()), "stream disconnected") {
 			t.Fatalf("terminal error = %v, want admission/auth/buffer-limit failure", streamErr)
 		}
 	}
@@ -340,11 +358,120 @@ func TestExecuteStreamBufferLimitThenGatedAdmissionFailsClosed(t *testing.T) {
 			authACount++
 		}
 	}
-	if authACount != 1 {
-		t.Fatalf("authA attempts = %d in %v, want exactly 1 (no re-buffered loop)", authACount, gotAttempts)
+	if authACount < 2 {
+		t.Fatalf("authA attempts = %d in %v, want buffered then unbuffered same-auth retry", authACount, gotAttempts)
 	}
-	if len(gotAttempts) < 2 || gotAttempts[0] != authA {
-		t.Fatalf("attempts = %v, want authA then gated failover", gotAttempts)
+	if len(gotAttempts) < 3 || gotAttempts[0] != authA {
+		t.Fatalf("attempts = %v, want authA (buffered), authA (unbuffered), then gated failover", gotAttempts)
+	}
+	state := streamReplayStateFromMetadata(meta)
+	if state == nil || !state.forceUnbuffered.Load() {
+		t.Fatal("metadata must retain sticky forceUnbuffered after buffer limit")
+	}
+}
+
+func TestExecuteStreamReusesStickyStateAcrossBootstrapRetry(t *testing.T) {
+	const (
+		model = "stream-bootstrap-sticky-model"
+		authA = "stream-bootstrap-sticky-a"
+	)
+	manager := NewManager(nil, &FillFirstSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.SetUpstreamErrorRetryLimit(-1)
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: authA, Provider: "codex", Status: StatusActive}); errRegister != nil {
+		t.Fatalf("Register: %v", errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(authA, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authA) })
+
+	var mu sync.Mutex
+	var attempts []string
+	oversized := strings.Repeat("x", (1<<20)/3)
+	manager.RegisterExecutor(&customStreamMockExecutor{
+		identifier: "codex",
+		streamFn: func(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+			mu.Lock()
+			attempts = append(attempts, auth.ID)
+			n := len(attempts)
+			mu.Unlock()
+			chunks := make(chan cliproxyexecutor.StreamChunk, 8)
+			switch {
+			case n == 1:
+				// First top-level call: overflow the hold buffer.
+				for i := 0; i < 4; i++ {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_text.delta","delta":"` + oversized + `"}\n\n`)}
+				}
+				go func() {
+					<-ctx.Done()
+					close(chunks)
+				}()
+			case n == 2:
+				// Same-call unbuffered recovery after buffer_limit.
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"first-ok\"}}\n\n")}
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"first-ok\"}\n\n")}
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
+				close(chunks)
+			default:
+				// Second top-level ExecuteStream (HTTP bootstrap retry) must start
+				// unbuffered via Metadata. Oversized deltas would re-trigger
+				// buffer_limit if hold-until-complete were wrongly restored.
+				for i := 0; i < 4; i++ {
+					chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`data: {"type":"response.output_text.delta","delta":"` + oversized + `"}\n\n`)}
+				}
+				chunks <- cliproxyexecutor.StreamChunk{Payload: []byte("data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n")}
+				close(chunks)
+			}
+			return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+		},
+	})
+
+	meta := map[string]any{}
+	stream, errExecute := manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
+		Stream:   true,
+		Metadata: meta,
+	})
+	if errExecute != nil {
+		t.Fatalf("first ExecuteStream(): %v", errExecute)
+	}
+	var firstPayload strings.Builder
+	var firstErr error
+	for chunk := range stream.Chunks {
+		firstPayload.Write(chunk.Payload)
+		if chunk.Err != nil {
+			firstErr = chunk.Err
+		}
+	}
+	if firstErr != nil {
+		t.Fatalf("first ExecuteStream leaked error: %v", firstErr)
+	}
+	if !strings.Contains(firstPayload.String(), "first-ok") {
+		t.Fatalf("first ExecuteStream payload = %q", firstPayload.String())
+	}
+	if state := streamReplayStateFromMetadata(meta); state == nil || !state.forceUnbuffered.Load() {
+		t.Fatal("first ExecuteStream must persist forceUnbuffered on Metadata")
+	}
+
+	stream, errExecute = manager.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{
+		Stream:   true,
+		Metadata: meta,
+	})
+	if errExecute != nil {
+		t.Fatalf("bootstrap ExecuteStream(): %v", errExecute)
+	}
+	var secondErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			secondErr = chunk.Err
+		}
+	}
+	if secondErr != nil {
+		t.Fatalf("bootstrap reuse must stay unbuffered; got %v", secondErr)
+	}
+	mu.Lock()
+	gotAttempts := append([]string(nil), attempts...)
+	mu.Unlock()
+	if len(gotAttempts) < 3 {
+		t.Fatalf("attempts = %v, want first overflow, same-call recovery, then bootstrap reuse", gotAttempts)
 	}
 }
 
