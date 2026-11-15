@@ -127,6 +127,37 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 // model error body against client-controlled model names. The name is echoed into
 // the body, so formatting it into a JSON literal would let a caller corrupt the
 // payload or overwrite the error code that clients branch on.
+func TestGetRequestDetails_DeepSeekFlashEquivalence(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-request-details-deepseek-equiv"
+	modelRegistry.RegisterClient(clientID, "opencode-go", []*registry.ModelInfo{
+		{ID: "deepseek-v4.1-flash", Created: time.Now().Unix()},
+	})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "deepseek-v4.1-flash-1017", want: "deepseek-v4.1-flash"},
+		{in: "deepseek-v4.1-flash-1017(high)", want: "deepseek-v4.1-flash(high)"},
+		{in: "deepseek-v4.1-flash-1017[1m](high)", want: "deepseek-v4.1-flash(high)"},
+	}
+	for _, tt := range tests {
+		providers, model, errMsg := handler.getRequestDetails(tt.in)
+		if errMsg != nil {
+			t.Fatalf("%s: unexpected error: %v", tt.in, errMsg)
+		}
+		if !reflect.DeepEqual(providers, []string{"opencode-go"}) {
+			t.Fatalf("%s: providers = %v", tt.in, providers)
+		}
+		if model != tt.want {
+			t.Fatalf("%s: model = %q, want %q", tt.in, model, tt.want)
+		}
+	}
+}
+
 func TestGetRequestDetails_UnknownModelErrorResistsJSONInjection(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 

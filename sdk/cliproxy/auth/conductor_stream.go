@@ -855,7 +855,10 @@ func streamPayloadCommitsOutput(payload []byte) bool {
 		switch strings.ToLower(strings.TrimSpace(eventType)) {
 		case "response.created", "response.in_progress", "response.metadata", "codex.response.metadata", "codex.rate_limits", "rate_limits.updated", "keepalive", "ping":
 			continue
-		case "response.output_item.added", "response.output_item.done", "response.content_part.added", "response.reasoning_summary_part.added":
+		case "response.output_item.added", "response.output_item.done",
+			"response.content_part.added", "response.content_part.done",
+			"response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+			"response.reasoning_summary_text.done", "response.reasoning_text.done", "response.output_text.done":
 			if util.IsResponsesBootstrapEvent(eventType, data) {
 				continue
 			}

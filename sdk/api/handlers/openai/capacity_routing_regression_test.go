@@ -187,6 +187,27 @@ func (f *capacityRouteFixture) request(transport string, allowSilentClose ...boo
 	return response.StatusCode, string(body)
 }
 
+func (f *capacityRouteFixture) requestPayload(payload string) (int, string) {
+	f.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, f.url, strings.NewReader(payload))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return response.StatusCode, string(body)
+}
+
 func (f *capacityRouteFixture) assertAttempts(want string) {
 	f.t.Helper()
 	select {
@@ -217,8 +238,18 @@ func TestResponsesIncompletePreambleRetriesInsideCPA(t *testing.T) {
 		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
 		`{"type":"response.output_item.done","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
 		`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[{"type":"signature","signature":"synthetic-signature"}],"content":[]}}`,
+		`{"type":"response.output_item.done","item":{"id":"discarded","type":"reasoning","summary":[{"type":"signature","signature":"synthetic-signature"}],"content":[]}}`,
+		`{"type":"response.output_item.done","item":{"id":"discarded","type":"message","content":[]}}`,
+		`{"type":"response.output_item.done","item":{"id":"discarded","type":"function_call","arguments":""}}`,
 		`{"type":"response.output_item.added","item":{"id":"discarded","type":"message","content":[]}}`,
 		`{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`,
+		`{"type":"response.reasoning_summary_part.added","part":{"type":"signature","signature":"synthetic-signature"}}`,
+		`{"type":"response.reasoning_summary_part.done","part":{"type":"summary_text","text":""}}`,
+		`{"type":"response.reasoning_summary_part.done","part":{"type":"signature","signature":"synthetic-signature"}}`,
+		`{"type":"response.reasoning_summary_text.done","text":""}`,
+		`{"type":"response.reasoning_text.done","text":""}`,
+		`{"type":"response.content_part.done","part":{"type":"output_text","text":""}}`,
+		`{"type":"response.output_text.done","text":""}`,
 	} {
 		for _, buffering := range []bool{false, true} {
 			t.Run(fmt.Sprintf("buffering=%t/%s", buffering, event), func(t *testing.T) {
@@ -242,6 +273,36 @@ func TestResponsesIncompletePreambleRetriesInsideCPA(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Claude Code keeps tool_use/tool_result history in the original request, which
+// disables stream replay. A hidden reasoning preamble must still fail the
+// attempt before any downstream chunk so the request-level retry can run.
+func TestResponsesIncompletePreambleRetriesWithoutReplay(t *testing.T) {
+	f := newCapacityRouteFixture(t, "sse", 3, func(key string) (int, []string) {
+		if key == "a" {
+			return 200, []string{
+				`{"type":"response.created","response":{"id":"discarded"}}`,
+				`{"type":"response.output_item.added","item":{"id":"discarded","type":"reasoning","summary":[]}}`,
+				`{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`,
+				`{"type":"response.reasoning_summary_text.delta","delta":""}`,
+				`{"type":"response.reasoning_summary_text.done","text":""}`,
+				`{"type":"response.reasoning_summary_part.done","part":{"type":"summary_text","text":""}}`,
+				`{"type":"response.output_item.done","item":{"id":"discarded","type":"reasoning","summary":[],"encrypted_content":"synthetic-signature"}}`,
+			}
+		}
+		return 200, capacityRouteSuccess()
+	}, func(cfg *config.Config) {
+		cfg.Codex.StreamBootstrapTimeout = "5m"
+		cfg.Codex.StreamBootstrapBuffering = true
+	})
+	f.manager.SetUpstreamErrorRetryLimit(-1)
+	payload := fmt.Sprintf(`{"model":%q,"input":[],"stream":true,"tool_use":true,"tool_result":true}`, f.model)
+	status, body := f.requestPayload(payload)
+	if status != 200 || !strings.Contains(body, "success-marker") || strings.Contains(body, "discarded") || strings.Contains(body, "stream disconnected") {
+		t.Fatalf("pre-output disconnect leaked to client without replay: status=%d body=%s", status, body)
+	}
+	f.assertAttempts("a,b")
 }
 
 func TestCapacityRoutingBeforeOutput(t *testing.T) {

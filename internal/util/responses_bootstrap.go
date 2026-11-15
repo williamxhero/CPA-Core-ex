@@ -16,7 +16,9 @@ import (
 // unrecognised frame therefore releases the stream.
 //
 // Beyond the handshake preamble the list covers what upstream interleaves before the first token:
-// keepalive heartbeats, and the *.added frames that announce an item or part with no content yet.
+// keepalive heartbeats, the *.added frames that announce an item or part with no content yet, and
+// the matching *.done frames while they still carry no visible text (hidden reasoning signatures,
+// empty summary/content parts, or empty tool items).
 func IsResponsesBootstrapEvent(eventType string, payload []byte) bool {
 	// An empty data: frame is the SSE heartbeat idiom and carries nothing at all, which is how the
 	// websocket loop already treats an empty message. Without this it would fall through to the
@@ -36,23 +38,28 @@ func IsResponsesBootstrapEvent(eventType string, payload []byte) bool {
 		// structured or non-empty deltas and server-side tool events still commit.
 		delta := ojson.GetBytes(payload, "delta")
 		return delta.Type == ojson.String && delta.String() == ""
-	case "response.output_item.added":
-		return isResponsesBufferableOutputItem(payload)
-	case "response.output_item.done":
+	case "response.output_item.added", "response.output_item.done":
 		// Encrypted reasoning alone is replay state, not visible model output.
-		return ojson.GetBytesNoCopy(payload, "item.type").String() == "reasoning" && isResponsesBufferableOutputItem(payload)
-	case "response.content_part.added":
+		// The same emptiness rule applies to the .done frame: a message or tool
+		// item that never produced content (or arguments) carries no visible
+		// output and can still be retried on another credential.
+		return isResponsesBufferableOutputItem(payload)
+	case "response.content_part.added", "response.content_part.done":
 		return isResponsesEmptyPart(payload)
-	case "response.reasoning_summary_part.added":
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		return isResponsesEmptyPart(payload)
+	case "response.reasoning_summary_text.done", "response.reasoning_text.done", "response.output_text.done":
+		// A .done frame with no text is the hidden-signature/empty-preamble
+		// counterpart of the matching .delta. Visible text still commits.
+		return ojson.GetBytesNoCopy(payload, "text").String() == ""
 	default:
 		return false
 	}
 }
 
-// isResponsesBufferableOutputItem reports whether an announced output item is one the model produces by
-// itself and has not started producing, so nothing is running upstream yet. The emptiness checks
-// cover message and reasoning text and tool arguments. Encrypted reasoning alone
+// isResponsesBufferableOutputItem reports whether an output_item frame (added or done) still carries
+// nothing observable, so nothing is running upstream yet. The emptiness checks cover message and
+// reasoning text and tool arguments. Encrypted reasoning alone
 // carries no visible output. Every other item type
 // is released, which covers the server-side operations that may already have been dispatched - a
 // web_search_call is announced with status "in_progress" and its searching event follows
@@ -123,6 +130,9 @@ func isResponsesEmptyPart(payload []byte) bool {
 		return part.Get("text").String() == ""
 	case "refusal":
 		return part.Get("refusal").String() == ""
+	case "signature":
+		// Provider-private signature metadata is replay state, not visible output.
+		return true
 	default:
 		return false
 	}

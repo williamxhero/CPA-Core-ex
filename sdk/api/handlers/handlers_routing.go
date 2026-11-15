@@ -207,6 +207,21 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
+	// Equivalence fallback: some platforms expose the same model under alternate
+	// IDs (e.g. deepseek-v4.1-flash ↔ deepseek-v4.1-flash-1017, optional [1m]).
+	// Rewrite onto a currently registered peer so Claude Code / clients can use
+	// either name without unknown-provider failures.
+	if len(providers) == 0 {
+		if altBase, altProviders := util.ResolveRegisteredModel(baseModel); len(altProviders) > 0 {
+			providers = altProviders
+			baseModel = altBase
+			if parsed.HasSuffix && parsed.RawSuffix != "" {
+				resolvedModelName = altBase + "(" + parsed.RawSuffix + ")"
+			} else {
+				resolvedModelName = altBase
+			}
+		}
+	}
 
 	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request
