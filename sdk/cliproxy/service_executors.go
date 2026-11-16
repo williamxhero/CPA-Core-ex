@@ -7,6 +7,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -28,6 +29,12 @@ var pluginHostHasAuthProvider = func(host *pluginhost.Host, provider string) boo
 // pluginHostHasAuthModelProvider only checks declarations, never model discovery.
 var pluginHostHasAuthModelProvider = func(host *pluginhost.Host, provider string) bool {
 	return host != nil && host.HasAuthModelProvider(provider)
+}
+
+// pluginHostHasExecutorCandidateProvider only checks declarations, never plugin
+// state transitions. Overridable in tests to avoid loading real plugins.
+var pluginHostHasExecutorCandidateProvider = func(host *pluginhost.Host, provider string) bool {
+	return host != nil && host.HasExecutorCandidateProvider(provider)
 }
 
 type openAICompatibilityRegistrationEntry struct {
@@ -143,25 +150,68 @@ func (s *Service) hasNativeOpenAICompatExecutorConfig(a *coreauth.Auth, provider
 	return false
 }
 
-func (s *Service) unregisterOpenAICompatExecutor(providerKey string) {
-	if s == nil || s.coreManager == nil {
+// hasConfiguredOpenAICompatProvider reports whether cfg declares a native
+// OpenAI-compatibility provider matching providerKey. Auth-level attributes are
+// deliberately ignored: plugin-owned credentials carry their own base_url, and
+// that must not take precedence over the plugin executor.
+func (s *Service) hasConfiguredOpenAICompatProvider(providerKey string, cfg *config.Config) bool {
+	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
+	if providerKey == "" || cfg == nil {
+		return false
+	}
+	for i := range cfg.OpenAICompatibility {
+		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled || compat.AutoHeld {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(compat.Name))
+		if name == "" {
+			continue
+		}
+		if name == providerKey || util.OpenAICompatibleProviderKey(name) == providerKey {
+			return true
+		}
+	}
+	return false
+}
+
+// restorePluginExecutorIfReplaced rebinds the plugin executor for providerKey
+// after a native OpenAI-compat executor is removed. A plugin adapter replaced by
+// an earlier auth registration is otherwise lost until the next plugin sync.
+func (s *Service) restorePluginExecutorIfReplaced(providerKey string) {
+	if s == nil || s.coreManager == nil || s.pluginHost == nil {
 		return
+	}
+	if _, okExecutor := s.coreManager.Executor(providerKey); okExecutor {
+		return
+	}
+	if !pluginHostHasExecutorCandidateProvider(s.pluginHost, providerKey) {
+		return
+	}
+	s.pluginHost.RegisterExecutors(s.coreManager, registry.GetGlobalRegistry())
+}
+
+func (s *Service) unregisterOpenAICompatExecutor(providerKey string) bool {
+	if s == nil || s.coreManager == nil {
+		return false
 	}
 	providerKey = strings.ToLower(strings.TrimSpace(providerKey))
 	if providerKey == "" {
-		return
+		return false
 	}
 	existing, okExecutor := s.coreManager.Executor(providerKey)
 	if !okExecutor || existing == nil {
-		return
+		return false
 	}
 	if _, okOpenAICompat := existing.(*executor.OpenAICompatExecutor); okOpenAICompat {
 		s.coreManager.UnregisterExecutor(providerKey)
-		return
+		return true
 	}
 	if pluginhost.IsPluginRefreshCompatExecutor(existing) {
 		s.coreManager.UnregisterExecutor(providerKey)
+		return true
 	}
+	return false
 }
 
 func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
@@ -332,11 +382,18 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		if providerKey == "" {
 			providerKey = "openai-compatibility"
 		}
-		if s.pluginHost != nil &&
-			s.pluginHost.HasExecutorCandidateProvider(providerKey) &&
-			!s.hasNativeOpenAICompatExecutorConfig(a, providerKey, cfg) {
-			s.unregisterOpenAICompatExecutor(providerKey)
-			return
+		if pluginHostHasExecutorCandidateProvider(s.pluginHost, providerKey) {
+			// A plugin owns this provider's executor. Its credentials legitimately
+			// carry their own base_url, so only an explicit native OpenAI-compat
+			// provider declaration may take precedence. Otherwise the generic
+			// compat executor would replace the plugin adapter and drop plugin
+			// request shaping (session headers, route translation).
+			if !s.hasConfiguredOpenAICompatProvider(providerKey, cfg) {
+				if s.unregisterOpenAICompatExecutor(providerKey) {
+					s.restorePluginExecutorIfReplaced(providerKey)
+				}
+				return
+			}
 		}
 		// Keep native OpenAI-compat inference for base_url routing, but delegate
 		// OAuth refresh to the plugin AuthProvider when one is registered.

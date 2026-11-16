@@ -249,6 +249,11 @@ func (s *Service) handleAuthUpdates(ctx context.Context, updates []watcher.AuthU
 	finishAuthRegistrations(s, startedRegs)
 	registrationsFinished = true
 	waitAuthRegistrations(skippedWaits)
+	// A credential update can be dropped by the stale-generation or watcher
+	// revision fences while its models were already unregistered. Reconcile any
+	// plugin credential left without models so the loss cannot persist until a
+	// process restart.
+	s.repairMissingAuthModelRegistrations(registrationCtx)
 }
 
 // shouldSkipFileAuthDelete retains re-created IDs and preserves auths on uncertain reads.

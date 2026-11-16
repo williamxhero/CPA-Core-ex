@@ -101,6 +101,8 @@ func (s *Service) Run(ctx context.Context) error {
 			includeBaseline: true,
 			auths:           s.coreManager.List(),
 		})
+		s.repairMissingAuthModelRegistrations(ctx)
+		s.startMissingAuthModelRepairLoop(ctx)
 		// Catalog enrollment issues source markers. No pre-enrollment refresh
 		// snapshot may overwrite those markers while the listener comes up.
 		if cfg == nil || !cfg.ResourceCatalog.Enabled {
