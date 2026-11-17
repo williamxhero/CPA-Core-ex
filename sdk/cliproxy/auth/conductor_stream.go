@@ -3,12 +3,12 @@ package auth
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -41,13 +41,14 @@ func newStreamBootstrapError(err error, headers http.Header) error {
 		return nil
 	}
 	upstreamAttempt := hasUpstreamExecutionAttempt(err)
+	provider := upstreamAttemptProviderFromError(err)
 	err = unwrapUpstreamExecutionAttempt(err)
 	bootstrapErr := &streamBootstrapError{
 		cause:   err,
 		headers: cloneHTTPHeader(headers),
 	}
 	if upstreamAttempt {
-		return markUpstreamExecutionAttempt(bootstrapErr)
+		return markUpstreamExecutionAttemptWithProvider(bootstrapErr, provider)
 	}
 	return bootstrapErr
 }
@@ -311,6 +312,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			entry.WithFields(fields).Info("stream recovery")
 		}
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			if chunk.Err != nil {
+				if session := continuitySessionFromContext(ctx); session != nil {
+					session.setLastStreamProvider(provider)
+				}
+			}
 			if ctx == nil {
 				out <- chunk
 				return true
@@ -1013,7 +1019,7 @@ func jsonObjectCompletionFlags(rawJSON []byte) (completed, incomplete bool) {
 				continue
 			}
 			switch strings.ToUpper(strings.TrimSpace(fr)) {
-			case "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER":
+			case "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER", "MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "MALFORMED_RESPONSE":
 				incomplete = true
 			case "STOP":
 				completed = true
@@ -1088,7 +1094,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return buffered, closed, errBootstrap
 	}
 	for idx, execModel := range execModels {
-		ctx = m.newUpstreamAttemptContext(ctx)
+		ctx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(ctx), provider)
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
