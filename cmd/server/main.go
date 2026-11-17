@@ -44,7 +44,8 @@ import (
 )
 
 var (
-	Version           = "dev"
+	// Version is the composed {source}+{ex} identity; -ldflags -X still wins.
+	Version           = generatedVersion
 	Commit            = "none"
 	BuildDate         = "unknown"
 	DefaultConfigPath = ""

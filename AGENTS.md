@@ -71,3 +71,9 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
 - Note: if modifying features that involve CLIProxyAPIHome, check if corresponding updates are needed in the CLIProxyAPIHome repository.
 - Endpoints under the `/v0/management` base URL are deprecated and no longer maintained. For any feature changes, do not modify endpoints under `/v0/management` unless necessary to fix compilation errors.
+## Version
+
+- `VERSION` holds the composed identity `{source}+{ex}`, for example `8.0.76+1.0.0`: the newest tag from router-for-me/CLIProxyAPI without its `v`, plus this fork's own semantic version.
+- After merging the source repository, run `D:\WILL\AGENT\CPA\ops\update-ex-versions.ps1` from the workspace root. It rewrites `VERSION` and the generated Go constant that ordinary `go build` compiles; use `-BumpEx patch` (or `-ExVersion x.y.z`) when this fork ships its own change.
+- Never edit the `version_generated.go` file by hand. A test rejects an identity that is not `{source}+{ex}`.
+- `-ldflags -X` still overrides the compiled version, but local deployments must rely on the checked-in identity so the running stack reports what was merged.
