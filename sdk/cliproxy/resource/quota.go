@@ -42,6 +42,15 @@ type QuotaCredits struct {
 	OverageLimitReached bool   `json:"overageLimitReached"`
 }
 
+// QuotaResetCredits is the Codex one-time rate-limit reset allowance observed
+// with the same usage read. ApplicableAvailableCount is how many of those
+// credits may be redeemed right now; it is absent when upstream omits it.
+// No expiry is inferred: the usage read does not carry one.
+type QuotaResetCredits struct {
+	AvailableCount           int  `json:"availableCount"`
+	ApplicableAvailableCount *int `json:"applicableAvailableCount,omitempty"`
+}
+
 // QuotaObservation never includes account IDs, tokens, raw responses or gate ACKs.
 type QuotaObservation struct {
 	Binding
@@ -55,7 +64,9 @@ type QuotaObservation struct {
 	ObservedAtMS        int64         `json:"observedAtMs"`
 	Windows             []QuotaWindow `json:"windows,omitempty"`
 	Credits             *QuotaCredits `json:"credits,omitempty"`
-	Complete            bool          `json:"complete"`
-	AccountProvenance   string        `json:"accountProvenance"`
-	RecoveryEligible    bool          `json:"recoveryEligible"`
+	// ResetCredits is Codex-only and absent when the usage read omitted it.
+	ResetCredits      *QuotaResetCredits `json:"resetCredits,omitempty"`
+	Complete          bool               `json:"complete"`
+	AccountProvenance string             `json:"accountProvenance"`
+	RecoveryEligible  bool               `json:"recoveryEligible"`
 }

@@ -177,9 +177,35 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 	} else {
 		obs.Credits = codexCreditsFromUsage(data)
+		obs.ResetCredits = codexResetCreditsFromUsage(data)
 	}
 	freshWindows(&obs)
 	return obs
+}
+
+// codexResetCreditsFromUsage reads the one-time rate-limit reset allowance that
+// ships with the same usage read. It never invents a count: a missing, non
+// integer, negative or implausible field yields no evidence instead of zero.
+func codexResetCreditsFromUsage(data []byte) *resource.QuotaResetCredits {
+	var root struct {
+		ResetCredits *struct {
+			Available           *int64 `json:"available_count"`
+			ApplicableAvailable *int64 `json:"applicable_available_count"`
+		} `json:"rate_limit_reset_credits"`
+	}
+	if json.Unmarshal(data, &root) != nil || root.ResetCredits == nil || root.ResetCredits.Available == nil {
+		return nil
+	}
+	count := *root.ResetCredits.Available
+	if count < 0 || count > maxCodexResetCredits {
+		return nil
+	}
+	out := &resource.QuotaResetCredits{AvailableCount: int(count)}
+	if applicable := root.ResetCredits.ApplicableAvailable; applicable != nil && *applicable >= 0 && *applicable <= count {
+		value := int(*applicable)
+		out.ApplicableAvailableCount = &value
+	}
+	return out
 }
 
 func codexCreditsFromUsage(data []byte) *resource.QuotaCredits {
@@ -236,6 +262,11 @@ type codexLimit struct {
 }
 
 func finitePercent(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 && v <= 100 }
+
+// maxCodexResetCredits bounds an upstream allowance that is only ever earned a
+// few times per billing cycle. Larger values are treated as unparsable rather
+// than published as truth.
+const maxCodexResetCredits = 1000
 
 // PluginRead accepts at most ONE GET to the exact host-selected endpoint/key.
 // Raw status/window completeness is preserved from that very same request.

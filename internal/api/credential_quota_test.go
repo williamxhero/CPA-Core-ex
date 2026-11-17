@@ -286,7 +286,7 @@ func TestCredentialQuotaSelectedOAuthAndFailure(t *testing.T) {
 			return
 		}
 		reset := time.Now().Add(time.Hour).Unix()
-		fmt.Fprintf(w, `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":25,"reset_at":%d,"limit_window_seconds":18000},"secondary_window":{"used_percent":50,"reset_at":%d,"limit_window_seconds":604800}}}`, reset, reset)
+		fmt.Fprintf(w, `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":25,"reset_at":%d,"limit_window_seconds":18000},"secondary_window":{"used_percent":50,"reset_at":%d,"limit_window_seconds":604800}},"rate_limit_reset_credits":{"available_count":1,"applicable_available_count":0}}`, reset, reset)
 	}))
 	f := quotaOAuthFixture(t, n)
 	s := quotaSourceFor(t, f, "codex-oauth-wham")
@@ -301,6 +301,12 @@ func TestCredentialQuotaSelectedOAuthAndFailure(t *testing.T) {
 	}
 	if obs.QueryStatus != "success" || !obs.Complete || !obs.RecoveryEligible || len(obs.Windows) != 2 || obs.Windows[0].RemainingFraction != 0.75 {
 		t.Fatalf("wrong windows: %+v", obs)
+	}
+	if obs.ResetCredits == nil || obs.ResetCredits.AvailableCount != 1 || obs.ResetCredits.ApplicableAvailableCount == nil || *obs.ResetCredits.ApplicableAvailableCount != 0 {
+		t.Fatalf("wrong reset credits: %+v", obs.ResetCredits)
+	}
+	if !strings.Contains(string(doc), `"resetCredits":{"availableCount":1,"applicableAvailableCount":0}`) {
+		t.Fatalf("reset credits missing from the published observation: %s", doc)
 	}
 	mode.Store(1)
 	obs = queryQuota(t, f, q, 200)
@@ -352,6 +358,9 @@ func TestCredentialQuotaWindowAndTransportNegatives(t *testing.T) {
 		{name: "future-origin-time", body: full, status: "parse_error", date: time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)},
 		{name: "overlimit", body: strings.Repeat("x", (2<<20)+1), status: "parse_error"},
 		{name: "redirect", body: full, status: "network_error", code: 302},
+		// A junk reset-credit allowance is not window evidence: it must neither
+		// fail the query nor be published as a synthetic count.
+		{name: "junk-reset-credits", body: strings.TrimSuffix(full, "}") + `,"rate_limit_reset_credits":{"available_count":"1"}}`, status: "success", complete: true, recovery: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int64
