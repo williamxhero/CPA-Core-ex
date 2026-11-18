@@ -4,8 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
+	"github.com/MoeForge/moego/json"
 	"io"
 	"math"
 	"math/big"
@@ -72,6 +72,18 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 		}
 	case a.SourcePluginID != "":
 		s.Reason = "plugin_protocol_unverified"
+	case a.Provider == "antigravity":
+		s.Protocol = credentialquota.AntigravityProtocol
+		s.State = "needs_configuration"
+		s.Reason = "native_oauth_project_required"
+		token, _ := a.Metadata["access_token"].(string)
+		project, _ := a.Metadata["project_id"].(string)
+		metadataBase, _ := a.Metadata["base_url"].(string)
+		if strings.TrimSpace(token) != "" && strings.TrimSpace(project) != "" && strings.TrimSpace(a.Attributes["base_url"]) == "" && strings.TrimSpace(metadataBase) == "" {
+			s.State = "ready"
+			s.Reason = "selected_oauth"
+			s.AccountProvenance = "selected_oauth_project"
+		}
 	case a.Provider == "codex":
 		metadataKey, _ := a.Metadata["api_key"].(string)
 		metadataBase, _ := a.Metadata["base_url"].(string)
@@ -95,6 +107,9 @@ func (h *Handler) quotaSource(ctx context.Context, a *coreauth.Auth) resource.Qu
 	}
 	// A SECRET-FREE query-source revision, never identity or a credential digest.
 	endpoint := "https://chatgpt.com/backend-api/wham/usage"
+	if s.Protocol == credentialquota.AntigravityProtocol {
+		endpoint = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	}
 	if s.Protocol == "opencode-go-usage" {
 		endpoint = h.quotaPluginEndpoint(ctx, a) + "/usage"
 	}
@@ -355,6 +370,8 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 	if source.State == "ready" {
 		if source.Protocol == "codex-oauth-wham" {
 			obs = credentialquota.Codex(ctx, q.Binding, a.Metadata, n)
+		} else if source.Protocol == credentialquota.AntigravityProtocol {
+			obs = credentialquota.Antigravity(ctx, q.Binding, a.Metadata, n)
 		} else if source.Protocol == "qwen-coding-plan-cli" {
 			response, handled, err := host.FetchQuotaByPlugin(ctx, a.SourcePluginID, pluginapi.QuotaFetchRequest{AuthIndex: a.Index, AuthID: a.ID, Provider: a.Provider, Metadata: a.Metadata, Attributes: a.Attributes})
 			if handled && err == nil && !h.qwenCLIReceiptValid(a, response) {

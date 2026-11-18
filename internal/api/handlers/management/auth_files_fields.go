@@ -1078,6 +1078,20 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if errSave != nil {
 		return savedPath, errSave
 	}
+	// Publish and bind the persisted source before synchronous runtime adoption.
+	// Waiting for fsnotify leaves first-time OAuth saves without a catalog identity.
+	if errReconcile := h.ReconcileResourceInventory(); errReconcile != nil {
+		return savedPath, fmt.Errorf("reconcile persisted auth failed: %w", errReconcile)
+	}
+	if h.resourceCatalog != nil {
+		raw, errRead := os.ReadFile(savedPath)
+		if errRead != nil {
+			return savedPath, errRead
+		}
+		if errBind := h.resourceCatalog.BindAuths(savedPath, raw, []*coreauth.Auth{record}); errBind != nil {
+			return savedPath, errBind
+		}
+	}
 	if legacyClaudeCredential != nil {
 		if strings.TrimSpace(savedPath) == "" {
 			return "", fmt.Errorf("canonical Claude credential was not persisted; legacy credential retained")
@@ -1130,11 +1144,20 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 				}
 			}
 		}
+		if h.resourceCatalog != nil {
+			raw, errRead := os.ReadFile(savedPath)
+			if errRead != nil {
+				return savedPath, errRead
+			}
+			if errBind := h.resourceCatalog.BindAuths(savedPath, raw, []*coreauth.Auth{persistedRecord}); errBind != nil {
+				return savedPath, errBind
+			}
+		}
 		if errHook := h.postAuthPersistHook(ctx, persistedRecord); errHook != nil {
 			return savedPath, fmt.Errorf("post-auth persist hook failed: %w", errHook)
 		}
 	} else if h.authManager != nil && strings.TrimSpace(savedPath) != "" {
-		if errReg := h.registerAuthFromFileWithID(ctx, savedPath, nil, record.ID); errReg != nil {
+		if errReg := h.registerAuthFromFileWithID(coreauth.WithSkipPersist(ctx), savedPath, nil, record.ID); errReg != nil {
 			return savedPath, fmt.Errorf("register persisted auth failed: %w", errReg)
 		}
 	}

@@ -184,7 +184,7 @@ func quotaTLS(t *testing.T, handler http.Handler) (*httptest.Server, credentialq
 	if err != nil {
 		t.Fatal(err)
 	}
-	template.DNSNames = []string{"chatgpt.com", "opencode.ai"}
+	template.DNSNames = []string{"chatgpt.com", "opencode.ai", "daily-cloudcode-pa.googleapis.com", "daily-cloudcode-pa.sandbox.googleapis.com", "cloudcode-pa.googleapis.com"}
 	template.IPAddresses = nil
 	signer := cert.PrivateKey.(crypto.Signer)
 	der, err := x509.CreateCertificate(rand.Reader, template, template, signer.Public(), signer)

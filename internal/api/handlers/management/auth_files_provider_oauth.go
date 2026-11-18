@@ -571,7 +571,7 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 		return "", false
 	}
 	savedPath, errSave := h.saveTokenRecord(ctx, record)
-	if !alwaysTrackOutcome && !isTargeted {
+	if !alwaysTrackOutcome && !isTargeted && (errSave == nil || strings.TrimSpace(savedPath) == "") {
 		if errSave != nil {
 			log.Errorf("%s: %v", failSaveMessage, errSave)
 			FailOAuthSessionCommit(state, failSaveMessage)
