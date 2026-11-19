@@ -21,7 +21,8 @@ import (
 func TestAntigravityArgonEffortOnWire(t *testing.T) {
 	resetAntigravityCapabilityCache()
 	t.Cleanup(resetAntigravityCapabilityCache)
-	cfg := &config.Config{}
+	// Renaming one tier must not revoke its entitlement from the family route.
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{"antigravity": {{Name: "gemini-4-argon-low", Alias: "custom-argon-low"}}}}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(cfg)
 	manager.SetUpstreamErrorRetryLimit(0)

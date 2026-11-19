@@ -522,8 +522,10 @@ func (s *Service) antigravityModelsForHintsWithConfig(auth *coreauth.Auth, hints
 		excluded = strings.Split(value, ",")
 	}
 	models = applyExcludedModels(models, excluded)
-	models = registry.WithAntigravityArgonFamily(models)
-	models = applyExcludedModels(models, excluded) // The synthetic family can itself be excluded.
+	if !cfg.Home.Enabled {
+		models = registry.WithAntigravityArgonFamily(models)
+		models = applyExcludedModels(models, excluded) // The synthetic family can itself be excluded.
+	}
 	models = applyOAuthModelAliasForAuth(cfg, "antigravity", auth.AuthKind(), auth.Attributes, models)
 	models = s.appendPluginModels("antigravity", models, excluded)
 	models = applyOAuthSettingsForAuth(cfg, "antigravity", auth.AuthKind(), models)

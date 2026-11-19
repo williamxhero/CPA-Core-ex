@@ -609,6 +609,15 @@ func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
 			return cloneModelInfo(model)
 		}
 	}
+	// OAuth aliases can hide a concrete tier's public registry ID. Resolve its
+	// thinking metadata without granting or publishing the tier to any account.
+	if strings.EqualFold(strings.TrimSpace(channel), "antigravity") && (modelID == AntigravityArgon+"-low" || modelID == AntigravityArgon+"-medium") {
+		for _, model := range AntigravityArgonCatalog(models, map[string]struct{}{modelID: {}}) {
+			if model != nil && model.ID == modelID {
+				return cloneModelInfo(model)
+			}
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(channel), "claude") {
 		for _, familyID := range claudeFamilyModelIDs(modelID) {
 			for _, model := range models {

@@ -423,11 +423,21 @@ func (m *Manager) inferenceModelCandidates(auth *Auth, routeModel string, req cl
 		return nil, false, alias, routing
 	}
 	tier := registry.AntigravityArgon + "-" + effort
-	registered := tier
-	if auth.Prefix != "" {
-		registered = auth.Prefix + "/" + tier
+	// Publication keeps the canonical ID in MetadataModelID on aliases and prefixes.
+	// Checking only the public name would reject a renamed tier, or grant an
+	// unrelated model aliased to a tier name.
+	entitled := false
+	for _, info := range registry.GetGlobalRegistry().GetModelsForClient(auth.ID) {
+		id := info.MetadataModelID
+		if id == "" {
+			id = info.ID
+		}
+		if id == tier {
+			entitled = true
+			break
+		}
 	}
-	if !registry.GetGlobalRegistry().ClientSupportsModel(auth.ID, registered) {
+	if !entitled {
 		return nil, false, alias, routing
 	}
 	// Like a model pool, the resolved tier (not the public family) owns failures.
