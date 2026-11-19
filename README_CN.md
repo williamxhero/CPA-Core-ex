@@ -10,6 +10,8 @@ CLIProxyAPI 是一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API �
 
 您可以通过任何与 OpenAI（包括 Responses）、Gemini（包括 Interactions）或 Claude 兼容的客户端或 SDK，以本地方式或多 CLI 账户访问以下提供商。
 
+本地 Antigravity OAuth 凭证有 Argon 三档权限时，OpenAI 兼容客户端可用 `model: "gemini-4-argon"` 和 `reasoning_effort: "low"`、`"medium"` 或 `"high"` 选档；省略 effort 时选择 `medium` 路由。也可以直接使用 `/v1/models` 返回的带档位 ID（例如 `gemini-4-argon-high`）。只有部分档位权限时，请使用已列出的具体 ID。此映射不改变标准 Gemini API-key 的模型名。
+
 <table>
 <tbody>
     <tr>

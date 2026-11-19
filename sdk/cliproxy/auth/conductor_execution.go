@@ -1177,7 +1177,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, req, pickOpts)
 		if len(models) == 0 {
 			continue
 		}
@@ -1403,7 +1403,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		execCtx = coreusage.WithSelectionID(execCtx, selectionIDFromOptions(pickOpts))
 		execCtx = m.newUpstreamAttemptContext(execCtx)
 
-		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, pickOpts.Headers)
+		models, pooled, aliasResult, routing := m.preparedExecutionModelsWithAliasForRequest(execCtx, auth, routeModel, req, pickOpts)
 		if len(models) == 0 {
 			continue
 		}
@@ -1757,7 +1757,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			})
 		}
 		execCtx = m.newUpstreamAttemptContext(execCtx)
-		models, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+		models, pooled, aliasResult, routing := m.inferenceModelCandidates(auth, routeModel, req, pickOpts)
 		// Home owns dispatched credential availability; only local selections need state filtering.
 		if selection == nil {
 			models = m.filterExecutionModelsForRequest(execCtx, auth, routeModel, models, pooled, pickOpts.Headers)
@@ -2966,10 +2966,16 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		}
 	}
 	verifyModel := routeModel
-	if candidates, _, _, _ := m.executionModelCandidatesWithAlias(auth, routeModel); len(candidates) > 0 && strings.TrimSpace(candidates[0]) != "" {
+	candidates, pooled, _, _ := m.inferenceModelCandidates(auth, routeModel, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
+	if len(candidates) > 0 && strings.TrimSpace(candidates[0]) != "" {
 		verifyModel = strings.TrimSpace(candidates[0])
+	} else if provider == "antigravity" && canonicalModelKey(rewriteModelForAuth(routeModel, auth)) == registry.AntigravityArgon {
+		return auth, &Error{Code: "model_not_found", Message: "no eligible Argon tier for verification", HTTPStatus: http.StatusBadRequest}
 	}
 	stateModel := m.selectionModelKeyForAuth(auth, routeModel)
+	if pooled && provider == "antigravity" {
+		stateModel = m.stateModelForExecution(auth, routeModel, verifyModel, pooled)
+	}
 	if stateModel == "" {
 		stateModel = canonicalModelKey(routeModel)
 	}

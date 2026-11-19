@@ -390,12 +390,48 @@ func (m *Manager) preparedExecutionModels(auth *Auth, routeModel string) ([]stri
 }
 
 func (m *Manager) preparedExecutionModelsWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
-	return m.preparedExecutionModelsWithAliasForRequest(nil, auth, routeModel)
+	return m.preparedExecutionModelsWithAliasForRequest(nil, auth, routeModel, cliproxyexecutor.Request{}, cliproxyexecutor.Options{})
 }
 
-func (m *Manager) preparedExecutionModelsWithAliasForRequest(ctx context.Context, auth *Auth, routeModel string, clientHeaders ...http.Header) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
-	candidates, pooled, aliasResult, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
-	return m.filterExecutionModelsForRequest(ctx, auth, routeModel, candidates, pooled, clientHeaders...), pooled, aliasResult, routing
+func (m *Manager) preparedExecutionModelsWithAliasForRequest(ctx context.Context, auth *Auth, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	candidates, pooled, aliasResult, routing := m.inferenceModelCandidates(auth, routeModel, req, opts)
+	return m.filterExecutionModelsForRequest(ctx, auth, routeModel, candidates, pooled, opts.Headers), pooled, aliasResult, routing
+}
+
+// Resolve the virtual Argon family after credential aliases, but before per-model
+// cooldowns, accounting and translation. An explicit tier (or Home dispatch) wins.
+func (m *Manager) inferenceModelCandidates(auth *Auth, routeModel string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	models, pooled, alias, routing := m.executionModelCandidatesWithAlias(auth, routeModel)
+	if auth == nil || auth.Provider != "antigravity" || len(models) != 1 || m.HomeEnabled() {
+		return models, pooled, alias, routing
+	}
+	suffix := thinking.ParseSuffix(models[0])
+	if suffix.ModelName != registry.AntigravityArgon {
+		return models, pooled, alias, routing
+	}
+	body := opts.OriginalRequest
+	if len(body) == 0 {
+		body = req.Payload
+	}
+	effort := thinking.ExtractReasoningEffort(body, opts.SourceFormat.String(), models[0])
+	if effort == "" || effort == "auto" {
+		effort = "medium"
+	}
+	switch effort {
+	case "low", "medium", "high":
+	default:
+		return nil, false, alias, routing
+	}
+	tier := registry.AntigravityArgon + "-" + effort
+	registered := tier
+	if auth.Prefix != "" {
+		registered = auth.Prefix + "/" + tier
+	}
+	if !registry.GetGlobalRegistry().ClientSupportsModel(auth.ID, registered) {
+		return nil, false, alias, routing
+	}
+	// Like a model pool, the resolved tier (not the public family) owns failures.
+	return []string{preserveResolvedModelSuffix(tier, suffix)}, true, alias, routing
 }
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
