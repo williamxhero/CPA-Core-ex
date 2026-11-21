@@ -1016,7 +1016,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var completedPendingToolCallIDs []string
 		var forwardErrMsg *interfaces.ErrorMessage
 
-		turnExecutionParent := coreauth.WithFreshRequestContinuitySession(executionParent)
+		turnExecutionParent := coreauth.WithFreshRequestBudget(coreauth.WithFreshRequestContinuitySession(executionParent))
 		for {
 			lastAttemptedAuthID = pinnedAuthID
 			attemptedUpstreamMode = responsesWebsocketUpstreamModeUnknown
@@ -1104,6 +1104,12 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			var failoverInPlace bool
 			var downstreamCommitted atomic.Bool
 			replayPinnedAuthFailure := func(errMsg *interfaces.ErrorMessage) bool {
+				if coreauth.RequestBudgetEnforced(turnExecutionParent) {
+					budget, _ := coreauth.RequestBudgetSnapshotFromContext(turnExecutionParent)
+					if budget.OutputCommitted || budget.ReplayUnsafe {
+						return false
+					}
+				}
 				if cliproxyexecutor.IsUpstreamWebsocketTurnError(errMsg.Error) {
 					// The upstream websocket was lost: tell the client, keep its socket open, and
 					// fence the input it sent before the loss. A refused continuation is not a loss.

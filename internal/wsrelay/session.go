@@ -340,6 +340,9 @@ func (s *session) send(ctx context.Context, msg Message) error {
 	if err := s.conn.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return fmt.Errorf("set write deadline: %w", err)
 	}
+	if err := cliproxyexecutor.MarkBusinessUpstreamAttempt(ctx); err != nil {
+		return err
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	if err := s.conn.WriteJSON(msg); err != nil {
 		return fmt.Errorf("write json: %w", err)

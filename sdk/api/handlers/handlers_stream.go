@@ -342,6 +342,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	ctx = coreauth.WithRequestBudget(ctx)
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
@@ -610,7 +611,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	maxBootstrapRetries := StreamingBootstrapRetries(h.CurrentConfig())
-	if h.AuthManager.HomeEnabled() {
+	if h.AuthManager.HomeEnabled() || coreauth.RequestBudgetEnforced(ctx) {
 		maxBootstrapRetries = 0
 	}
 	for bootstrapRetries := 0; !streamCanceledBeforeRead; {

@@ -54,6 +54,9 @@ func (t admissionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err := AdmitInference(r.Context()); err != nil {
 		return nil, err
 	}
+	if err := MarkBusinessUpstreamAttempt(r.Context()); err != nil {
+		return nil, err
+	}
 	return t.base.RoundTrip(r)
 }
 
@@ -64,7 +67,7 @@ func GateHTTPClient(ctx context.Context, c *http.Client) *http.Client {
 	}
 	check, _ := ctx.Value(inferenceAdmissionKey{}).(func(context.Context) error)
 
-	if check == nil {
+	if check == nil && businessAttemptRecorder(ctx) == nil {
 		return c
 	}
 	base := c.Transport

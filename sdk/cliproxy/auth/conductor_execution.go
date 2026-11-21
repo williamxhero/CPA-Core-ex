@@ -172,7 +172,7 @@ func markUpstreamExecutionAttemptFromContext(ctx context.Context, err error) err
 	if err != nil && cliproxyexecutor.InferenceAdmissionDenied(ctx) {
 		return &cliproxyexecutor.InferenceAdmissionError{}
 	}
-	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) {
+	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) || (RequestBudgetEnforced(ctx) && !cliproxyexecutor.BusinessUpstreamAttempted(ctx)) {
 		return err
 	}
 	return markUpstreamExecutionAttemptWithProvider(err, upstreamAttemptProviderFromContext(ctx))
@@ -307,6 +307,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
 	ctx = coreusage.CaptureIdentity(ctx)
 	ctx = contextWithInFlightScope(ctx, scope)
+	ctx, opts = m.setupRequestBudget(ctx, req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -314,6 +315,20 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	opts, pinnedThread, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return cliproxyexecutor.Response{}, errThread
+	}
+	if RequestBudgetEnforced(ctx) {
+		response, err := runScheduledExecution(m, ctx, normalized, req, opts, nil, func(ctx context.Context, opts cliproxyexecutor.Options, round, retryLimit int, homeLimit *int) (cliproxyexecutor.Response, error) {
+			_, maxCredentials, _ := m.retrySettings()
+			if m.HomeEnabled() {
+				return m.executeHomeOnce(ctx, normalized, req, opts, false, maxCredentials, homeLimit, round)
+			}
+			return m.executeMixedOnce(ctx, normalized, req, opts, maxCredentials, round, retryLimit)
+		})
+		err = unwrapExecutionBoundaryError(err)
+		if pinnedThread && err != nil && !isRequestStopError(err) {
+			err = claudeThreadReplayError(err)
+		}
+		return response, err
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
@@ -601,6 +616,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
 	ctx = coreusage.CaptureIdentity(ctx)
 	ctx = contextWithInFlightScope(ctx, scope)
+	ctx, opts = m.setupRequestBudget(ctx, req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -621,6 +637,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	opts, pinnedThread, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return nil, errThread
+	}
+
+	if RequestBudgetEnforced(ctx) {
+		return m.executeScheduledStream(ctx, normalized, req, opts, pinnedThread)
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -1247,9 +1267,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
-			resp, errExec := m.executeGateAttempt(execCtx, executor, auth, execReq, execOpts)
+			businessCtx := m.withBusinessInferenceBudget(execCtx, auth, execReq, execOpts, routeModel)
+			resp, errExec := m.executeGateAttempt(businessCtx, executor, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
+			if isBudgetReplayStop(errExec) {
+				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(errExec, upstreamErr)
+			}
 			if errExec != nil {
 				if hasUpstreamExecutionAttempt(errExec) {
 					upstreamErr = errExec
@@ -1258,14 +1282,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized || !budgetCanRepeat(execCtx), execOpts.Headers); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
 					execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = m.executeGateAttempt(execCtx, executor, auth, execReq, execOpts)
+					businessCtx = m.withBusinessInferenceBudget(execCtx, auth, execReq, execOpts, routeModel)
+					resp, errExec = m.executeGateAttempt(businessCtx, executor, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -1301,6 +1326,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				}
+				if !budgetCanRepeat(execCtx) {
+					return cliproxyexecutor.Response{}, preferredExecutionAttemptError(errExec, upstreamErr)
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1906,7 +1934,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
 			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
-			if stoppedByRule || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
+			if stoppedByRule || !budgetCanRepeat(execCtx) || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
 				// Only redispatch needs a release acknowledgement. Preserve the final
 				// response even when Home cannot acknowledge the released admission.
 				if selection != nil {

@@ -182,6 +182,9 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		}
 		return nil, cfg, nil, errGate
 	}
+	if errBudget := cliproxyexecutor.MarkBusinessUpstreamAttempt(ctx); errBudget != nil {
+		return nil, cfg, nil, errBudget
+	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {

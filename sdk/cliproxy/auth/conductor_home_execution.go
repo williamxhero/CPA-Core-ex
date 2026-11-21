@@ -235,7 +235,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				return effectiveAuth.Clone(), AccessTokenSHA256(effectiveAuth)
 			}
-			execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
+			execCtx = withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), selection.Provider)
 			executorCtx := execCtx
 			if countTokens {
 				executorCtx = withAccessTokenFingerprintObserver(execCtx, setEffectiveAuth)
@@ -245,7 +245,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				if countTokens {
 					return executor.CountTokens(executorCtx, preparedAuth, execReq, execOpts)
 				}
-				return executor.Execute(execCtx, preparedAuth, execReq, execOpts)
+				return executor.Execute(m.withBusinessInferenceBudget(execCtx, preparedAuth, execReq, execOpts, routeModel), preparedAuth, execReq, execOpts)
 			}
 			startHomeExec := time.Now()
 			response, errExecute = execute()
@@ -283,6 +283,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			m.reportHomeResult(execCtx, result, preparedAuth)
 			roundTiming.Observe(errExecute)
 			lastErr = errExecute
+			if !budgetCanRepeat(execCtx) || isBudgetReplayStop(errExecute) {
+				releaseAttempt()
+				selection.End("request_stopped")
+				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(errExecute, upstreamErr)
+			}
 			if okAction {
 				if isRequestScopedStop(action, okAction) {
 					errExecute = annotateTrustedRetryAfterByHint(errExecute)

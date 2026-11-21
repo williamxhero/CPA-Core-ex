@@ -328,6 +328,9 @@ func writeAdmittedWebsocketPayloadMessage(ctx context.Context, provider string, 
 	if err := cliproxyexecutor.AdmitInference(ctx); err != nil {
 		return err
 	}
+	if err := cliproxyexecutor.MarkBusinessUpstreamAttempt(ctx); err != nil {
+		return err
+	}
 	return writeWebsocketPayloadMessage(provider, sess, conn, payload)
 }
 func writeAdmittedCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {

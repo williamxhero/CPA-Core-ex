@@ -230,7 +230,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	// Unlimited upstream retries prefer hold-until-complete buffering so a
 	// mid-stream transient failure can discard partial output and replay
 	// without duplicating content already shown to the client.
-	holdUntilComplete := replay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState.holdUntilComplete()
+	holdUntilComplete := !RequestBudgetEnforced(ctx) && replay != nil && m.configuredUpstreamErrorRetryLimit() == -1 && replayState.holdUntilComplete()
 	if replayState != nil {
 		replayState.noteProvider(provider)
 	}
@@ -312,6 +312,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			entry.WithFields(fields).Info("stream recovery")
 		}
 		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			RecordRequestStreamOutput(ctx, chunk.Payload)
 			if chunk.Err != nil {
 				if session := continuitySessionFromContext(ctx); session != nil {
 					session.setLastStreamProvider(provider)
@@ -369,8 +370,11 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if activeReplay == nil {
 				activeReplay = replay
 			}
-			if err == nil || activeReplay == nil || deliveredAny || (ctx != nil && ctx.Err() != nil) {
+			if err == nil || activeReplay == nil || deliveredAny || !budgetCanRepeat(ctx) || (ctx != nil && ctx.Err() != nil) {
 				return false
+			}
+			if RequestBudgetEnforced(ctx) {
+				return scheduledUpstreamTransient(err)
 			}
 			if statusCodeFromError(err) == http.StatusInsufficientStorage {
 				var authErr *Error
@@ -454,6 +458,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if err == nil {
 				return nil, false
 			}
+			err = markUpstreamExecutionAttemptFromContext(ctx, err)
 			recordFailure(err)
 			activeReplay := streamReplayCoordinatorFromContext(ctx)
 			if activeReplay == nil {
@@ -603,7 +608,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		processNext := func(next cliproxyexecutor.StreamChunk, ok bool, source <-chan cliproxyexecutor.StreamChunk, rewrite bool) (<-chan cliproxyexecutor.StreamChunk, bool, bool) {
 			if !ok {
-				if holdUntilComplete && !sawCompleted && !failed {
+				if (holdUntilComplete || (RequestBudgetEnforced(ctx) && sawIncomplete)) && !sawCompleted && !failed {
 					retry, okRetry := processError(&Error{Code: "incomplete_stream", Message: "upstream stream closed before response.completed", Retryable: true}, source)
 					if okRetry {
 						return retry, true, false
@@ -1121,7 +1126,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		executionSeq := m.nextExecutionSeq()
 		startStream := time.Now()
 		attemptCtx, cancelAttempt := context.WithCancel(ctx)
-		streamResult, errStream := m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
+		streamResult, errStream := m.streamGateAttemptWithTimeout(m.withBusinessInferenceBudget(attemptCtx, auth, execReq, execOpts, routeModel), executor, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 		if hasUpstreamExecutionAttempt(errStream) {
 			upstreamErr = errStream
@@ -1133,7 +1138,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, errStream, ephemeralResult, executionSeq)
 				return nil, errCtx
 			}
-			if allowRetry && !ephemeralResult {
+			if allowRetry && !ephemeralResult && budgetCanRepeat(ctx) {
 				alreadyTried := didRefreshOnUnauthorized
 				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, errStream, alreadyTried, execOpts.Headers)
 				if okRefresh {
@@ -1145,7 +1150,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					attemptCtx, cancelAttempt = context.WithCancel(ctx)
-					streamResult, errStream = m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
+					streamResult, errStream = m.streamGateAttemptWithTimeout(m.withBusinessInferenceBudget(attemptCtx, auth, execReq, execOpts, routeModel), executor, auth, execReq, execOpts)
 					errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
 					if hasUpstreamExecutionAttempt(errStream) {
 						upstreamErr = errStream
@@ -1219,7 +1224,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
-			if allowRetry && !ephemeralResult {
+			if allowRetry && !ephemeralResult && budgetCanRepeat(ctx) {
 				alreadyTried := didRefreshOnUnauthorized
 				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, bootstrapErr, alreadyTried, execOpts.Headers)
 				if okRefresh {
@@ -1231,7 +1236,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
 					attemptCtx, cancelAttempt = context.WithCancel(ctx)
-					retryStream, retryErr := m.streamGateAttemptWithTimeout(attemptCtx, executor, auth, execReq, execOpts)
+					retryStream, retryErr := m.streamGateAttemptWithTimeout(m.withBusinessInferenceBudget(attemptCtx, auth, execReq, execOpts, routeModel), executor, auth, execReq, execOpts)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
 					retryStream, retryErr = validateStreamResult(retryStream, retryErr)
 					retryErr = markUpstreamExecutionAttemptFromContext(ctx, retryErr)
