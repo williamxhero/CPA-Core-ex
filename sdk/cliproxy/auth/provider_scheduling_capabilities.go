@@ -123,7 +123,7 @@ func schedulingModelInfo(infos []*registry.ModelInfo, model string) *registry.Mo
 	return nil
 }
 
-func (r schedulingRequirements) unsupported(info *registry.ModelInfo, opts cliproxyexecutor.Options) []string {
+func (r schedulingRequirements) unsupported(info *registry.ModelInfo, geminiStream bool) []string {
 	if info == nil {
 		return nil
 	}
@@ -149,7 +149,9 @@ func (r schedulingRequirements) unsupported(info *registry.ModelInfo, opts clipr
 		!contains(info.SupportedParameters, "reasoning", "reasoning_effort", "thinking")) {
 		reasons = append(reasons, "reasoning_incompatible")
 	}
-	if opts.Stream && len(info.SupportedGenerationMethods) > 0 && opts.SourceFormat == sdktranslator.FormatGemini &&
+	// Gemini catalogs advertise generateContent for the generation family,
+	// including streaming. An absent method list is unknown, not a denial.
+	if geminiStream && len(info.SupportedGenerationMethods) > 0 &&
 		!contains(info.SupportedGenerationMethods, "streamGenerateContent", "generateContent") {
 		reasons = append(reasons, "streaming_incompatible")
 	}
@@ -158,7 +160,8 @@ func (r schedulingRequirements) unsupported(info *registry.ModelInfo, opts clipr
 
 func (m *Manager) scheduledModelCapabilityReasons(a *Auth, model string, opts cliproxyexecutor.Options, reg *registry.ModelRegistry) []string {
 	req, _ := opts.Metadata[schedulingRequirementsMetadata].(schedulingRequirements)
-	if !req.tools && !req.image && !req.reasoning && !(opts.Stream && opts.SourceFormat == sdktranslator.FormatGemini) {
+	geminiStream := opts.Stream && knownSchedulingFormat(a) == sdktranslator.FormatGemini
+	if !req.tools && !req.image && !req.reasoning && !geminiStream {
 		return nil
 	}
 	infos := reg.GetModelsForClient(a.ID)
@@ -167,13 +170,13 @@ func (m *Manager) scheduledModelCapabilityReasons(a *Auth, model string, opts cl
 	if publicInfo == nil {
 		publicInfo = schedulingModelInfo(infos, m.selectionModelForAuth(a, model))
 	}
-	reasons := req.unsupported(publicInfo, opts)
+	reasons := req.unsupported(publicInfo, geminiStream)
 	for _, upstream := range candidates {
 		info, _ := lookupAPIKeyModelCapability(routing, a, model, upstream)
 		if info == nil {
 			info = schedulingModelInfo(infos, upstream)
 		}
-		for _, reason := range req.unsupported(info, opts) {
+		for _, reason := range req.unsupported(info, geminiStream) {
 			reasons = appendSchedulingReason(reasons, reason)
 		}
 	}

@@ -47,3 +47,38 @@ func TestProviderSchedulingAntigravityCountsOneSendPerHTTPDispatch(t *testing.T)
 		}
 	}
 }
+
+func TestProviderSchedulingAntigravityRejectsOverflowingRetryAfter(t *testing.T) {
+	for _, test := range []struct {
+		name, header, retryInfo, wantSource, wantHeader string
+	}{
+		{name: "duration overflow", header: "9223372037"},
+		{name: "uint64 overflow", header: "18446744073709551616"},
+		{name: "valid RetryInfo survives invalid header", header: "9223372037", retryInfo: "4s", wantSource: "retry_info", wantHeader: "4"},
+		{name: "valid long header survives", header: "486000", wantSource: "retry_after", wantHeader: "486000"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newScheduledAntigravityHTTP(t, func(_ string, _ string, w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Retry-After", test.header)
+				w.WriteHeader(http.StatusTooManyRequests)
+				if test.retryInfo == "" {
+					_, _ = io.WriteString(w, scheduledAntigravity429Body)
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"error":{"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":%q}]}}`, test.retryInfo)
+			})
+			ctx := coreauth.WithRequestBudget(t.Context())
+			res := f.request(ctx, false)
+			f.assertCalls(t, "A")
+			budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+			if budget.UpstreamCategory != "antigravity_resource_exhausted" || budget.ActiveWait != 0 || len(f.clock.waits) != 0 {
+				t.Fatalf("expected one terminal Antigravity limit without waiting: %+v", budget)
+			}
+			if got := res.Header().Get("Retry-After"); res.Code != http.StatusTooManyRequests ||
+				got != test.wantHeader || budget.UpstreamRetrySource != test.wantSource || budget.UpstreamRetryAt.IsZero() != (test.wantSource == "") {
+				t.Fatalf("status=%d Retry-After=%q (want %q), retry source=%q (want %q), retry at=%v", res.Code, got, test.wantHeader,
+					budget.UpstreamRetrySource, test.wantSource, budget.UpstreamRetryAt)
+			}
+		})
+	}
+}

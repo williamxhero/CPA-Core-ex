@@ -60,9 +60,7 @@ func ParseAntigravityRecovery(headers http.Header, body []byte, now time.Time) (
 		raw := strings.TrimSpace(values[0])
 		if decimalRetryDigits(raw) {
 			n, err := strconv.ParseUint(raw, 10, 64)
-			if err != nil || n > uint64(math.MaxInt64/int64(time.Second)) {
-				at = now.Add(time.Duration(math.MaxInt64))
-			} else {
+			if err == nil && n <= uint64(math.MaxInt64/int64(time.Second)) {
 				at = now.Add(time.Duration(n) * time.Second)
 			}
 		} else if date, err := http.ParseTime(raw); err == nil && !date.Before(now) {
