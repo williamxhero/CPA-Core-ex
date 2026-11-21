@@ -239,8 +239,7 @@ var errBudgetReplayUnsafe = &Error{Code: "replay_unsafe", Message: "request cann
 var errBudgetCredentialLimit = &Error{Code: "request_retry_limit", Message: "request execution budget exhausted", HTTPStatus: http.StatusServiceUnavailable}
 
 func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, req executor.Request, opts executor.Options, routeModel string) context.Context {
-	b := requestBudgetFromContext(ctx)
-	if b == nil || auth == nil {
+	if requestBudgetFromContext(ctx) == nil || auth == nil {
 		return ctx
 	}
 	routeIdentity := auth.ID
@@ -250,6 +249,21 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 	if routeIdentity == "" {
 		routeIdentity = auth.ID
 	}
+	return bindBusinessInferenceBudget(ctx, auth, routeIdentity, req, opts)
+}
+
+// BindPluginInferenceBudget accounts for observable sends by a direct plugin
+// route. Selecting or invoking the plugin does not itself spend an attempt.
+func (m *Manager) BindPluginInferenceBudget(ctx context.Context, pluginID string, req executor.Request, opts executor.Options) context.Context {
+	if m == nil {
+		return ctx
+	}
+	ctx, _ = m.setupRequestBudget(ctx, req, opts)
+	return bindBusinessInferenceBudget(ctx, nil, "plugin:"+pluginID, req, opts)
+}
+
+func bindBusinessInferenceBudget(ctx context.Context, auth *Auth, routeIdentity string, req executor.Request, opts executor.Options) context.Context {
+	b := requestBudgetFromContext(ctx)
 	unsafe := streamReplayForbidden(opts) || requestMayRunHostedTools(req.Payload) || requestMayRunHostedTools(opts.OriginalRequest)
 	return executor.WithBusinessAttemptRecorder(ctx, func(sendCtx context.Context) error {
 		b.mu.Lock()
@@ -258,14 +272,23 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 			return err
 		}
 		if b.enforced {
-			if !b.antigravityAdmit(sendCtx, auth, req.Model) {
+			if auth == nil {
+				// An unbound plugin cannot prove it is a different upstream
+				// platform after the protected Antigravity rejection.
+				if b.antigravityFailure.authID != "" {
+					return errBudgetCredentialLimit
+				}
+			} else if !b.antigravityAdmit(sendCtx, auth, req.Model) {
 				return errBudgetCredentialLimit
 			}
 			if b.OutputCommitted || (b.ReplayUnsafe && b.Attempts > 0) {
 				return errBudgetReplayUnsafe
 			}
 			if pending := scheduledAlternateRoundFromContext(sendCtx); pending != nil {
-				_, triedID := pending.excluded[auth.ID]
+				triedID := false
+				if auth != nil {
+					_, triedID = pending.excluded[auth.ID]
+				}
 				_, triedRoute := pending.excluded[routeIdentity]
 				if triedID || triedRoute || (b.Round != pending.from && b.Round != pending.from+1) {
 					return errBudgetCredentialLimit
@@ -278,13 +301,15 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 				return errBudgetCredentialLimit
 			}
 		}
-		if b.enforced && b.antigravityFailure.authID != "" && canonicalSchedulingProvider(auth.Provider) != "antigravity" {
+		if auth != nil && b.enforced && b.antigravityFailure.authID != "" && canonicalSchedulingProvider(auth.Provider) != "antigravity" {
 			b.UpstreamDecision = "alternate"
 		}
 		b.ServedModel = ""
 		b.Attempts++
 		b.RoundAttempts++
-		b.credentials[auth.ID] = struct{}{}
+		if auth != nil {
+			b.credentials[auth.ID] = struct{}{}
+		}
 		b.routes[routeIdentity] = struct{}{}
 		b.ReplayUnsafe = b.ReplayUnsafe || unsafe
 		updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)

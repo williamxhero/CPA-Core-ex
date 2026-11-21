@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -173,19 +174,11 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 	if errClient != nil {
 		return nil, cfg, nil, errClient
 	}
-	if client == nil {
-		client = &http.Client{}
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
 	}
-	if errGate := cliproxyexecutor.AdmitInference(ctx); errGate != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return nil, cfg, nil, errGate
-	}
-	if errBudget := cliproxyexecutor.MarkBusinessUpstreamAttempt(ctx); errBudget != nil {
-		return nil, cfg, nil, errBudget
-	}
-	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	client.Transport = hostInferenceTransport{base: base}
 	resp, errDo := client.Do(httpReq)
 	if errDo != nil {
 		if cleanup != nil {
@@ -195,6 +188,24 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		return nil, cfg, nil, fmt.Errorf("execute host http request: %w", errDo)
 	}
 	return resp, cfg, cleanup, nil
+}
+
+// Host HTTP calls have one admission and accounting seam after proxy and
+// wire policy. This also checks each redirect before its transport sends.
+type hostInferenceTransport struct {
+	base http.RoundTripper
+}
+
+func (t hostInferenceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	ctx := r.Context()
+	if err := cliproxyexecutor.AdmitInference(ctx); err != nil {
+		return nil, err
+	}
+	if err := cliproxyexecutor.MarkBusinessUpstreamAttempt(ctx); err != nil {
+		return nil, err
+	}
+	cliproxyexecutor.MarkUpstreamAttempt(ctx)
+	return t.base.RoundTrip(r)
 }
 
 func (c *hostHTTPClient) recordHTTPRequest(ctx context.Context, cfg *config.Config, req *http.Request, body []byte) {
@@ -236,10 +247,8 @@ func (h *Host) currentRuntimeConfig() *config.Config {
 func (c *hostHTTPClient) newHTTPClientForRequest(ctx context.Context, cfg *config.Config, req pluginapi.HTTPRequest, httpReq *http.Request) (*http.Client, func(), error) {
 	profile := req.WireProfile
 	if profile == nil || (!profile.HTTP1Only && !profile.DisableAutoCompression && len(profile.HeaderProfile) == 0) {
-		client := helps.NewProxyAwareHTTPClient(c.proxyContext(ctx), cfg, c.auth, 0)
-		if client == nil {
-			client = &http.Client{}
-		}
+		proxyCtx := c.proxyContext(ctx)
+		client := httptransport.Decorate(proxyCtx, helps.NewProxyAwareHTTPClientBase(proxyCtx, cfg, c.auth, 0))
 		installPluginRedirectPolicy(client)
 		return client, nil, nil
 	}

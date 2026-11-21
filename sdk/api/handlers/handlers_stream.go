@@ -115,6 +115,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
+	execCtx = h.AuthManager.BindPluginInferenceBudget(execCtx, executorPluginID, req, opts)
 	coreauth.RecordExternalExecutorRouting(execCtx, "")
 	streamResult, errStream := host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
 	if errStream != nil {
