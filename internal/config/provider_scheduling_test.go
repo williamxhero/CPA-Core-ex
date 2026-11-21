@@ -14,7 +14,7 @@ func TestProviderSchedulingRollout(t *testing.T) {
 		t.Fatalf("default active wait = %s", got)
 	}
 
-	defaulted, err := ParseConfigBytes([]byte("version: '8'\nrouting:\n  provider-scheduling:\n    mode: enforce\n    models: ['shared']\n    callers: ['Alice']\n    max-active-wait: '0s'\n"))
+	defaulted, err := ParseConfigBytes([]byte("config-version: 8\nrouting:\n  provider-scheduling:\n    mode: enforce\n    models: ['shared']\n    callers: ['Alice']\n    max-active-wait: '0s'\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
