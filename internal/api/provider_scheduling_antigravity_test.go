@@ -124,6 +124,12 @@ func TestProviderSchedulingAntigravityGeneric429ShortWait(t *testing.T) {
 			if resp.Code != 429 || !strings.Contains(resp.Body.String(), "RESOURCE_EXHAUSTED") {
 				t.Fatalf("expected a real resource exhaustion, got %d: %s", resp.Code, resp.Body)
 			}
+			if test.header == "3" && resp.Header().Get("Retry-After") != "3" {
+				t.Fatalf("valid upstream advisory missing: %v", resp.Header())
+			}
+			if (test.name == "zero" || test.name == "invalid" || test.name == "ambiguous header" || test.name == "text and unrelated detail") && resp.Header().Get("Retry-After") != "" {
+				t.Fatalf("untrusted upstream advisory passed through: %v", resp.Header())
+			}
 			wantCalls := "A"
 			if test.wait > 0 {
 				wantCalls += ",A"
@@ -140,6 +146,13 @@ func TestProviderSchedulingAntigravityGeneric429ShortWait(t *testing.T) {
 				t.Fatal("unexpected extra wait")
 			}
 			f.assertCalls(t, wantCalls)
+			budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+			if budget.UpstreamCategory != "antigravity_resource_exhausted" || budget.ActiveWait != test.wait {
+				t.Fatalf("missing classified recovery accounting: %+v", budget)
+			}
+			if test.wait > 0 && (budget.UpstreamDecision != "short_wait" || budget.UpstreamRetrySource == "" || budget.UpstreamRetryAt.IsZero() || budget.Attempts != 2) {
+				t.Fatalf("missing short wait diagnostics: %+v", budget)
+			}
 		})
 	}
 }
@@ -171,7 +184,118 @@ func TestProviderSchedulingAntigravityGeneric429TakesAlternateBeforeHint(t *test
 				t.Fatal("healthy alternate should prevent waiting")
 			}
 			f.assertCalls(t, "A,B")
+			budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+			if budget.Attempts != 2 || budget.UpstreamDecision != "alternate" || budget.UpstreamCategory != "antigravity_resource_exhausted" {
+				t.Fatalf("missing alternate diagnostics: %+v", budget)
+			}
 		})
+	}
+}
+
+func TestProviderSchedulingAntigravityKeepsAlternateTerminalResult(t *testing.T) {
+	f := newScheduledAntigravityHTTP(t, func(id string, _ string, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if id == "B" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","message":"controlled alternate rejection","code":"invalid_request"}}`)
+			return
+		}
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, scheduledAntigravity429Body)
+	}, "codex")
+	resp := f.request(context.Background(), false)
+	f.assertCalls(t, "A,B")
+	if resp.Code != 400 || !strings.Contains(resp.Body.String(), "controlled alternate rejection") || len(f.clock.waits) != 0 {
+		t.Fatalf("alternate terminal response was replaced: %d %s", resp.Code, resp.Body)
+	}
+}
+
+func TestProviderSchedulingAntigravityRecognizedLimitsAndLegacyRemainSeparate(t *testing.T) {
+	for _, test := range []struct{ name, mode, body string }{
+		{"plain HTTP 429", "enforce", `{"error":{"code":429,"message":"text only RESOURCE_EXHAUSTED"}}`},
+		{"explicit limit", "enforce", `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"}]}}`},
+		{"explicit quota", "enforce", `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED"}]}}`},
+		{"legacy generic", "off", scheduledAntigravity429Body},
+		{"shadow generic", "shadow", scheduledAntigravity429Body},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newScheduledAntigravityHTTP(t, func(_ string, _ string, w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, test.body)
+			})
+			cfg := *f.cfg
+			cfg.Routing.ProviderScheduling.Mode = test.mode
+			f.manager.SetConfig(&cfg)
+			f.manager.SetRetryConfig(0, 0, 0)
+			f.manager.SetUpstreamErrorRetryLimit(0)
+			ctx := coreauth.WithRequestBudget(context.Background())
+			resp := f.request(ctx, false)
+			budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+			if resp.Code != 429 || budget.UpstreamCategory != "" {
+				t.Fatalf("status=%d body=%s budget=%+v", resp.Code, resp.Body, budget)
+			}
+			f.assertCalls(t, "A,A2")
+		})
+	}
+}
+
+func TestProviderSchedulingAntigravityCancellationStopsShortWait(t *testing.T) {
+	f := newScheduledAntigravityHTTP(t, func(_ string, _ string, w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, scheduledAntigravity429Body)
+	})
+	clock := newProviderBudgetClock(f.clock.Now(), false)
+	f.manager.SetContinuityClockForTest(clock)
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := coreauth.WithRequestBudget(parent)
+	finished := make(chan *httptest.ResponseRecorder, 1)
+	go func() { finished <- f.request(ctx, true) }()
+	select {
+	case wait := <-clock.waits:
+		if wait != time.Second {
+			t.Fatalf("wait %v, want 1s", wait)
+		}
+	case response := <-finished:
+		t.Fatalf("ended before cancellable wait: %d %s", response.Code, response.Body)
+	case <-time.After(4 * time.Second):
+		t.Fatal("never entered controllable wait")
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(4 * time.Second):
+		t.Fatal("request did not finish on cancellation")
+	}
+	f.assertCalls(t, "A")
+	budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	if budget.Attempts != 1 || budget.Round != 0 {
+		t.Fatalf("cancellation advanced the retry round: %+v", budget)
+	}
+}
+
+func TestProviderSchedulingAntigravityCommittedStreamIsNotReplayed(t *testing.T) {
+	f := newScheduledAntigravityHTTP(t, func(id string, _ string, w http.ResponseWriter, _ *http.Request) {
+		if id != "A" {
+			t.Errorf("unexpected alternate %s after output", id)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"response\":{\"modelVersion\":\"gemini-trial\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"antigravity-output-once\"}]}}]}}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", scheduledAntigravity429Body)
+	}, "codex")
+	ctx := coreauth.WithRequestBudget(context.Background())
+	resp := f.request(ctx, true)
+	f.assertCalls(t, "A")
+	if resp.Code != 200 || strings.Count(resp.Body.String(), "event: error") != 1 || !strings.Contains(resp.Body.String(), "antigravity-output-once") {
+		t.Fatalf("committed response=%d %s", resp.Code, resp.Body)
+	}
+	budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	if !budget.OutputCommitted || budget.Attempts != 1 || budget.ServedModel != "gemini-trial" || budget.UpstreamCategory == "antigravity_resource_exhausted" || len(f.clock.waits) != 0 {
+		t.Fatalf("possible replay or confusion between the requested model, upstream model, HTTP status and SSE event: %+v", budget)
 	}
 }
 

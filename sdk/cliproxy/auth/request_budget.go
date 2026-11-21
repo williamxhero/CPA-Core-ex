@@ -517,7 +517,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			delay := facts.RetryAt.Sub(facts.ObservedAt)
 			if delay <= 0 || delay >= 3*time.Second ||
 				!m.canOpenScheduledRound(ctx, opts, previous, s.Round, defaultRetry, homeLimit, providers, model) {
-				return zero, scheduledAntigravityTerminal(ctx, previous, facts)
+				return zero, scheduledAntigravityTerminal(ctx, facts)
 			}
 			// Immediately usable alternatives have already been exhausted.
 			// This one recovery targets precisely the same credential and model.
@@ -527,7 +527,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				return zero, waitErr
 			}
 			if !proceed || !b.nextRound(s.Round) {
-				return zero, scheduledAntigravityTerminal(ctx, previous, facts)
+				return zero, scheduledAntigravityTerminal(ctx, facts)
 			}
 			retryCtx, retryOpts := b.scheduledAntigravityRepeat(ctx, opts)
 			result, retryErr := execute(retryCtx, retryOpts, s.Round+1, roundLimit, &homeLimit)
@@ -538,12 +538,12 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				return result, nil
 			}
 			if retryFacts := scheduledAntigravity429(retryErr); retryFacts != nil {
-				return zero, scheduledAntigravityTerminal(ctx, retryErr, retryFacts)
+				return zero, scheduledAntigravityTerminal(ctx, retryFacts)
 			}
 			if hasUpstreamExecutionAttempt(retryErr) || isRequestTerminatedError(retryErr) {
 				return zero, retryErr
 			}
-			return zero, scheduledAntigravityTerminal(ctx, previous, facts)
+			return zero, scheduledAntigravityTerminal(ctx, facts)
 		}
 		if room {
 			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, attempted, roundCause)

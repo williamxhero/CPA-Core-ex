@@ -126,11 +126,13 @@ func ObserveScheduledServedModel(ctx context.Context, model string) {
 	}
 }
 
-func scheduledAntigravityTerminal(ctx context.Context, err error, facts *executor.AntigravityResourceExhausted) error {
+func scheduledAntigravityTerminal(ctx context.Context, facts *executor.AntigravityResourceExhausted) error {
+	// Home's round wrapper can contain an aggregate dispatch deadline;
+	// this branch exposes only the matching upstream response's hint.
 	if facts.RetryAt.After(facts.ObservedAt) {
 		if remaining := facts.RetryAt.Sub(RequestBudgetNow(ctx)); remaining > 0 {
-			return &trustedRetryAfterError{cause: err, deadline: time.Now().Add(remaining)}
+			return &trustedRetryAfterError{cause: facts, deadline: time.Now().Add(remaining)}
 		}
 	}
-	return err
+	return facts
 }
