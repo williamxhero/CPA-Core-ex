@@ -168,7 +168,7 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 	if resp.StatusCode != http.StatusOK {
 		stage = "response-status"
 		if form.Get("grant_type") == "refresh_token" {
-			if rejection := refreshGrantRejection(resp.StatusCode, body); rejection != nil {
+			if rejection := refreshGrantRejection(resp.StatusCode, body, resp.Header.Get("X-Request-ID")); rejection != nil {
 				return nil, rejection
 			}
 			return nil, &RefreshOutcomeUnknownError{Stage: stage}

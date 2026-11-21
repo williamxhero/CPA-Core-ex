@@ -3510,7 +3510,7 @@ func isTerminalRefreshError(auth *Auth, err error) bool {
 	}
 	var rejection *codex.OAuthError
 	if errors.As(err, &rejection) && rejection != nil {
-		return isInvalidGrantError(err) || isTerminalRefreshGrantMessage(rejection.Code)
+		return rejection.Code == "invalid_grant" || isTerminalRefreshGrantMessage(rejection.Code)
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil && isTerminalRefreshGrantMessage(authErr.Code) {
@@ -3587,6 +3587,9 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 	}
 	blocked := isBlockedRefreshGrantError(auth, err)
 	code := terminalRefreshErrorCode(raw, statusCode)
+	if rejection != nil {
+		code = rejection.Code
+	}
 	if isUncertainRefreshError(err) {
 		code = "refresh_outcome_unknown"
 		statusCode = http.StatusServiceUnavailable
@@ -3744,6 +3747,10 @@ func isInvalidGrantErrorMessage(message string) bool {
 func isInvalidGrantError(err error) bool {
 	if err == nil || codex.IsRefreshPreSendError(err) {
 		return false
+	}
+	var rejection *codex.OAuthError
+	if errors.As(err, &rejection) && rejection != nil {
+		return rejection.Code == "invalid_grant"
 	}
 	if !isInvalidGrantErrorMessage(err.Error()) {
 		return false
