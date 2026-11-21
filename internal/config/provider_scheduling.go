@@ -15,11 +15,19 @@ const (
 )
 
 // ProviderSchedulingConfig scopes rollout of the unified request scheduler.
+type ProviderSchedulingResource struct {
+	Funding       string `yaml:"funding,omitempty" json:"funding,omitempty"`
+	MaxConcurrent int    `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
+}
+
 type ProviderSchedulingConfig struct {
-	Mode          string   `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Models        []string `yaml:"models,omitempty" json:"models,omitempty"`
-	Callers       []string `yaml:"callers,omitempty" json:"callers,omitempty"`
-	MaxActiveWait string   `yaml:"max-active-wait,omitempty" json:"max-active-wait,omitempty"`
+	Resources      map[string]ProviderSchedulingResource `yaml:"resources,omitempty" json:"resources,omitempty"`
+	AllowedFunding []string                              `yaml:"allowed-funding,omitempty" json:"allowed-funding,omitempty"`
+	CallerFunding  map[string][]string                   `yaml:"caller-funding,omitempty" json:"caller-funding,omitempty"`
+	Mode           string                                `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Models         []string                              `yaml:"models,omitempty" json:"models,omitempty"`
+	Callers        []string                              `yaml:"callers,omitempty" json:"callers,omitempty"`
+	MaxActiveWait  string                                `yaml:"max-active-wait,omitempty" json:"max-active-wait,omitempty"`
 }
 
 // ProviderSchedulingMode evaluates the model and the authenticated caller against rollout scope.

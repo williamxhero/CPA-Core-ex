@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -61,6 +63,15 @@ func (m *Manager) withInferenceAdmission(ctx context.Context, a *Auth, model str
 // Check native funding admission before consuming a credential attempt. The
 // final transport still rechecks admission to close the selection/send race.
 func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	if !m.HomeEnabled() && m.ProviderSchedulingEnforced(ctx, model) {
+		opts.EnsureMetadata()
+		return m.pickScheduledRoute(ctx, providers, model, opts, tried)
+	}
+	if !m.HomeEnabled() && m.providerSchedulingMode(ctx, model) == internalconfig.ProviderSchedulingShadow {
+		if sink := schedulingDecisionObserver(ctx); sink != nil {
+			sink(m.schedulingSnapshot(ctx, providers, model, opts, tried))
+		}
+	}
 	var held bool
 	for {
 		a, executor, provider, err := m.pickNextMixed(ctx, providers, model, opts, tried)

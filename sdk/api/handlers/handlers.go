@@ -691,6 +691,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 
 	if requestCtx != nil {
+		parentCtx = coreauth.InheritProviderSchedulingCaller(parentCtx, requestCtx)
 		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
 		parentCtx = logging.InheritDeferredCapture(parentCtx, requestCtx)
 	}

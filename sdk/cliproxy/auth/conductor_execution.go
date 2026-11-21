@@ -3,8 +3,10 @@ package auth
 import (
 	"bytes"
 	"context"
+
 	"errors"
 	"fmt"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"io"
 	"maps"
 	"net/http"
@@ -1122,6 +1124,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if m.providerSchedulingMode(ctx, routeModel) != internalconfig.ProviderSchedulingOff {
+		opts = m.scheduleRequestOptions(req, opts)
+	}
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1138,7 +1143,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var routeReservation *routeReservation
+	defer func() { routeReservation.release() }()
 	for {
+		routeReservation.release()
+		routeReservation = nil
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
@@ -1154,6 +1163,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 		if errPick == nil {
+			routeReservation = takeRouteReservation(pickOpts)
 			updateInFlightScopeProvider(ctx, provider)
 		}
 		if errPick != nil {
@@ -1348,6 +1358,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if m.providerSchedulingMode(ctx, routeModel) != internalconfig.ProviderSchedulingOff {
+		opts = m.scheduleRequestOptions(req, opts)
+	}
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1364,7 +1377,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var routeReservation *routeReservation
+	defer func() { routeReservation.release() }()
 	for {
+		routeReservation.release()
+		routeReservation = nil
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
@@ -1380,6 +1397,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 		if errPick == nil {
+			routeReservation = takeRouteReservation(pickOpts)
 			updateInFlightScopeProvider(ctx, provider)
 		}
 		if errPick != nil {
@@ -1580,6 +1598,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if m.providerSchedulingMode(ctx, routeModel) != internalconfig.ProviderSchedulingOff {
+		opts = m.scheduleRequestOptions(req, opts)
+	}
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1614,8 +1635,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var routeReservation *routeReservation
+	defer func() { routeReservation.release() }()
 	var roundTiming homeRetryRoundTiming
 	for {
+		routeReservation.release()
+		routeReservation = nil
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
 			if lastErr != nil {
@@ -1650,6 +1675,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		} else {
 			auth, executor, provider, errPick = m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 			if errPick == nil {
+				routeReservation = takeRouteReservation(pickOpts)
 				updateInFlightScopeProvider(ctx, provider)
 			}
 		}
@@ -1938,7 +1964,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
-		return streamResult, nil
+		wrapped := wrapRouteReservationStream(ctx, streamResult, routeReservation)
+		routeReservation = nil
+		return wrapped, nil
 	}
 }
 
