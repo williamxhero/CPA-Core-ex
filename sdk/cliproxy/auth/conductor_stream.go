@@ -458,7 +458,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			if err == nil {
 				return nil, false
 			}
-			err = markUpstreamExecutionAttemptFromContext(ctx, err)
+			if RequestBudgetEnforced(ctx) {
+				err = markUpstreamExecutionAttemptFromContext(ctx, err)
+			}
 			recordFailure(err)
 			activeReplay := streamReplayCoordinatorFromContext(ctx)
 			if activeReplay == nil {
