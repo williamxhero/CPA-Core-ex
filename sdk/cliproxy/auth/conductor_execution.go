@@ -3,10 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
-
 	"errors"
 	"fmt"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"io"
 	"maps"
 	"net/http"
@@ -17,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"

@@ -87,6 +87,12 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		close(errChan)
 		return nil, nil, errChan
 	}
+	if err := h.AuthManager.CheckProviderSchedulingUnboundExecution(ctx, modelName, pinnedAuthIDFromContext(ctx)); err != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- executionErrorMessage(err)
+		close(errChan)
+		return nil, nil, errChan
+	}
 	host := h.pluginExecutorHost()
 	if host == nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)

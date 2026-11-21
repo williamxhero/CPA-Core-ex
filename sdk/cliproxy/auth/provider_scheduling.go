@@ -112,6 +112,18 @@ func (m *Manager) scheduledFundingAllows(ctx context.Context, a *Auth) bool {
 	return allowsRouteFunding(cfg, providerSchedulingCaller(ctx), schedulingPolicy(cfg, a).Funding)
 }
 
+// CheckProviderSchedulingUnboundExecution enforces hard constraints before a
+// foreign executor without a credential binding can send a request.
+func (m *Manager) CheckProviderSchedulingUnboundExecution(ctx context.Context, model, pinnedAuthID string) error {
+	if m == nil || !m.ProviderSchedulingEnforced(ctx, model) {
+		return nil
+	}
+	if strings.TrimSpace(pinnedAuthID) != "" || !m.scheduledFundingAllows(ctx, nil) {
+		return newNoAvailableRouteError(model)
+	}
+	return nil
+}
+
 func allowsRouteFunding(cfg internalconfig.ProviderSchedulingConfig, caller, funding string) bool {
 	_, callerRestricted := cfg.CallerFunding[caller]
 	if cfg.AllowedFunding == nil && !callerRestricted {
