@@ -636,23 +636,23 @@ func applyPreservedRenewalState(existing, updated *Auth, mode updateAuthMode, no
 		currentSIWCRT := authSIWCTokenField(updated, "refresh_token")
 		outerStillMatchesFailed := failedOuterRT == "" || (currentOuterRT == failedOuterRT && (existing == nil || authRefreshToken(existing) == failedOuterRT))
 		siwcStillMatchesFailed := failedSIWCRT == "" || (currentSIWCRT == failedSIWCRT && (existing == nil || authSIWCTokenField(existing, "refresh_token") == failedSIWCRT))
-		outerTerminal := outerErr != nil && outerStillMatchesFailed && isBlockedRefreshGrantError(updated, outerErr)
-		siwcTerminal := siwcErr != nil && siwcStillMatchesFailed && isBlockedRefreshGrantError(updated, siwcErr)
+		outerBlocked := outerErr != nil && outerStillMatchesFailed && isBlockedRefreshGrantError(updated, outerErr)
+		siwcBlocked := siwcErr != nil && siwcStillMatchesFailed && isBlockedRefreshGrantError(updated, siwcErr)
 		preservedRejectedOuter := existing != nil && existing.RejectedRefreshToken != "" && currentOuterRT == existing.RejectedRefreshToken
 		preservedRejectedSIWC := existing != nil && existing.RejectedSIWCRefreshToken != "" && currentSIWCRT == existing.RejectedSIWCRefreshToken
-		if outerTerminal || siwcTerminal || preservedRejectedOuter || preservedRejectedSIWC {
-			updated.RequiresSignIn = (outerTerminal && isTerminalRefreshError(updated, outerErr)) ||
-				(siwcTerminal && isTerminalRefreshError(updated, siwcErr)) ||
+		if outerBlocked || siwcBlocked || preservedRejectedOuter || preservedRejectedSIWC {
+			updated.RequiresSignIn = (outerBlocked && isTerminalRefreshError(updated, outerErr)) ||
+				(siwcBlocked && isTerminalRefreshError(updated, siwcErr)) ||
 				(existing != nil && existing.RequiresSignIn && (preservedRejectedOuter || preservedRejectedSIWC))
 			updated.RenewalVerified = false
 			if existing != nil {
 				updated.ConsecutiveRenewalFailures = existing.ConsecutiveRenewalFailures
 				updated.LastRenewalVerifiedAt = existing.LastRenewalVerifiedAt
 			}
-			if outerTerminal || siwcTerminal {
+			if outerBlocked || siwcBlocked {
 				updated.ConsecutiveRenewalFailures++
 			}
-			if outerTerminal {
+			if outerBlocked {
 				updated.RejectedRefreshToken = authRefreshToken(updated)
 				updated.RefreshError = sanitizeRenewalError(updated, outerErr)
 			} else if preservedRejectedOuter {
@@ -660,9 +660,9 @@ func applyPreservedRenewalState(existing, updated *Auth, mode updateAuthMode, no
 			} else {
 				updated.RejectedRefreshToken = ""
 			}
-			if siwcTerminal {
+			if siwcBlocked {
 				updated.RejectedSIWCRefreshToken = authSIWCTokenField(updated, "refresh_token")
-				if !outerTerminal || !isTerminalRefreshError(updated, outerErr) {
+				if !outerBlocked || !isTerminalRefreshError(updated, outerErr) {
 					updated.RefreshError = sanitizeRenewalError(updated, siwcErr)
 				}
 			} else if preservedRejectedSIWC {

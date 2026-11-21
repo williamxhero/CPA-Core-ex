@@ -23,6 +23,13 @@ var fundingDecimal = regexp.MustCompile(`^-?(0|[1-9][0-9]{0,59})(\.[0-9]{1,30})?
 // currency. Validate that arithmetic before trusting the availability flag.
 // Zero/negative totals never establish exhaustion when a positive grant or
 // top-up is still reported, or the platform still considers the key usable.
+func fundingStateSlot(adapter, resourceID string) string {
+	if adapter == "deepinfra" {
+		return "funding-state/deepinfra/" + resourceID
+	}
+	return "funding-state/" + resourceID
+}
+
 func deepSeekFundingState(reading resource.FundingReading) string {
 	if reading.DeepInfra != nil || reading.Available == nil || len(reading.Balances) == 0 || len(reading.Balances) > 2 {
 		return ""
@@ -34,13 +41,10 @@ func deepSeekFundingState(reading resource.FundingReading) string {
 			return ""
 		}
 		seen[b.Currency] = true
-		if !fundingDecimal.MatchString(b.Total) || !fundingDecimal.MatchString(b.Granted) || !fundingDecimal.MatchString(b.ToppedUp) {
-			return ""
-		}
-		total, _ := new(big.Rat).SetString(b.Total)
-		granted, _ := new(big.Rat).SetString(b.Granted)
-		toppedUp, _ := new(big.Rat).SetString(b.ToppedUp)
-		if granted.Sign() < 0 || total.Cmp(new(big.Rat).Add(granted, toppedUp)) != 0 {
+		total := exactFundingDecimal(b.Total)
+		granted := exactFundingDecimal(b.Granted)
+		toppedUp := exactFundingDecimal(b.ToppedUp)
+		if total == nil || granted == nil || toppedUp == nil || granted.Sign() < 0 || total.Cmp(new(big.Rat).Add(granted, toppedUp)) != 0 {
 			return ""
 		}
 		positive = positive || total.Sign() > 0
@@ -96,7 +100,7 @@ func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, ind
 		return nil
 	}
 	action, owner, prefix, payerFence := "", fundingGateOwner, fundingEvidencePrefix, ""
-	slot := "funding-state/" + b.Targets[0].ResourceID
+	slot := fundingStateSlot(adapter, b.Targets[0].ResourceID)
 	switch adapter {
 	case "deepseek":
 		action = deepSeekFundingState(reading)
@@ -105,7 +109,7 @@ func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, ind
 		if action != "" {
 			payerFence = "payer/" + reading.DeepInfra.Payer + "/" + strconv.FormatInt(reading.DeepInfra.CheckedAt, 10)
 		}
-		owner, prefix, slot = deepInfraGateOwner, deepInfraEvidencePrefix, "funding-state/deepinfra/"+b.Targets[0].ResourceID
+		owner, prefix = deepInfraGateOwner, deepInfraEvidencePrefix
 	}
 	if action == "" {
 		return nil

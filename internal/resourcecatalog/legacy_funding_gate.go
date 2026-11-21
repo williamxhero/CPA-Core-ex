@@ -183,11 +183,7 @@ func (c *Catalog) legacyFundingReleasedLocked(group legacyFundingGroup) bool {
 		if after <= 0 {
 			return false
 		}
-		slot := "funding-state/" + target.ResourceID
-		if group.adapter == "deepinfra" {
-			slot = "funding-state/deepinfra/" + target.ResourceID
-		}
-		op := c.state.Gates.Operations[slot].Operation
+		op := c.state.Gates.Operations[fundingStateSlot(group.adapter, target.ResourceID)].Operation
 		fact := FundingGateDetails(op.Owner, op.EvidenceID)
 		if fact == nil || fact.Source != group.adapter || fact.ObservedAtMS <= after || op.Action != "clear" || len(op.Targets) != 1 ||
 			op.Targets[0] != target || op.Scope.InstanceID != scope.InstanceID || op.Scope.InstanceIncarnation != scope.InstanceIncarnation {

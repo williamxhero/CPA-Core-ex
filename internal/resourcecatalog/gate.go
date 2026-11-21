@@ -136,11 +136,7 @@ func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, err
 }
 
 func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResult, error) {
-	return c.applyGateWithFenceLocked(op, "", true)
-}
-
-func (c *Catalog) applyGateWithFenceLocked(op resource.GateOperation, fence string, change bool) (resource.GateResult, error) {
-	return c.applyGateWithPrivateFenceLocked(op, fence, change, "")
+	return c.applyGateWithPrivateFenceLocked(op, "", true, "")
 }
 
 func (c *Catalog) applyGateWithPrivateFenceLocked(op resource.GateOperation, fence string, change bool, privateRef string) (resource.GateResult, error) {
