@@ -91,6 +91,14 @@ func schedulingKnownTime(t time.Time) SchedulingTime {
 	return SchedulingTime{State: "known", At: &at}
 }
 
+func schedulingRefreshTime(a *Auth) SchedulingTime {
+	last, _ := authLastRefreshTimestamp(a)
+	if a.LastRefreshedAt.After(last) {
+		last = a.LastRefreshedAt
+	}
+	return schedulingKnownTime(last)
+}
+
 func cloneSchedulingRows(rows []SchedulingCandidateDecision) []SchedulingCandidateDecision {
 	out := append([]SchedulingCandidateDecision{}, rows...)
 	for i := range out {
@@ -137,11 +145,7 @@ func (m *Manager) schedulingView(mode, model string, candidates []scheduledCandi
 		if candidate.diagnosticQuota {
 			row.Reasons = appendSchedulingReason(row.Reasons, "credential_quota")
 		}
-		last, _ := authLastRefreshTimestamp(candidate.auth)
-		if candidate.auth.LastRefreshedAt.After(last) {
-			last = candidate.auth.LastRefreshedAt
-		}
-		row.Refresh = schedulingKnownTime(last)
+		row.Refresh = schedulingRefreshTime(candidate.auth)
 		recheck := candidate.diagnosticQuotaAt
 		if recheck.IsZero() {
 			recheck = candidate.retryAt

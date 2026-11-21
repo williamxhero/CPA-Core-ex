@@ -329,15 +329,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			}
 			return m.executeMixedOnce(ctx, normalized, req, opts, maxCredentials, round, retryLimit)
 		})
-		// Preserve transport provenance until the scoped HTTP boundary can
-		// redact the real response. Keep the SDK's legacy unwrapped error otherwise.
-		if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
-			err = unwrapExecutionBoundaryError(err)
-		}
-		if pinnedThread && err != nil && !isRequestStopError(err) {
-			err = claudeThreadReplayError(err)
-		}
-		return response, err
+		return response, scheduledExecutionBoundaryError(ctx, err, pinnedThread)
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
@@ -3252,4 +3244,14 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
 	}
 	return updated, nil
+}
+
+func scheduledExecutionBoundaryError(ctx context.Context, err error, pinnedThread bool) error {
+	if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
+		err = unwrapExecutionBoundaryError(err)
+	}
+	if pinnedThread && err != nil && !isRequestStopError(err) {
+		return claudeThreadReplayError(err)
+	}
+	return err
 }

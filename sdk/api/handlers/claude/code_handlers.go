@@ -630,7 +630,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	if msg != nil && msg.DirectResponse {
 		for key, values := range handlers.FilterUpstreamHeaders(msg.Headers) {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || handlers.IsRoutingCorrelationHeader(c, key) {
+			if len(values) == 0 || handlers.IsRoutingCorrelationHeader(c, key) {
 				continue
 			}
 			c.Writer.Header().Del(key)

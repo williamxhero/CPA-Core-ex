@@ -183,7 +183,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 
 func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
 	for key, values := range FilterUpstreamHeaders(msg.Headers) {
-		if len(values) == 0 || IsCPAReservedResponseHeader(key) || IsRoutingCorrelationHeader(c, key) {
+		if len(values) == 0 || IsRoutingCorrelationHeader(c, key) {
 			continue
 		}
 		c.Writer.Header().Del(key)

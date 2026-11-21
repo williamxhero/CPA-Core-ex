@@ -81,23 +81,10 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+	host, setupErr := h.pluginExecutorForExecution(ctx, modelName, execOptions.InternalSource)
+	if setupErr != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- externalExecutorSetupError(ctx, execOptions.InternalSource, coreauth.ExternalExecutorDisabledByHome(ctx, modelName))
-		close(errChan)
-		return nil, nil, errChan
-	}
-	if err := h.AuthManager.CheckProviderSchedulingUnboundExecution(ctx, modelName, pinnedAuthIDFromContext(ctx)); err != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- externalExecutorSetupError(ctx, execOptions.InternalSource, err)
-		close(errChan)
-		return nil, nil, errChan
-	}
-	host := h.pluginExecutorHost()
-	if host == nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		coreauth.RecordExternalExecutorRouting(ctx, "executor_not_available")
-		errChan <- externalExecutorSetupError(ctx, execOptions.InternalSource, &coreauth.Error{HTTPStatus: http.StatusBadGateway, Message: "plugin executor host is unavailable"})
+		errChan <- setupErr
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -425,7 +412,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	ctx = coreauth.WithRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		err = routingExecutionError(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
+		err = coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -625,7 +612,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(routingExecutionError(ctx, bootstrapStreamErr))
+			bootstrapErr = executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, bootstrapStreamErr))
 			break
 		}
 		if h.AuthManager != nil {
@@ -641,11 +628,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		bootstrapRetries++
 		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(routingExecutionError(ctx, bootstrapStreamErr))
+			originalBootstrapErr := executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, bootstrapStreamErr))
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
 			} else {
-				bootstrapErr = executionErrorMessage(routingExecutionError(ctx, enrichAuthSelectionError(retryErr, providers, normalizedModel)))
+				bootstrapErr = executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(retryErr, providers, normalizedModel)))
 			}
 			break
 		}
@@ -689,8 +676,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
-		// Publish the execution receipt before EOF reaches the HTTP consumer.
-		// Delivery tracking separately waits for that consumer after close.
 		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
@@ -777,7 +762,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return
 			}
 			if chunk.Err != nil {
-				errMsg := executionErrorMessage(routingExecutionError(ctx, chunk.Err))
+				errMsg := executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, chunk.Err))
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
 				completionErr = errMsg.Error

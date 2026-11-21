@@ -283,33 +283,27 @@ func (c *Catalog) InspectInference(b *resource.Binding, model string) (*resource
 func (c *Catalog) inspectInference(b *resource.Binding, model string, inspect bool) (*resource.QuotaGateEvidence, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var evidence *resource.QuotaGateEvidence
-	err := c.admitInferenceLocked(b, model, inspect, &evidence)
-	return evidence, err
-}
-
-func (c *Catalog) admitInferenceLocked(b *resource.Binding, model string, inspect bool, evidence **resource.QuotaGateEvidence) error {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
-		return ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	if !c.bindingLocked(b) {
 		// Preserve the original unknown-attribution fence for external owners.
 		// Native quota evidence covers a known subject and never expands that fence.
 		if !c.hasExternalGateLocked() {
-			return nil
+			return nil, nil
 		}
-		return ErrConflict
+		return nil, ErrConflict
 	}
 	required, released, err := c.legacyFundingAdmissionLocked(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if required && !released {
-		return ErrGateDenied
+		return nil, ErrGateDenied
 	}
 	parents, err := c.providerParentsLocked(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, g := range c.state.Gates.Gates {
 		if g.Model != "" && g.Model != model {
@@ -321,19 +315,20 @@ func (c *Catalog) admitInferenceLocked(b *resource.Binding, model string, inspec
 		if IsCoreQuotaGateOwner(g.Owner) {
 			if matchingCodexGateTarget(g, *b) {
 				if inspect {
-					*evidence, _ = QuotaGateDetails(g.Owner, g.EvidenceID)
+					evidence, _ := QuotaGateDetails(g.Owner, g.EvidenceID)
+					return evidence, ErrGateDenied
 				}
-				return ErrGateDenied
+				return nil, ErrGateDenied
 			}
 			continue
 		}
 		if g.Subject == "provider" {
 			applies, err := c.providerGateAppliesLocked(g, parents, b)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if applies {
-				return ErrGateDenied
+				return nil, ErrGateDenied
 			}
 			continue
 		}
@@ -343,12 +338,12 @@ func (c *Catalog) admitInferenceLocked(b *resource.Binding, model string, inspec
 		for _, gt := range g.Targets {
 			for _, t := range b.Targets {
 				if gt.ResourceID == t.ResourceID && sameGateLifecycle(gt, t) {
-					return ErrGateDenied
+					return nil, ErrGateDenied
 				}
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // BeginOwnedAuthSave serializes a local native store write with publication.

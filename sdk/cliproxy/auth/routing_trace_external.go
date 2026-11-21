@@ -22,11 +22,7 @@ func recordHomeRoutingStage(ctx context.Context, a *Auth, reason string) {
 			ResourceID: id, Family: schedulingDiagnosticFamily(a), Registered: true,
 			Recheck: schedulingKnownTime(time.Time{}),
 		}
-		last, _ := authLastRefreshTimestamp(a)
-		if a.LastRefreshedAt.After(last) {
-			last = a.LastRefreshedAt
-		}
-		row.Refresh = schedulingKnownTime(last)
+		row.Refresh = schedulingRefreshTime(a)
 		stage.Counts.Inventory, stage.Counts.Registered = 1, 1
 		switch reason {
 		case "":

@@ -120,33 +120,31 @@ func (m *Manager) appendSchedulingInventory(view *SchedulingDecision) {
 	if reader == nil {
 		return
 	}
-	snapshot, err := reader.snapshot()
-	if err != nil || !snapshot.Complete {
-		return
-	}
-	claimed := make(map[string]schedulingInventoryClaim, len(claims))
-	for _, c := range claims {
-		if c.id != "" {
-			claimed[c.id] = c
-		}
-	}
 	present := make(map[string]struct{}, len(view.Candidates))
 	for _, c := range view.Candidates {
 		if c.ResourceID != "" {
 			present[c.ResourceID] = struct{}{}
 		}
 	}
+	claimed := make(map[string]schedulingInventoryClaim, len(claims))
+	for _, claim := range claims {
+		if _, exists := present[claim.id]; claim.id != "" && !exists {
+			claimed[claim.id] = claim
+		}
+	}
+	if len(claimed) == 0 {
+		return
+	}
+	snapshot, err := reader.snapshot()
+	if err != nil || !snapshot.Complete {
+		return
+	}
 	for _, row := range snapshot.Resources {
 		if row.Kind != "credential" && row.Kind != "provider" {
 			continue
 		}
-		if _, exists := present[row.ResourceID]; exists {
-			continue
-		}
 		c, matched := claimed[row.ResourceID]
 		if !matched {
-			// Only show a route when a configured model claim exists; the
-			// catalog inventory alone does not advertise model membership.
 			continue
 		}
 		reasons := []string{"model_not_registered"}

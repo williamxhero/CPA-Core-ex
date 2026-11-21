@@ -98,8 +98,6 @@ func (m *Manager) StartRoutingTrace(ctx context.Context, requestedModel, routing
 	if !b.trace.CompareAndSwap(nil, t) {
 		return b.trace.Load().data.RequestID
 	}
-	// Global enforcement also applies when the server is explicitly open.
-	// Issue an error correlation ID there, but retain no diagnostic inventory.
 	if !t.collect {
 		return t.data.RequestID
 	}

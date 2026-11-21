@@ -84,7 +84,7 @@ func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []str
 	if m.providerSchedulingMode(ctx, model) == internalconfig.ProviderSchedulingShadow && wantsSchedulingDecision(ctx) {
 		view := SchedulingDecision{Mode: internalconfig.ProviderSchedulingShadow, Model: model, Proposal: "unobservable"}
 		if !m.HomeEnabled() {
-			view = m.schedulingSnapshot(ctx, providers, model, m.scheduleRequestOptions(cliproxyexecutor.Request{Model: model, Payload: opts.OriginalRequest}, opts), tried)
+			view = m.schedulingSnapshot(ctx, providers, model, m.scheduleRequestOptions(cliproxyexecutor.Request{Model: model}, opts), tried)
 		}
 		report = func(a *Auth) {
 			id, _ := schedulingResource(a)

@@ -23,7 +23,6 @@ func (m *Manager) scheduleRequestOptions(req cliproxyexecutor.Request, opts clip
 	r := schedulingRequirements{}
 	r.readPayload(req.Payload)
 	r.readPayload(opts.OriginalRequest)
-	// Selection may use a different public alias than the execution model.
 	r.reasoning = r.reasoning || thinking.ParseSuffix(req.Model).HasSuffix
 	opts.Metadata = cloneRequestMetadata(opts.Metadata)
 	opts.Metadata[schedulingRequirementsMetadata] = r
@@ -157,8 +156,12 @@ func (r schedulingRequirements) unsupported(info *registry.ModelInfo, opts clipr
 	return reasons
 }
 
-func (m *Manager) scheduledModelCapabilityReasons(a *Auth, model string, opts cliproxyexecutor.Options, infos []*registry.ModelInfo) []string {
+func (m *Manager) scheduledModelCapabilityReasons(a *Auth, model string, opts cliproxyexecutor.Options, reg *registry.ModelRegistry) []string {
 	req, _ := opts.Metadata[schedulingRequirementsMetadata].(schedulingRequirements)
+	if !req.tools && !req.image && !req.reasoning && !(opts.Stream && opts.SourceFormat == sdktranslator.FormatGemini) {
+		return nil
+	}
+	infos := reg.GetModelsForClient(a.ID)
 	candidates, _, _, routing := m.executionModelCandidatesWithAliasOrdered(a, model, false)
 	publicInfo := schedulingModelInfo(infos, model)
 	if publicInfo == nil {
@@ -171,13 +174,7 @@ func (m *Manager) scheduledModelCapabilityReasons(a *Auth, model string, opts cl
 			info = schedulingModelInfo(infos, upstream)
 		}
 		for _, reason := range req.unsupported(info, opts) {
-			seen := false
-			for _, v := range reasons {
-				seen = seen || v == reason
-			}
-			if !seen {
-				reasons = append(reasons, reason)
-			}
+			reasons = appendSchedulingReason(reasons, reason)
 		}
 	}
 	return reasons

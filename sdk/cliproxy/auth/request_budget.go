@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"sync"
@@ -177,12 +178,8 @@ func (b *requestBudget) credentialSnapshot() map[string]struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	out := make(map[string]struct{}, len(b.credentials)+len(b.routes))
-	for id := range b.credentials {
-		out[id] = struct{}{}
-	}
-	for route := range b.routes {
-		out[route] = struct{}{}
-	}
+	maps.Copy(out, b.credentials)
+	maps.Copy(out, b.routes)
 	return out
 }
 
@@ -225,14 +222,17 @@ func requestSentToCredential(ctx context.Context, id string) bool {
 // Marking just before handoff also closes the window between the reader
 // receiving output and the scheduler receiving the next failure.
 func RecordRequestStreamOutput(ctx context.Context, payload []byte) {
-	if streamPayloadCommitsOutput(payload) {
-		if b := requestBudgetFromContext(ctx); b != nil {
-			b.mu.Lock()
-			b.OutputCommitted = true
-			updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
-			b.mu.Unlock()
-		}
+	b := requestBudgetFromContext(ctx)
+	if b == nil {
+		return
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.OutputCommitted || !streamPayloadCommitsOutput(payload) {
+		return
+	}
+	b.OutputCommitted = true
+	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 }
 
 var errBudgetReplayUnsafe = &Error{Code: "replay_unsafe", Message: "request cannot be safely repeated", HTTPStatus: http.StatusBadGateway}
@@ -688,12 +688,7 @@ func (m *Manager) executeScheduledStream(ctx context.Context, providers []string
 		})
 	}
 	res, err := run(ctx, nil)
-	if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
-		err = unwrapExecutionBoundaryError(err)
-	}
-	if pinnedThread && err != nil && !isRequestStopError(err) {
-		err = claudeThreadReplayError(err)
-	}
+	err = scheduledExecutionBoundaryError(ctx, err, pinnedThread)
 	var bootstrapErr *streamBootstrapError
 	if errors.As(err, &bootstrapErr) {
 		return streamErrorResult(bootstrapErr.Headers(), err), nil

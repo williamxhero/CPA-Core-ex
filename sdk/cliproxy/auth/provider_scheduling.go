@@ -201,7 +201,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		} else {
 			c.reasons = append(c.reasons, schedulingProtocolReasons(a, opts)...)
 		}
-		c.reasons = append(c.reasons, m.scheduledModelCapabilityReasons(a, model, opts, reg.GetModelsForClient(a.ID))...)
+		c.reasons = append(c.reasons, m.scheduledModelCapabilityReasons(a, model, opts, reg)...)
 		if pin != "" && a.ID != pin {
 			c.reasons = append(c.reasons, "hard_binding")
 		}

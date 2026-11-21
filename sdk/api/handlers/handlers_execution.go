@@ -113,7 +113,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	ctx = coreauth.WithFreshRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		err = routingExecutionError(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
+		err = coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg
@@ -184,7 +184,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		err = routingExecutionError(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
+		err = coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg
@@ -200,16 +200,9 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-		return nil, nil, externalExecutorSetupError(ctx, execOptions.InternalSource, coreauth.ExternalExecutorDisabledByHome(ctx, modelName))
-	}
-	if err := h.AuthManager.CheckProviderSchedulingUnboundExecution(ctx, modelName, pinnedAuthIDFromContext(ctx)); err != nil {
-		return nil, nil, externalExecutorSetupError(ctx, execOptions.InternalSource, err)
-	}
-	host := h.pluginExecutorHost()
-	if host == nil {
-		coreauth.RecordExternalExecutorRouting(ctx, "executor_not_available")
-		return nil, nil, externalExecutorSetupError(ctx, execOptions.InternalSource, &coreauth.Error{HTTPStatus: http.StatusBadGateway, Message: "plugin executor host is unavailable"})
+	host, setupErr := h.pluginExecutorForExecution(ctx, modelName, execOptions.InternalSource)
+	if setupErr != nil {
+		return nil, nil, setupErr
 	}
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, false))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
