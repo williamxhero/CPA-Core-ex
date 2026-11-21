@@ -62,9 +62,15 @@ func (c *Catalog) BindConfiguredAuths(auths []*coreauth.Auth) error {
 // Repeated final-send admission must not reparse and bcrypt-hash the same
 // management password. The sealed current source/version is checked BEFORE
 // consulting this immutable invocation-independent synthesis projection.
+type legacyFundingConfig struct {
+	provider config.OpenAICompatibility
+	adapter  string
+}
+
 type configuredSourceProjection struct {
-	version resource.Version
-	auths   []*coreauth.Auth
+	legacyFunding map[string]legacyFundingConfig
+	version       resource.Version
+	auths         []*coreauth.Auth
 }
 
 func (c *Catalog) configuredAuthsLocked() ([]*coreauth.Auth, error) {
@@ -84,6 +90,16 @@ func (c *Catalog) configuredAuthsLocked() ([]*coreauth.Auth, error) {
 	if err != nil {
 		return nil, ErrUnavailable
 	}
-	c.configuredProjection = &configuredSourceProjection{version: version, auths: auths}
+	legacy := make(map[string]legacyFundingConfig)
+	for _, p := range cfg.OpenAICompatibility {
+		if adapter := cfg.NativeFundingAdapter(&p); adapter != "" {
+			for _, entry := range p.APIKeyEntries {
+				if entry.ResourceID != "" {
+					legacy[entry.ResourceID] = legacyFundingConfig{provider: p, adapter: adapter}
+				}
+			}
+		}
+	}
+	c.configuredProjection = &configuredSourceProjection{version: version, auths: auths, legacyFunding: legacy}
 	return auths, nil
 }

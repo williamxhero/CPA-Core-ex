@@ -262,11 +262,10 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		errResponse := fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
-		if isNonRetryableRefreshErr(errResponse) {
-			return nil, errResponse
+		if rejection := refreshGrantRejection(resp.StatusCode, body, resp.Header.Get("X-Request-ID")); rejection != nil {
+			return nil, rejection
 		}
-		return nil, &RefreshOutcomeUnknownError{Stage: "response-status", Cause: errResponse}
+		return nil, &RefreshOutcomeUnknownError{Stage: "response-status"}
 	}
 
 	var tokenResp struct {
@@ -374,6 +373,47 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
 }
 
+// refreshGrantRejection recognizes explicit OAuth grant failure codes. HTTP status
+// or prose alone does not establish that a grant was rejected.
+func refreshGrantRejection(status int, body []byte, requestID string) *OAuthError {
+	if status < 400 || status >= 500 || !ojson.ValidBytes(body) {
+		return nil
+	}
+	response := ojson.ParseBytes(body)
+	code := response.Get("error").String()
+	if response.Get("error").IsObject() {
+		code = response.Get("error.code").String()
+	} else if code == "invalid_grant" {
+		switch specificCode := response.Get("code").String(); specificCode {
+		case "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated", "token_revoked":
+			code = specificCode
+		}
+	}
+	switch code {
+	case "invalid_grant", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated", "token_revoked":
+		rejection := NewOAuthError(code, "", status)
+		rejection.requestID = safeOAuthRequestID(requestID)
+		return rejection
+	default:
+		return nil
+	}
+}
+
+// A provider request identifier is safe for correlation only in a recognized
+// opaque format; never retain arbitrary header or response text.
+func safeOAuthRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 4 || len(value) > 96 || !(strings.HasPrefix(value, "req_") || strings.HasPrefix(value, "req-")) {
+		return ""
+	}
+	for _, r := range value[4:] {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return ""
+		}
+	}
+	return value
+}
+
 func isNonRetryableRefreshErr(err error) bool {
 	if err == nil || IsRefreshPreSendError(err) {
 		return false
@@ -381,23 +421,8 @@ func isNonRetryableRefreshErr(err error) bool {
 	if IsRefreshOutcomeUnknown(err) {
 		return true
 	}
-	raw := strings.ToLower(err.Error())
-	for _, token := range []string{
-		"refresh_token_reused",
-		"refresh_token_expired",
-		"refresh_token_invalidated",
-		"token_revoked",
-		"invalid_grant",
-		"invalid_client",
-		"status 401",
-		"401 unauthorized",
-		"request failed (401)",
-	} {
-		if strings.Contains(raw, token) {
-			return true
-		}
-	}
-	return false
+	var rejection *OAuthError
+	return errors.As(err, &rejection)
 }
 
 // UpdateTokenStorage updates an existing CodexTokenStorage with new token data.

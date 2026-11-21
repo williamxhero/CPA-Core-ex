@@ -167,6 +167,12 @@ func (o *CodexAuth) requestSIWCToken(ctx context.Context, form url.Values, clien
 	}
 	if resp.StatusCode != http.StatusOK {
 		stage = "response-status"
+		if form.Get("grant_type") == "refresh_token" {
+			if rejection := refreshGrantRejection(resp.StatusCode, body, resp.Header.Get("X-Request-ID")); rejection != nil {
+				return nil, rejection
+			}
+			return nil, &RefreshOutcomeUnknownError{Stage: stage}
+		}
 		if requestID := strings.TrimSpace(resp.Header.Get("x-request-id")); requestID != "" {
 			return nil, fmt.Errorf("OpenAI OAuth token request failed (%d, request_id=%q): %s", resp.StatusCode, requestID, strings.TrimSpace(string(body)))
 		}

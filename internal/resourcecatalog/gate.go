@@ -113,6 +113,12 @@ func (c *Catalog) GateState() (resource.GateState, error) {
 		gates[i].Applicability = "current"
 		if !c.gateLifecyclesCurrentLocked([]resource.Gate{gates[i]}) {
 			gates[i].Applicability = "reconciliation_required"
+		} else if gates[i].Owner == legacyFundingOwner && len(gates[i].Targets) == 1 {
+			target := gates[i].Targets[0]
+			required, released, err := c.legacyFundingAdmissionLocked(&resource.Binding{Scope: c.versionLocked(), Targets: []resource.Target{target}})
+			if err == nil && required && released {
+				gates[i].Applicability = "rollback_guard"
+			}
 		}
 	}
 	return resource.GateState{Version: 1, Scope: c.versionLocked(), Revision: c.state.Gates.Revision, Ready: true, AllSourcesReady: c.gateLifecyclesCurrentLocked(gates), Gates: gates}, nil
@@ -123,10 +129,17 @@ func (c *Catalog) GateState() (resource.GateState, error) {
 func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if IsCoreAdmissionGateOwner(op.Owner) {
+		return resource.GateResult{}, ErrConflict
+	}
 	return c.applyGateLocked(op)
 }
 
 func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResult, error) {
+	return c.applyGateWithPrivateFenceLocked(op, "", true, "")
+}
+
+func (c *Catalog) applyGateWithPrivateFenceLocked(op resource.GateOperation, fence string, change bool, privateRef string) (resource.GateResult, error) {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateResult{}, ErrUnavailable
 	}
@@ -159,32 +172,44 @@ func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResul
 	var next diskState
 	_ = json.Unmarshal(raw, &next)
 	ledger := next.Gates
-	ledger.Revision++
-	// Provider reconciliation replaces only its own stable parent lineage.
-	// Credential pause/clear replaces any prior owner+model row on the same
-	// primary credential slot, including drifted incarnations and projection
-	// membership changes left after rotation or child delete.
-	filtered := []resource.Gate{}
-	for _, g := range ledger.Gates {
-		matching := g.Subject != "provider" && op.Subject == "credential" && sameGateCredentialSlot(g.Targets, targets)
-		if g.Subject == "provider" && op.Subject == "provider" && len(g.Targets) > 0 {
-			matching = sameProviderLineage(g.Targets[0], targets[0])
+	if change {
+		ledger.Revision++
+		// Provider reconciliation replaces only its own stable parent lineage.
+		// Credential pause/clear replaces any prior owner+model row on the same
+		// primary credential slot, including drifted incarnations and projection
+		// membership changes left after rotation or child delete.
+		filtered := []resource.Gate{}
+		for _, g := range ledger.Gates {
+			matching := g.Subject != "provider" && op.Subject == "credential" && sameGateCredentialSlot(g.Targets, targets)
+			if g.Subject == "provider" && op.Subject == "provider" && len(g.Targets) > 0 {
+				matching = sameProviderLineage(g.Targets[0], targets[0])
+			}
+			if g.Owner == op.Owner && g.Model == op.Model && matching {
+				continue
+			}
+			filtered = append(filtered, g)
 		}
-		if g.Owner == op.Owner && g.Model == op.Model && matching {
-			continue
+		ledger.Gates = filtered
+		if op.Action == "pause" {
+			subject := ""
+			if op.Subject == "provider" {
+				subject = "provider"
+			}
+			ledger.Gates = append(ledger.Gates, resource.Gate{Subject: subject, Targets: append([]resource.Target(nil), targets...), Owner: op.Owner, Model: op.Model, Reason: op.Reason, EvidenceID: op.EvidenceID, SourceVersion: op.SourceVersion, Revision: ledger.Revision})
 		}
-		filtered = append(filtered, g)
-	}
-	ledger.Gates = filtered
-	if op.Action == "pause" {
-		subject := ""
-		if op.Subject == "provider" {
-			subject = "provider"
-		}
-		ledger.Gates = append(ledger.Gates, resource.Gate{Subject: subject, Targets: append([]resource.Target(nil), targets...), Owner: op.Owner, Model: op.Model, Reason: op.Reason, EvidenceID: op.EvidenceID, SourceVersion: op.SourceVersion, Revision: ledger.Revision})
 	}
 	result := resource.GateResult{Version: 1, OpID: op.OpID, Status: "applied", Revision: ledger.Revision, DurableRevision: ledger.Revision, AppliedRevision: ledger.Revision, Durable: true, Applied: true}
-	ledger.Operations[op.OpID] = gateReceipt{Operation: op, Result: result}
+	if change {
+		ledger.Operations[op.OpID] = gateReceipt{Operation: op, Result: result}
+	}
+	if fence != "" {
+		private := op
+		if privateRef != "" {
+			// The non-UUID private fence cannot be looked up through management.
+			private.AuthIndex = privateRef
+		}
+		ledger.Operations[fence] = gateReceipt{Operation: private, Result: result}
+	}
 	next.GateSeal = sealValue(c.key, ledger)
 	raw, _ = json.Marshal(&next)
 	values, errValues := sourceContentValues(c.configPath, c.authDir, c.key)
@@ -232,6 +257,9 @@ func (c *Catalog) GateOperation(id string) (resource.GateOperation, resource.Gat
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateOperation{}, resource.GateResult{}, ErrUnavailable
 	}
+	if !validID(id) {
+		return resource.GateOperation{}, resource.GateResult{}, os.ErrNotExist
+	}
 	r, ok := c.state.Gates.Operations[id]
 	if !ok {
 		return resource.GateOperation{}, resource.GateResult{}, os.ErrNotExist
@@ -248,13 +276,19 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		return ErrUnavailable
 	}
 	if !c.bindingLocked(b) {
-		// Unsupported/unbound sources retain legacy routing only when the verified
-		// durable owner set is EMPTY. This is never a positive protection capability.
-		// Once any restriction exists, unknown attribution cannot bypass it.
-		if len(c.state.Gates.Gates) == 0 {
+		// Preserve the original unknown-attribution fence for external owners.
+		// Native quota evidence covers a known subject and never expands that fence.
+		if !c.hasExternalGateLocked() {
 			return nil
 		}
 		return ErrConflict
+	}
+	required, released, err := c.legacyFundingAdmissionLocked(b)
+	if err != nil {
+		return err
+	}
+	if required && !released {
+		return ErrGateDenied
 	}
 	parents, err := c.providerParentsLocked(b)
 	if err != nil {
@@ -262,6 +296,15 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 	}
 	for _, g := range c.state.Gates.Gates {
 		if g.Model != "" && g.Model != model {
+			continue
+		}
+		if g.Owner == legacyFundingOwner && released {
+			continue
+		}
+		if IsCoreQuotaGateOwner(g.Owner) {
+			if matchingCodexGateTarget(g, *b) {
+				return ErrGateDenied
+			}
 			continue
 		}
 		if g.Subject == "provider" {
@@ -466,22 +509,26 @@ func (c *Catalog) GateRefreshContinuity(previous, current resource.Binding) (boo
 	if !c.bindingLocked(&current) {
 		return false, ErrConflict
 	}
+	return c.gateRefreshContinuityLocked(previous, current), nil
+}
+
+// gateRefreshContinuityLocked uses the sealed edges after the caller has
+// verified the ledger and the current binding.
+func (c *Catalog) gateRefreshContinuityLocked(previous, current resource.Binding) bool {
 	if previous.Scope.InstanceID != c.state.InstanceID || previous.Scope.InstanceIncarnation != c.state.InstanceIncarnation || len(previous.Targets) == 0 {
-		return false, nil
+		return false
 	}
 	cursor := previous.Targets
-	traversed := false
 	for _, edge := range c.state.Gates.Refreshes {
 		if edge.From.Scope.InstanceID != previous.Scope.InstanceID || edge.From.Scope.InstanceIncarnation != previous.Scope.InstanceIncarnation || !gateRefreshConfigurationForward(cursor, edge.From.Targets) {
 			continue
 		}
 		cursor = edge.To
-		traversed = true
 		if gateRefreshConfigurationForward(cursor, current.Targets) {
-			return traversed, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // Configuration versions do not rotate the credential's sealed lifecycle.

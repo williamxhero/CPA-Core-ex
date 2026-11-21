@@ -378,7 +378,8 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 	out := make([]*coreauth.Auth, 0)
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
-		if compat.Disabled || compat.AutoHeld {
+		nativeFunding := cfg.NativeFundingAdapter(compat) != ""
+		if compat.Disabled || (compat.AutoHeld && !nativeFunding) {
 			continue
 		}
 		prefix := strings.TrimSpace(compat.Prefix)
@@ -428,6 +429,12 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			applyResourceBinding(entry.ResourceID, compat.ResourceID, attrs)
+			if nativeFunding {
+				attrs[coreauth.AttributeNativeFunding] = "true"
+				if compat.AutoHeld {
+					attrs[coreauth.AttributeLegacyFundingHold] = "true"
+				}
+			}
 			a := &coreauth.Auth{
 				ID:                  id,
 				Provider:            internalProviderKey,

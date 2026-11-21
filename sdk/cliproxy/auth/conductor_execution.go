@@ -1152,7 +1152,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 		if errPick == nil {
 			updateInFlightScopeProvider(ctx, provider)
 		}
@@ -1378,7 +1378,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			pickOpts = withHomeAuthCount(pickOpts, homeAuthCount)
 			pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		}
-		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+		auth, executor, provider, errPick := m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 		if errPick == nil {
 			updateInFlightScopeProvider(ctx, provider)
 		}
@@ -1648,7 +1648,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				provider = selection.Provider
 			}
 		} else {
-			auth, executor, provider, errPick = m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
+			auth, executor, provider, errPick = m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 			if errPick == nil {
 				updateInFlightScopeProvider(ctx, provider)
 			}
@@ -2947,6 +2947,9 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	}
 	if auth.RequiresSignIn {
 		return auth, &Error{Code: "sign_in_required", Message: "credential requires sign-in before inference verification", HTTPStatus: http.StatusConflict}
+	}
+	if auth.RequiresCredentialRecovery() && !auth.HasValidAccessToken(time.Now()) {
+		return auth, &Error{Code: "credential_recovery_needed", Message: "credential recovery is needed before inference verification", HTTPStatus: http.StatusConflict}
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	m.mu.RLock()

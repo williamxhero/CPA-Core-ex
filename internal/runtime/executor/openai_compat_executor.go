@@ -1359,16 +1359,17 @@ func openAICompatStreamDataError(payload []byte, eventName string) (statusErr, b
 }
 
 type statusErr struct {
-	code               int
-	msg                string
-	retryAfter         *time.Duration
-	credentialScoped   bool
-	streamTruncated    bool
-	transientRateLimit bool
-	transientTransport bool
-	tosViolation       bool
-	tosAppealURL       string
-	tosAppealURLText   string
+	code                int
+	msg                 string
+	retryAfter          *time.Duration
+	credentialScoped    bool
+	streamTruncated     bool
+	transientRateLimit  bool
+	transientTransport  bool
+	persistentQuotaGate bool
+	tosViolation        bool
+	tosAppealURL        string
+	tosAppealURLText    string
 	// diagnostic is a content-free detail for logs only; it never reaches clients.
 	diagnostic string
 }
@@ -1422,6 +1423,9 @@ func (e statusErr) TOSAppealMetadata() map[string]string {
 func (e statusErr) ErrorCode() string {
 	if e.tosViolation {
 		return "tos_violation"
+	}
+	if e.persistentQuotaGate {
+		return cliproxyauth.ErrorCodePersistentQuotaGate
 	}
 	if e.transientTransport {
 		return cliproxyauth.ErrorCodeTransientTransport

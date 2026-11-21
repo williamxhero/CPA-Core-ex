@@ -7,7 +7,7 @@
 Core 负责请求路由、协议转换、凭证选择与推理门禁。配合 CPA-Manager-Plus-ex 管理配置，配合 CPA-Usage-Keeper-ex 保存用量。
 
 - 配置入口：[config.example.yaml](config.example.yaml)。完整上游说明见 [README-source.md](README-source.md)。
-- 额度耗尽自动停止独立于冷却开关：启用自动启停后，首次确认凭证额度耗尽就提交停止状态；普通限流沿用重试策略。
+- 已确认的额度或余额耗尽由 Core 自动暂停：只阻断证据覆盖的接入、模型或钱包成员；后台拿到同一范围的最新有效证据才恢复。普通限流和运营低余额保护仍分别处理。
 - 流恢复以正文输出为边界；正文输出前可以切换凭证，正文输出后保留原错误，避免重复输出。
 
 需要 Go 1.26 或更高。在仓库根目录执行：
@@ -27,6 +27,7 @@ go build -o cli-proxy-api.exe ./cmd/server
 - **资源目录与身份围栏**：上游缺少一套贯穿资源发现、凭证主体和实际请求的身份绑定。本 fork 建立资源目录、能力协商和身份围栏，让额度查询、刷新和请求都只能使用当前已登记的真实来源。对应 [issue #23](https://github.com/williamxhero/CPA-Core-ex/issues/23)。
 - **Provider 推理门禁与成员密钥核对**：上游对“哪个成员、哪把密钥、哪个 Provider”之间的对应关系验证不足。本 fork 在运行前校验成员与密钥匹配，并以门禁和路由权威阻止未确认的推理来源进入请求链。
 - **原生凭证额度与 Credits 观测**：上游额度接口难以稳定表达选定凭证的滚动/周期窗口。本 fork 提供选定凭证的额度查询，接入 Qwen Coding Plan 的真实月度窗口，并把 Codex Credits 随同额度观测返回，避免用缺失窗口伪造零值。
+- **按实际范围保护可用额度和余额**：已验证的 Codex 窗口和充值额度、DeepSeek 精确余额、DeepInfra 已验证的共享钱包分别按证据范围暂停。新鲜正向结果只解除对应原因；未覆盖的来源保留原有显示和保护，不用推理试余额。对应父项目 [#58](https://github.com/williamxhero/CPA/issues/58)。
 - **官方 OpenAI 路由与模型参数兼容**：上游官方 API provider 可能因错误 executor、过期资源身份和较低优先级而根本没有被请求；`gpt-6.1-sol` 也要求 `max_completion_tokens` 而不是 `max_tokens`。本 fork 将 `api-wxh` 纳入 OpenAI-compatible 路由、重建有效资源身份并修正最终参数。参数兼容对应 [issue #24](https://github.com/williamxhero/CPA-Core-ex/issues/24)，资源身份问题由本节第一条归档。
 - **reasoning effort 可追溯用量**：上游用量记录无法区分“客户端未指定 effort”和“数据在翻译阶段丢失”。本 fork 用 `auto` 表示未指定、保留 `none` 和具体 effort，并防止上游响应覆盖客户端已选值。对应 [issue #25](https://github.com/williamxhero/CPA-Core-ex/issues/25)。
 - **容量错误与未完成流的内部恢复**：上游遇到容量错误或流在传输中断时通常直接把失败交给客户端。本 fork 在 Core 内对可重试的容量失败和未完成流进行有界重试，同时保留顺序、取消和最终错误语义。对应 [issue #1](https://github.com/williamxhero/CPA-Core-ex/issues/1)、[#26](https://github.com/williamxhero/CPA-Core-ex/issues/26)、[#27](https://github.com/williamxhero/CPA-Core-ex/issues/27) 和 [#29](https://github.com/williamxhero/CPA-Core-ex/issues/29)。

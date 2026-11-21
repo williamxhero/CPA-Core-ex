@@ -5,7 +5,6 @@ package credentialquota
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -16,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -92,7 +92,11 @@ func freshWindows(obs *resource.QuotaObservation) {
 	obs.RecoveryEligible = obs.QueryStatus == "success" && obs.Complete && obs.AccountProvenance != "unverified"
 	for _, w := range obs.Windows {
 		reset, e := time.Parse(time.RFC3339Nano, w.ResetAt)
-		if e != nil || !reset.After(time.Now()) || w.RemainingFraction <= 0 || w.SourceStatus == "rate-limited" {
+		hasRemaining := w.RemainingFraction > 0
+		if obs.Protocol == "codex-oauth-wham" {
+			hasRemaining = w.CodexUsage == resource.CodexWindowUsageBelowLimit
+		}
+		if e != nil || !reset.After(time.Now()) || !hasRemaining || w.SourceStatus == "rate-limited" {
 			obs.RecoveryEligible = false
 		}
 	}
@@ -128,13 +132,13 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 			RateLimit *codexLimit `json:"rate_limit"`
 		} `json:"additional_rate_limits"`
 	}
-	if json.Unmarshal(data, &root) != nil || root.RateLimit == nil {
+	if !unambiguousQuotaReading(data) || json.Unmarshal(data, &root) != nil || root.RateLimit == nil {
 		obs.QueryStatus = "parse_error"
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 		return obs
 	}
 	obs.Complete = true
-	appendLimit := func(limit *codexLimit, model string) bool {
+	appendLimit := func(limit *codexLimit, model, limitName string) bool {
 		if limit == nil || limit.Allowed == nil || limit.Reached == nil {
 			return false
 		}
@@ -147,24 +151,28 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 				continue
 			}
 			w := v.window
-			if w.Used == nil || !finitePercent(*w.Used) || w.Reset == nil || *w.Reset <= 0 || *w.Reset > 253402300799 || w.Seconds == nil || *w.Seconds <= 0 {
+			usage, used, remaining := ParseCodexUsedPercent(string(w.Used))
+			if usage == resource.CodexWindowUsageUnknown || w.Reset == nil || *w.Reset <= 0 || *w.Reset > 253402300799 || w.Seconds == nil || *w.Seconds <= 0 {
 				return false
 			}
 			status := "allowed"
-			remaining := 1 - *w.Used/100
 			if !*limit.Allowed || *limit.Reached {
 				status = "rate-limited"
 				remaining = 0
 			}
-			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, UsedPercent: *w.Used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
+			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, LimitName: limitName, CodexUsage: usage, UsedPercent: used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
 		}
 		return true
 	}
-	if !appendLimit(root.RateLimit, "") {
+	if !appendLimit(root.RateLimit, "", "") {
 		obs.QueryStatus = "parse_error"
 	}
 	for _, a := range root.Additional {
-		if len(a.Model) > 128 || len(a.Name) > 128 || !appendLimit(a.RateLimit, a.Model) {
+		limitName := ""
+		if a.Model == resource.CodexSparkLimit && a.Name == resource.CodexSparkLimitName {
+			limitName = resource.CodexSparkLimitName
+		}
+		if len(a.Model) > 128 || len(a.Name) > 128 || !appendLimit(a.RateLimit, a.Model, limitName) {
 			obs.QueryStatus = "parse_error"
 		}
 	}
@@ -176,11 +184,33 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 		obs.Complete = false
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 	} else {
+		obs.StandardOnlyNoCredits = codexStandardOnlyNoCredits(data)
+		obs.StandardPaidFunding = codexStandardPaidFunding(data)
 		obs.Credits = codexCreditsFromUsage(data)
 		obs.ResetCredits = codexResetCreditsFromUsage(data)
 	}
 	freshWindows(&obs)
 	return obs
+}
+
+// Only explicit absence of any independent limits and an exact depleted
+// wallet may corroborate a standard plan rejection as account-wide.
+func codexStandardOnlyNoCredits(data []byte) bool {
+	var root struct {
+		Additional *[]json.RawMessage `json:"additional_rate_limits"`
+		Credits    *struct {
+			Has       *bool           `json:"has_credits"`
+			Unlimited *bool           `json:"unlimited"`
+			Balance   json.RawMessage `json:"balance"`
+		} `json:"credits"`
+	}
+	if json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
+		root.Credits == nil || root.Credits.Has == nil || *root.Credits.Has ||
+		root.Credits.Unlimited == nil || *root.Credits.Unlimited {
+		return false
+	}
+	whole, fraction, hasFraction := strings.Cut(creditBalanceText(root.Credits.Balance), ".")
+	return whole == "0" && (!hasFraction || fraction != "" && strings.Trim(fraction, "0") == "")
 }
 
 // codexResetCreditsFromUsage reads the one-time rate-limit reset allowance that
@@ -250,9 +280,9 @@ func creditBalanceText(raw json.RawMessage) string {
 }
 
 type codexWindow struct {
-	Used    *float64 `json:"used_percent"`
-	Reset   *int64   `json:"reset_at"`
-	Seconds *int64   `json:"limit_window_seconds"`
+	Used    json.RawMessage `json:"used_percent"`
+	Reset   *int64          `json:"reset_at"`
+	Seconds *int64          `json:"limit_window_seconds"`
 }
 type codexLimit struct {
 	Allowed   *bool        `json:"allowed"`

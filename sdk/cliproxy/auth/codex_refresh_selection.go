@@ -28,8 +28,7 @@ func refreshAccessError(auth *Auth, message string, accessTokenRejected, wasTerm
 // codexRefreshMissingAccessForRequest keeps model-level availability from
 // admitting a missing token while its grant still requires recovery.
 func codexRefreshMissingAccessForRequest(ctx context.Context, auth *Auth, headers ...http.Header) bool {
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || !auth.RequiresSignIn ||
-		auth.RefreshError == nil || auth.RefreshError.Code != "refresh_outcome_unknown" {
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") || !auth.RequiresCredentialRecovery() {
 		return false
 	}
 	return authAccessTokenForRequest(ctx, auth, headers...) == ""
@@ -39,7 +38,7 @@ func codexRefreshMissingAccessForRequest(ctx context.Context, auth *Auth, header
 // while SIWC requires recovery. Ordinary cooldowns and model failures still apply.
 func codexRefreshUnavailableForRequest(ctx context.Context, auth *Auth, now time.Time, headers ...http.Header) bool {
 	if !auth.Unavailable || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") ||
-		auth.LastError == nil || auth.LastError.Code != "refresh_outcome_unknown" || !auth.RequiresSignIn ||
+		auth.LastError == nil || auth.LastError.Code != "refresh_outcome_unknown" || !auth.RequiresCredentialRecovery() ||
 		!IsCodexUseSIWC(auth) || IsCodexUseSIWCForRequest(ctx, auth, headers...) || auth.NextRetryAfter.After(now) ||
 		auth.RejectedSIWCRefreshToken == "" || auth.RejectedSIWCRefreshToken != authSIWCTokenField(auth, "refresh_token") {
 		return auth.Unavailable

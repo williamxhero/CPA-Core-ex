@@ -83,7 +83,7 @@ func (c *Catalog) SetQuotaAutoStop(p QuotaAutoStop) error {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return ErrUnavailable
 	}
-	if p.Version != 1 || p.Subject != "credential" || p.AuthIndex == "" || !validSeal(p.SourceVersion) || !gateReference.MatchString(p.Owner) || p.Generation < 1 || p.Generation >= 9007199254740991 || len(p.Targets) == 0 || len(p.Targets) > 64 {
+	if IsCoreAdmissionGateOwner(p.Owner) || p.Version != 1 || p.Subject != "credential" || p.AuthIndex == "" || !validSeal(p.SourceVersion) || !gateReference.MatchString(p.Owner) || p.Generation < 1 || p.Generation >= 9007199254740991 || len(p.Targets) == 0 || len(p.Targets) > 64 {
 		return ErrConflict
 	}
 	entries := append([]quotaAutoStopEntry(nil), c.quotaAutoStops...)
@@ -179,6 +179,9 @@ func (c *Catalog) ApplyObservedGate(op resource.GateOperation, observedAtMS int6
 	defer c.mu.Unlock()
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateResult{}, ErrUnavailable
+	}
+	if IsCoreAdmissionGateOwner(op.Owner) {
+		return resource.GateResult{}, ErrConflict
 	}
 	if _, exists := c.state.Gates.Operations[op.OpID]; !exists && op.Action == "clear" && !manual {
 		for _, entry := range c.quotaAutoStops {

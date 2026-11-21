@@ -23,7 +23,10 @@ func (h *Handler) initializeResourceCatalog() {
 				return resourcecatalog.ErrUnavailable
 			}
 			current := h.currentRuntimeSource(a)
-			if current == nil {
+			if current == nil || current.ResourceIdentity == nil {
+				if a.Attributes[coreauth.AttributeLegacyFundingHold] == "true" {
+					return resourcecatalog.ErrGateDenied
+				}
 				return h.resourceCatalog.AdmitInference(nil, model)
 			}
 			return h.resourceCatalog.AdmitInference(current.ResourceIdentity, model)
@@ -43,6 +46,7 @@ func (h *Handler) initializeResourceCatalog() {
 	}
 	h.resourceCatalog = catalog
 	h.authManager.SetQuotaExhaustionObserver(h.observeQuotaExhaustion)
+	h.authManager.SetCodexQuotaRejectionObserver(h.observeCodexQuotaRejection)
 	h.authManager.SetSourceIdentityOwnedSave(catalog)
 	if store, ok := h.authManager.Storage().(*sdkAuth.FileTokenStore); ok {
 		store.SetSourceIdentityBinder(catalog)

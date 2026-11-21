@@ -24,7 +24,7 @@ func TestCodexUnknownSIWCRefreshKeepsHealthyOuterAccess(t *testing.T) {
 		t.Fatalf("refresh outcome = %v, want unknown", errRefresh)
 	}
 	base, ok := manager.GetByID(auth.ID)
-	if !ok || !base.RequiresSignIn || !base.Unavailable || base.RejectedSIWCRefreshToken != "siwc-refresh" {
+	if !ok || base.RequiresSignIn || !base.RequiresCredentialRecovery() || !base.Unavailable || base.RejectedSIWCRefreshToken != "siwc-refresh" {
 		t.Fatalf("SIWC recovery state was not retained: %#v", base)
 	}
 	for _, tc := range []struct {
@@ -143,7 +143,7 @@ func TestCodexPartialRefreshKeepsUnknownSelectedPartitionBlocked(t *testing.T) {
 				t.Fatal(errRefresh)
 			}
 			current, _ := manager.GetByID(auth.ID)
-			if !current.Unavailable || !current.RequiresSignIn || current.LastError == nil || current.LastError.Code != "refresh_outcome_unknown" {
+			if !current.Unavailable || current.RequiresSignIn || !current.RequiresCredentialRecovery() || current.LastError == nil || current.LastError.Code != "refresh_outcome_unknown" {
 				t.Fatalf("partial refresh lost the unresolved selected partition: unavailable=%v sign_in=%v last_error=%#v refresh_error=%#v", current.Unavailable, current.RequiresSignIn, current.LastError, current.RefreshError)
 			}
 			if blocked, _, _ := isAuthBlockedForModelForRequest(context.Background(), current, "model", now); !blocked {
@@ -161,7 +161,7 @@ func TestCodexMissingRecoveryAccessBlocksBeforeHealthyModelState(t *testing.T) {
 	now := time.Now()
 	for _, useSIWC := range []bool{false, true} {
 		for _, unavailable := range []bool{false, true} {
-			auth := &Auth{Provider: "codex", Status: StatusError, RequiresSignIn: true, Unavailable: unavailable,
+			auth := &Auth{Provider: "codex", Status: StatusError, Unavailable: unavailable,
 				RefreshError: &Error{Code: "refresh_outcome_unknown"},
 				Metadata: map[string]any{
 					"refresh_token": "outer-refresh", "use_siwc": useSIWC,
@@ -210,7 +210,6 @@ func TestCodexUnknownDiagnostic401UsesPriorUnauthorizedState(t *testing.T) {
 						"access_token": "outer-valid", "expired": now.Add(time.Hour).Format(time.RFC3339), "use_siwc": true, "siwc": siwc,
 					}}
 					if mode == "cached" {
-						auth.RequiresSignIn = true
 						auth.RejectedSIWCRefreshToken = "siwc-refresh"
 						auth.RefreshError = &Error{Code: "refresh_outcome_unknown", Message: outcome.Error(), HTTPStatus: http.StatusUnauthorized}
 						auth.LastError = &Error{Code: "unauthorized", Message: outcome.Error(), HTTPStatus: http.StatusUnauthorized}
@@ -234,7 +233,7 @@ func TestCodexUnknownDiagnostic401UsesPriorUnauthorizedState(t *testing.T) {
 						}
 					}
 					current, _ := manager.GetByID(auth.ID)
-					if executor.RefreshCalls() != wantCalls || current.RefreshError == nil || current.RefreshError.Code != "refresh_outcome_unknown" || !current.RequiresSignIn {
+					if executor.RefreshCalls() != wantCalls || current.RefreshError == nil || current.RefreshError.Code != "refresh_outcome_unknown" || current.RequiresSignIn || !current.RequiresCredentialRecovery() {
 						t.Fatalf("recovery state or replay protection changed: calls=%d refresh_error=%#v", executor.RefreshCalls(), current.RefreshError)
 					}
 					if priorUnauthorized {

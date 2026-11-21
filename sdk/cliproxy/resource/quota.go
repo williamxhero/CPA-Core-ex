@@ -23,14 +23,28 @@ type QuotaQuery struct {
 	TimeoutMS     int64  `json:"timeoutMs,omitempty"`
 }
 
+// CodexWindowUsage records the exact relationship to the native 100% limit.
+type CodexWindowUsage uint8
+
+const (
+	CodexWindowUsageUnknown CodexWindowUsage = iota
+	CodexWindowUsageBelowLimit
+	CodexWindowUsageAtLimit
+)
+
 type QuotaWindow struct {
 	Name               string  `json:"name"`
 	Model              string  `json:"model,omitempty"`
+	LimitName          string  `json:"limitName,omitempty"`
 	UsedPercent        float64 `json:"usedPercent"`
 	RemainingFraction  float64 `json:"remainingFraction"`
 	ResetAt            string  `json:"resetAt,omitempty"`
 	SourceStatus       string  `json:"sourceStatus,omitempty"`
 	LimitWindowSeconds int64   `json:"limitWindowSeconds,omitempty"`
+
+	// CodexUsage is set only by the host's official usage read. The public
+	// floats above are for display and may round across the exhaustion boundary.
+	CodexUsage CodexWindowUsage `json:"-"`
 }
 
 // QuotaCredits is the Codex wallet observed with the same usage read.
@@ -54,19 +68,24 @@ type QuotaResetCredits struct {
 // QuotaObservation never includes account IDs, tokens, raw responses or gate ACKs.
 type QuotaObservation struct {
 	Binding
-	SourceVersion       string        `json:"sourceVersion"`
-	ProtocolVersion     int           `json:"protocolVersion"`
-	TimestampProvenance string        `json:"timestampProvenance"`
-	ReceivedAtMS        int64         `json:"receivedAtMs"`
-	Protocol            string        `json:"protocol"`
-	QueryStatus         string        `json:"queryStatus"`
-	ErrorCode           string        `json:"errorCode,omitempty"`
-	ObservedAtMS        int64         `json:"observedAtMs"`
-	Windows             []QuotaWindow `json:"windows,omitempty"`
-	Credits             *QuotaCredits `json:"credits,omitempty"`
+	// StandardOnlyNoCredits requires explicit upstream shape and exact zero.
+	// It is host-internal and omitted from the observation response.
+	StandardOnlyNoCredits bool          `json:"-"`
+	StandardPaidFunding   bool          `json:"-"`
+	SourceVersion         string        `json:"sourceVersion"`
+	ProtocolVersion       int           `json:"protocolVersion"`
+	TimestampProvenance   string        `json:"timestampProvenance"`
+	ReceivedAtMS          int64         `json:"receivedAtMs"`
+	Protocol              string        `json:"protocol"`
+	QueryStatus           string        `json:"queryStatus"`
+	ErrorCode             string        `json:"errorCode,omitempty"`
+	ObservedAtMS          int64         `json:"observedAtMs"`
+	Windows               []QuotaWindow `json:"windows,omitempty"`
+	Credits               *QuotaCredits `json:"credits,omitempty"`
 	// ResetCredits is Codex-only and absent when the usage read omitted it.
-	ResetCredits      *QuotaResetCredits `json:"resetCredits,omitempty"`
-	Complete          bool               `json:"complete"`
-	AccountProvenance string             `json:"accountProvenance"`
-	RecoveryEligible  bool               `json:"recoveryEligible"`
+	ResetCredits        *QuotaResetCredits  `json:"resetCredits,omitempty"`
+	Complete            bool                `json:"complete"`
+	AccountProvenance   string              `json:"accountProvenance"`
+	RecoveryEligible    bool                `json:"recoveryEligible"`
+	ClearedQuotaWindows []QuotaGateEvidence `json:"clearedQuotaWindows,omitempty"`
 }

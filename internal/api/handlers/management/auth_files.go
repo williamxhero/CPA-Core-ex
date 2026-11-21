@@ -913,6 +913,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		if !auth.NextRefreshAfter.IsZero() && auth.NextRefreshAfter.After(nowUTC) {
 			entry["next_refresh_after"] = auth.NextRefreshAfter.UTC().Format(time.RFC3339)
 		}
+		if next, ok := h.authManager.NextCredentialRenewalCheck(auth); ok {
+			entry["next_renewal_check_at"] = next.UTC().Format(time.RFC3339)
+		}
 		entry["requires_sign_in"] = auth.RequiresSignIn
 		if statusMessage != "" {
 			entry["status_message"] = coreauth.SanitizeRenewalMessage(statusMessage)
@@ -920,7 +923,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		entry["renewal_state"] = auth.RenewalStateAt(nowUTC)
 		recoveryStage := auth.RecoveryStageAt(nowUTC)
 		entry["recovery_stage"] = recoveryStage
-		entry["quota_blocked"] = recoveryStage == coreauth.RecoveryStageQuotaBlocked
+		entry["quota_blocked"] = auth.HasActiveQuotaBlock(nowUTC)
 		entry["adopted"] = !auth.AdoptedAt.IsZero() || auth.CredentialVersion > 0
 		if !auth.AdoptedAt.IsZero() {
 			entry["adopted_at"] = auth.AdoptedAt.UTC().Format(time.RFC3339)
@@ -936,29 +939,32 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		if auth.RefreshError != nil {
 			entry["refresh_error"] = gin.H{
 				"code":        auth.RefreshError.Code,
-				"message":     auth.RefreshError.Message,
+				"message":     auth.RefreshError.Code,
 				"http_status": auth.RefreshError.HTTPStatus,
 			}
+		}
+		if auth.ConsecutiveRenewalFailures >= 2 {
+			entry["renewal_warning"] = "repeated_refresh_failures"
 		}
 		if auth.RequiresSignIn {
 			entry["next_action"] = "sign_in"
 			entry["recovery_hint"] = "Re-authenticate this account on this proxy instance via OAuth login; signing in on another machine or a client's separate direct login does not update this instance."
 			event := gin.H{
 				"type":        "renewal_sign_in_required",
-				"auth_id":     auth.ID,
-				"provider":    strings.TrimSpace(auth.Provider),
 				"next_action": "sign_in",
 			}
 			if !auth.RenewalEventAt.IsZero() {
 				event["occurred_at"] = auth.RenewalEventAt.UTC().Format(time.RFC3339)
 			}
-			if email := authEmail(auth); email != "" {
-				event["account"] = email
-			}
 			if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.Unix() > 0 {
 				event["access_token_expires_at"] = exp.UTC().Format(time.RFC3339)
 			}
 			entry["renewal_event"] = event
+		} else if auth.RequiresCredentialRecovery() {
+			entry["next_action"] = "recover_credential"
+			entry["recovery_hint"] = "The OAuth refresh result was not confirmed. Recover the credential before retrying the exchange."
+		} else if auth.RefreshError != nil {
+			entry["next_action"] = "retry"
 		}
 	}
 	if quota.v8 && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {

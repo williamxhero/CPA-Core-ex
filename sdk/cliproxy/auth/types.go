@@ -121,7 +121,7 @@ type Auth struct {
 	RejectedAccessToken string `json:"-"`
 	// RejectedSIWCAccessToken tracks the nested SIWC access token rejected by upstream 401 until replaced.
 	RejectedSIWCAccessToken string `json:"-"`
-	// RejectedRefreshToken tracks the outer refresh token rejected as terminal until replaced.
+	// RejectedRefreshToken tracks the outer refresh token blocked from reuse until replaced.
 	RejectedRefreshToken string `json:"-"`
 	// RejectedSIWCRefreshToken tracks the nested SIWC refresh token rejected as terminal until replaced.
 	RejectedSIWCRefreshToken string `json:"-"`
@@ -129,6 +129,8 @@ type Auth struct {
 	RenewalWarnedRefreshToken string `json:"-"`
 	// RequiresSignIn flags that automatic credential renewal failed with a terminal grant rejection.
 	RequiresSignIn bool `json:"-"`
+	// ConsecutiveRenewalFailures counts failed renewal attempts for the current credential.
+	ConsecutiveRenewalFailures int `json:"-"`
 	// RefreshError stores the sanitized last refresh failure without being overwritten by request execution results.
 	RefreshError *Error `json:"-"`
 	// RenewalEventAt records when the deduplicated terminal renewal failure event was first observed for the current grant.
@@ -1430,11 +1432,12 @@ func (a *Auth) HasValidAccessToken(now time.Time) bool {
 }
 
 const (
-	RenewalStateSignInRequired        = "sign_in_required"
-	RenewalStateExpiredSignInRequired = "expired_sign_in_required"
-	RenewalStateRetryScheduled        = "retry_scheduled"
-	RenewalStateRenewalVerified       = "renewal_verified"
-	RenewalStateAwaitingFirstRenewal  = "awaiting_first_renewal"
+	RenewalStateSignInRequired           = "sign_in_required"
+	RenewalStateCredentialRecoveryNeeded = "credential_recovery_needed"
+	RenewalStateExpiredSignInRequired    = "expired_sign_in_required"
+	RenewalStateRetryScheduled           = "retry_scheduled"
+	RenewalStateRenewalVerified          = "renewal_verified"
+	RenewalStateAwaitingFirstRenewal     = "awaiting_first_renewal"
 
 	RecoveryStageSignInRequired    = "sign_in_required"
 	RecoveryStageCredentialSaved   = "credential_saved"
@@ -1443,6 +1446,15 @@ const (
 	RecoveryStageInferenceVerified = "inference_verified"
 	RecoveryStageLoaded            = "loaded"
 )
+
+// RequiresCredentialRecovery reports an ambiguous refresh exchange whose grant must not be replayed.
+func (a *Auth) RequiresCredentialRecovery() bool {
+	return a != nil && a.RefreshError != nil && a.RefreshError.Code == "refresh_outcome_unknown"
+}
+
+func (a *Auth) refreshGrantBlocked() bool {
+	return a != nil && (a.RequiresSignIn || a.RequiresCredentialRecovery())
+}
 
 // RenewalStateAt returns the structured renewal lifecycle state at the given time.
 func (a *Auth) RenewalStateAt(now time.Time) string {
@@ -1457,6 +1469,9 @@ func (a *Auth) RenewalStateAt(now time.Time) string {
 			return RenewalStateExpiredSignInRequired
 		}
 		return RenewalStateSignInRequired
+	}
+	if a.RequiresCredentialRecovery() {
+		return RenewalStateCredentialRecoveryNeeded
 	}
 	if a.RefreshError != nil {
 		return RenewalStateRetryScheduled
@@ -1478,7 +1493,10 @@ func (a *Auth) RecoveryStageAt(now time.Time) string {
 	if a.RequiresSignIn {
 		return RecoveryStageSignInRequired
 	}
-	if a.hasActiveQuotaBlock(now) {
+	if a.RequiresCredentialRecovery() {
+		return RenewalStateCredentialRecoveryNeeded
+	}
+	if a.HasActiveQuotaBlock(now) {
 		return RecoveryStageQuotaBlocked
 	}
 	if a.RenewalVerified {
@@ -1490,7 +1508,8 @@ func (a *Auth) RecoveryStageAt(now time.Time) string {
 	return RecoveryStageLoaded
 }
 
-func (a *Auth) hasActiveQuotaBlock(now time.Time) bool {
+// HasActiveQuotaBlock reports quota state independently of the renewal lifecycle.
+func (a *Auth) HasActiveQuotaBlock(now time.Time) bool {
 	if a == nil {
 		return false
 	}
