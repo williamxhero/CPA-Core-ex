@@ -3,10 +3,30 @@ package resourcecatalog
 import (
 	"encoding/hex"
 	"math/big"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
+
+// Trust both the new local acquisition and the provider's freshness. A
+// newly fetched cached checklist cannot recover or recreate a held wallet.
+func staleDeepInfraWallet(prior resource.GateOperation, reading *resource.DeepInfraFunding) bool {
+	fields := strings.Split(strings.TrimPrefix(prior.AuthIndex, "payer/"), "/")
+	if len(fields) == 0 || !validPayerRef(fields[0]) {
+		return prior.Action == "pause"
+	}
+	if fields[0] != reading.Payer {
+		return prior.Action == "pause"
+	}
+	if len(fields) != 2 {
+		// Private fences from the first compatible build contain only the payer.
+		return false
+	}
+	last, err := strconv.ParseInt(fields[1], 10, 64)
+	return err != nil || last <= 0 || last >= reading.CheckedAt
+}
 
 func validPayerRef(value string) bool {
 	raw, err := hex.DecodeString(value)

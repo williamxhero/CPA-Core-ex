@@ -95,7 +95,7 @@ func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, ind
 	if reading.ObservedAtMS <= 0 || reading.ObservedAtMS > now.UnixMilli() || now.UnixMilli()-reading.ObservedAtMS >= time.Hour.Milliseconds() {
 		return nil
 	}
-	action, owner, prefix, payer := "", fundingGateOwner, fundingEvidencePrefix, ""
+	action, owner, prefix, payerFence := "", fundingGateOwner, fundingEvidencePrefix, ""
 	slot := "funding-state/" + b.Targets[0].ResourceID
 	switch adapter {
 	case "deepseek":
@@ -103,7 +103,7 @@ func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, ind
 	case "deepinfra":
 		action = deepInfraFundingState(reading, now)
 		if action != "" {
-			payer = "payer/" + reading.DeepInfra.Payer
+			payerFence = "payer/" + reading.DeepInfra.Payer + "/" + strconv.FormatInt(reading.DeepInfra.CheckedAt, 10)
 		}
 		owner, prefix, slot = deepInfraGateOwner, deepInfraEvidencePrefix, "funding-state/deepinfra/"+b.Targets[0].ResourceID
 	}
@@ -113,7 +113,8 @@ func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, ind
 	stamp := prefix + strconv.FormatInt(reading.ObservedAtMS, 10) + "/" + reading.QueryID
 	prior := c.state.Gates.Operations[slot].Operation
 	if facts := FundingGateDetails(prior.Owner, prior.EvidenceID); facts != nil && prior.SourceVersion == sourceVersion &&
-		sameGateSubjects(prior.Targets, b.Targets) && (facts.ObservedAtMS >= reading.ObservedAtMS || (payer != "" && prior.Action == "pause" && prior.AuthIndex != payer)) {
+		sameGateSubjects(prior.Targets, b.Targets) && (facts.ObservedAtMS >= reading.ObservedAtMS ||
+		(payerFence != "" && staleDeepInfraWallet(prior, reading.DeepInfra))) {
 		return nil
 	}
 
@@ -126,6 +127,6 @@ func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, ind
 			break
 		}
 	}
-	_, err := c.applyGateWithPrivateFenceLocked(op, slot, (action == "pause") != active, payer)
+	_, err := c.applyGateWithPrivateFenceLocked(op, slot, (action == "pause") != active, payerFence)
 	return err
 }
