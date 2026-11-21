@@ -119,6 +119,19 @@ func (c *SessionCache) Get(sessionID string) (string, bool) {
 	return "", false
 }
 
+// peek reads the existing binding without refreshing or expiring selector state.
+func (c *SessionCache) peek(sessionID string) string {
+	if c == nil || sessionID == "" {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if entry, ok := c.entries[sessionID]; ok && time.Now().Before(entry.expiresAt) {
+		return entry.authID
+	}
+	return ""
+}
+
 // GetAndRefresh retrieves the auth ID bound to a session and refreshes the TTL
 // for every identifier known to represent the same logical session.
 func (c *SessionCache) GetAndRefresh(sessionID string) (string, bool) {
