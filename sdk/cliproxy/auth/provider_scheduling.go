@@ -101,10 +101,15 @@ func schedulingPolicy(cfg internalconfig.ProviderSchedulingConfig, a *Auth) inte
 		return internalconfig.ProviderSchedulingResource{}
 	}
 	policy, found := cfg.Resources[id]
-	if !found && parent != "" {
+	if (!found || strings.TrimSpace(policy.Funding) == "") && parent != "" {
 		policy = cfg.Resources[parent]
 	}
 	return policy
+}
+
+func (m *Manager) scheduledFundingAllows(ctx context.Context, a *Auth) bool {
+	cfg := m.runtimeConfigSnapshot().Routing.ProviderScheduling
+	return allowsRouteFunding(cfg, providerSchedulingCaller(ctx), schedulingPolicy(cfg, a).Funding)
 }
 
 func allowsRouteFunding(cfg internalconfig.ProviderSchedulingConfig, caller, funding string) bool {

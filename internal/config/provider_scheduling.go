@@ -14,12 +14,13 @@ const (
 	defaultProviderSchedulingWait = 3 * time.Second
 )
 
-// ProviderSchedulingConfig scopes rollout of the unified request scheduler.
+// ProviderSchedulingResource defines a trusted funding classification and slot cap.
 type ProviderSchedulingResource struct {
 	Funding       string `yaml:"funding,omitempty" json:"funding,omitempty"`
 	MaxConcurrent int    `yaml:"max-concurrent,omitempty" json:"max-concurrent,omitempty"`
 }
 
+// ProviderSchedulingConfig scopes rollout of the unified request scheduler.
 type ProviderSchedulingConfig struct {
 	Resources      map[string]ProviderSchedulingResource `yaml:"resources,omitempty" json:"resources,omitempty"`
 	AllowedFunding []string                              `yaml:"allowed-funding,omitempty" json:"allowed-funding,omitempty"`
@@ -30,7 +31,7 @@ type ProviderSchedulingConfig struct {
 	MaxActiveWait  string                                `yaml:"max-active-wait,omitempty" json:"max-active-wait,omitempty"`
 }
 
-// ProviderSchedulingMode evaluates the model and the authenticated caller against rollout scope.
+// ProviderSchedulingMode matches the public model and opaque authenticated caller reference against rollout scope.
 func (c *Config) ProviderSchedulingMode(model, caller string) string {
 	if c == nil {
 		return ProviderSchedulingOff
