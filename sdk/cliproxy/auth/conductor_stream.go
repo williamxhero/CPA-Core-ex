@@ -306,11 +306,21 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				"pending_bytes":    pendingBytes,
 				"stop_reason":      stopReason,
 			}
-			if auth != nil {
-				fields["auth_id"] = auth.ID
-			}
-			if err != nil {
-				fields["error"] = err.Error()
+			if trace := routingTraceFromContext(ctx); trace != nil {
+				delete(fields, "auth_id")
+				delete(fields, "provider")
+				fields["routing_request_id"] = trace.data.RequestID
+				fields["model"] = trace.data.Model
+				if err != nil {
+					fields["status"] = statusCodeFromError(err)
+				}
+			} else {
+				if auth != nil {
+					fields["auth_id"] = auth.ID
+				}
+				if err != nil {
+					fields["error"] = err.Error()
+				}
 			}
 			entry.WithFields(fields).Info("stream recovery")
 		}

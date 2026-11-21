@@ -229,6 +229,7 @@ func RecordRequestStreamOutput(ctx context.Context, payload []byte) {
 		if b := requestBudgetFromContext(ctx); b != nil {
 			b.mu.Lock()
 			b.OutputCommitted = true
+			updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 			b.mu.Unlock()
 		}
 	}
@@ -420,6 +421,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	b.mu.Lock()
 	b.ActiveWait += max(0, elapsed)
 	b.waiting = false
+	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 	b.mu.Unlock()
 	return err == nil, err
 }
@@ -686,7 +688,9 @@ func (m *Manager) executeScheduledStream(ctx context.Context, providers []string
 		})
 	}
 	res, err := run(ctx, nil)
-	err = unwrapExecutionBoundaryError(err)
+	if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
+		err = unwrapExecutionBoundaryError(err)
+	}
 	if pinnedThread && err != nil && !isRequestStopError(err) {
 		err = claudeThreadReplayError(err)
 	}

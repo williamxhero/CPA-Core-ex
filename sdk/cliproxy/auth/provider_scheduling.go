@@ -220,7 +220,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			c.reasons = append(c.reasons, configReason)
 		}
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, a, c.model, now, opts.Headers)
-		if routingTraceFromContext(ctx) != nil || schedulingDecisionObserver(ctx) != nil {
+		if wantsSchedulingDecision(ctx) {
 			if exp, known := a.AccessTokenExpirationTimeForRequest(ctx, opts.Headers); known && !exp.IsZero() {
 				c.diagnosticExpired = !exp.After(now)
 			}
@@ -250,7 +250,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			}
 		} else {
 			var err error
-			if authority.inspect != nil && (routingTraceFromContext(ctx) != nil || schedulingDecisionObserver(ctx) != nil) {
+			if authority.inspect != nil && wantsSchedulingDecision(ctx) {
 				var evidence *resource.QuotaGateEvidence
 				evidence, err = authority.inspect(ctx, a, model)
 				if evidence != nil {

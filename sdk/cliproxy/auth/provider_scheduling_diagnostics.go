@@ -69,7 +69,7 @@ func schedulingDecisionObserver(ctx context.Context) func(SchedulingDecision) {
 }
 
 func wantsSchedulingDecision(ctx context.Context) bool {
-	return routingTraceFromContext(ctx) != nil || schedulingDecisionObserver(ctx) != nil
+	return routingTraceCollects(ctx) || schedulingDecisionObserver(ctx) != nil
 }
 
 func publishSchedulingDecision(ctx context.Context, decision SchedulingDecision) {

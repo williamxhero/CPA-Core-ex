@@ -225,6 +225,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
 		chunkIndex := 0
 		var historyChunks [][]byte
 		for {
@@ -685,6 +686,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		// Publish the execution receipt before EOF reaches the HTTP consumer.
+		// Delivery tracking separately waits for that consumer after close.
+		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0
@@ -695,6 +699,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
+			lifecycle.finishRoutingTrace(completionStatus, completionErr)
 			if ctx == nil {
 				errChan <- msg
 				return true
@@ -773,7 +778,6 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
 				completionErr = errMsg.Error
-				coreauth.FinishRoutingTrace(ctx, completionStatus, completionErr)
 				_ = sendErr(errMsg)
 				return
 			}

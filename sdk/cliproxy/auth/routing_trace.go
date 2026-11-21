@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 const (
@@ -48,8 +49,9 @@ type routingTraceStore struct {
 }
 
 type routingTrace struct {
-	mu   sync.Mutex
-	data RoutingTrace
+	mu      sync.Mutex
+	data    RoutingTrace
+	collect bool
 }
 
 func routingTraceFromContext(ctx context.Context) *routingTrace {
@@ -67,7 +69,7 @@ func RoutingTraceID(ctx context.Context) string {
 }
 
 func (m *Manager) StartRoutingTrace(ctx context.Context, requestedModel, routingModel string) string {
-	if m == nil || providerSchedulingCaller(ctx) == "" {
+	if m == nil {
 		return ""
 	}
 	b := requestBudgetFromContext(ctx)
@@ -89,12 +91,17 @@ func (m *Manager) StartRoutingTrace(ctx context.Context, requestedModel, routing
 	if !safeRoutingModel(requestedModel) {
 		requestedModel = ""
 	}
-	t := &routingTrace{data: RoutingTrace{
+	t := &routingTrace{collect: providerSchedulingCaller(ctx) != "", data: RoutingTrace{
 		RequestID: id.String(), Mode: mode, Model: requestedModel,
 		StartedAt: m.getContinuityClock().Now().UTC(), Stages: make([]SchedulingDecision, 0),
 	}}
 	if !b.trace.CompareAndSwap(nil, t) {
 		return b.trace.Load().data.RequestID
+	}
+	// Global enforcement also applies when the server is explicitly open.
+	// Issue an error correlation ID there, but retain no diagnostic inventory.
+	if !t.collect {
+		return t.data.RequestID
 	}
 	s := &m.routingTraces
 	s.mu.Lock()
@@ -160,9 +167,14 @@ func (m *Manager) RoutingTrace(id string) (RoutingTrace, bool) {
 	return view, true
 }
 
+func routingTraceCollects(ctx context.Context) bool {
+	trace := routingTraceFromContext(ctx)
+	return trace != nil && trace.collect
+}
+
 func recordRoutingStage(ctx context.Context, decision SchedulingDecision) {
 	t := routingTraceFromContext(ctx)
-	if t == nil {
+	if t == nil || !t.collect {
 		return
 	}
 	if len(decision.Candidates) > routingTraceRows {
@@ -194,7 +206,7 @@ func catalogRoutingID(raw string) string {
 }
 
 func updateRoutingAccounting(t *routingTrace, accounting RequestBudgetSnapshot) {
-	if t == nil {
+	if t == nil || !t.collect {
 		return
 	}
 	t.mu.Lock()
@@ -206,7 +218,7 @@ func updateRoutingAccounting(t *routingTrace, accounting RequestBudgetSnapshot) 
 
 func FinishRoutingTrace(ctx context.Context, status int, err error) {
 	t := routingTraceFromContext(ctx)
-	if t == nil {
+	if t == nil || !t.collect {
 		return
 	}
 	accounting, _ := RequestBudgetSnapshotFromContext(ctx)
@@ -233,15 +245,25 @@ func FinishRoutingTrace(ctx context.Context, status int, err error) {
 // RoutingFailure owns the only fields exposed for an enforced scheduling
 // failure. It intentionally cannot unwrap to raw upstream bodies or headers.
 type RoutingFailure struct {
-	Code      string `json:"code"`
-	Type      string `json:"type"`
-	Message   string `json:"message"`
-	Model     string `json:"model,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	status    int
+	Code           string `json:"code"`
+	Type           string `json:"type"`
+	Message        string `json:"message"`
+	Model          string `json:"model,omitempty"`
+	RequestID      string `json:"request_id,omitempty"`
+	UpstreamStatus string `json:"status,omitempty"`
+	status         int
+	retryAt        time.Time
+	now            func() time.Time
 }
 
 func (e *RoutingFailure) StatusCode() int { return e.status }
+func (e *RoutingFailure) SafeResponseHeaders() http.Header {
+	if e.retryAt.IsZero() || e.now == nil {
+		return nil
+	}
+	return safeRetryAfterHeader(e.retryAt.Sub(e.now()))
+}
+
 func (e *RoutingFailure) Error() string {
 	body, _ := moejson.Marshal(struct {
 		Error *RoutingFailure `json:"error"`
@@ -256,18 +278,33 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 	}
 	status := clienterror.HTTPStatusFromError(err)
 	var local localNoAvailableRoute
+	var terminated *executor.RequestTerminatedError
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &terminated) {
+		return err
+	}
 	budget, _ := RequestBudgetSnapshotFromContext(ctx)
+	var ag *executor.AntigravityResourceExhausted
+	actual := budget.Attempts > 0 && (hasUpstreamExecutionAttempt(err) || errors.As(err, &ag))
 	failure := &RoutingFailure{Model: trace.data.Model, RequestID: trace.data.RequestID, status: status}
 	switch {
 	case errors.As(err, &local):
 		failure.status = http.StatusServiceUnavailable
 		failure.Code, failure.Type, failure.Message = "no_available_route", "server_error", "No route is currently available for this model."
-	case budget.Attempts > 0 && status == http.StatusTooManyRequests:
+	case actual && status == http.StatusTooManyRequests:
 		failure.Code, failure.Type, failure.Message = "rate_limit_exceeded", "rate_limit_error", "The upstream rate limit was reached."
-	case budget.Attempts > 0 && (status == http.StatusUnauthorized || status == http.StatusForbidden) && IsTerminalAuthError(err):
+		// #54 defines these structured, normalized facts as applicable to
+		// the terminal request. A generic per-credential header cannot
+		// advertise when mixed local restrictions will clear.
+		if ag != nil {
+			failure.UpstreamStatus = "RESOURCE_EXHAUSTED"
+			if ag.RetrySource != "" && ag.RetryAt.After(ag.ObservedAt) {
+				failure.retryAt, failure.now = ag.RetryAt, func() time.Time { return RequestBudgetNow(ctx) }
+			}
+		}
+	case actual && (status == http.StatusUnauthorized || status == http.StatusForbidden):
 		failure.status = http.StatusBadGateway
 		failure.Code, failure.Type, failure.Message = "upstream_authentication_required", "server_error", "The upstream credential could not authenticate."
-	case budget.Attempts > 0 && status >= 500 && status <= 599:
+	case actual && status >= 500 && status <= 599:
 		failure.Code, failure.Type, failure.Message = "upstream_unavailable", "server_error", "The upstream service could not complete the request."
 	default:
 		return err

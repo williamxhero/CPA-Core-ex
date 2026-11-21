@@ -313,7 +313,7 @@ func TestProviderSchedulingHTTPDoesNotRepeatObservableOrUnsafeExecution(t *testi
 			}
 			body := response.Body.String()
 			if test.stream {
-				if response.Code != 200 || strings.Count(body, test.marker) != 1 || strings.Count(body, "event: error") != 1 || !strings.Contains(body, "controlled-stop") {
+				if response.Code != 200 || strings.Count(body, test.marker) != 1 || strings.Count(body, "event: error") != 1 || !strings.Contains(body, "rate_limit_exceeded") || strings.Contains(body, "controlled-stop") {
 					t.Fatalf("committed HTTP response = %d %s", response.Code, body)
 				}
 			} else if response.Code != 429 {

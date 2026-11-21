@@ -168,14 +168,18 @@ func (t *requestLifecycleTracker) requestID() string {
 	return t.completion.RequestID
 }
 
+func (t *requestLifecycleTracker) finishRoutingTrace(status int, err error) {
+	if t != nil && t.completion.Metadata[modelExecutionMetadataSourceKey] != modelExecutionInternalSource {
+		coreauth.FinishRoutingTrace(t.ctx, status, err)
+	}
+}
+
 func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOutcome, statusCode int, err error) {
 	if t == nil {
 		return
 	}
 	t.once.Do(func() {
-		if t.completion.Metadata[modelExecutionMetadataSourceKey] != modelExecutionInternalSource {
-			coreauth.FinishRoutingTrace(t.ctx, statusCode, err)
-		}
+		t.finishRoutingTrace(statusCode, err)
 		completion := t.completion
 		completion.Outcome = outcome
 		completion.StatusCode = statusCode

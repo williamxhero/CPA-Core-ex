@@ -329,7 +329,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 			}
 			return m.executeMixedOnce(ctx, normalized, req, opts, maxCredentials, round, retryLimit)
 		})
-		err = unwrapExecutionBoundaryError(err)
+		// Preserve transport provenance until the scoped HTTP boundary can
+		// redact the real response. Keep the SDK's legacy unwrapped error otherwise.
+		if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
+			err = unwrapExecutionBoundaryError(err)
+		}
 		if pinnedThread && err != nil && !isRequestStopError(err) {
 			err = claudeThreadReplayError(err)
 		}

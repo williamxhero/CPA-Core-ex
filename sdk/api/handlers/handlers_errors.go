@@ -130,7 +130,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) || IsRoutingCorrelationHeader(c, key) {
 				continue
 			}
 			// A locally trusted cooldown deadline outranks the raw upstream
@@ -183,7 +183,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 
 func writeDirectErrorResponse(c *gin.Context, status int, msg *interfaces.ErrorMessage) {
 	for key, values := range FilterUpstreamHeaders(msg.Headers) {
-		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+		if len(values) == 0 || IsCPAReservedResponseHeader(key) || IsRoutingCorrelationHeader(c, key) {
 			continue
 		}
 		c.Writer.Header().Del(key)
