@@ -275,6 +275,32 @@ func (m *Manager) canOpenScheduledRound(ctx context.Context, opts executor.Optio
 	return m.retryAllowedForRequest(ctx, round, providers, model, eligibility, pinnedAuthIDFromMetadata(opts.Metadata), defaultRetry, opts.Headers)
 }
 
+// scheduledTrustedRecovery matches the governing deadline against explicit,
+// current provenance on the exact blocked model or credential. Default
+// backoff, sibling-model hints and older observations cannot open a wait.
+func scheduledTrustedRecovery(a *Auth, model string, deadline, now time.Time) bool {
+	if a == nil || !deadline.After(now) {
+		return false
+	}
+	matches := func(err *Error) bool {
+		return err != nil && err.providerRetryAt.Equal(deadline)
+	}
+	if a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now) {
+		return a.Quota.NextRecoverAt.Equal(deadline) && matches(a.LastError)
+	}
+	modelKey := canonicalModelLookupKey(model)
+	for key, state := range a.ModelStates {
+		if canonicalModelLookupKey(key) != modelKey || state == nil {
+			continue
+		}
+		blocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
+		if blocked && next.Equal(deadline) && matches(state.LastError) {
+			return true
+		}
+	}
+	return matches(a.LastError) && (a.credentialRetryAfter.Equal(deadline) || (modelKey == "" && a.NextRetryAfter.Equal(deadline)))
+}
+
 type scheduledRetryOpportunity struct {
 	ready   bool
 	at      time.Time

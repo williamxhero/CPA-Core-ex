@@ -222,7 +222,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 				c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
 			case reason == blockReasonCooldown || !next.IsZero():
 				c.reasons = append(c.reasons, "cooldown")
-				if eligible, nextEligible := retryRoundAvailabilityForAuthForRequest(ctx, a, c.model, now, opts.Headers); eligible {
+				if eligible, nextEligible := retryRoundAvailabilityForAuthForRequest(ctx, a, c.model, now, opts.Headers); eligible && scheduledTrustedRecovery(a, c.model, nextEligible, now) {
 					c.retryAt = nextEligible
 				}
 			default:

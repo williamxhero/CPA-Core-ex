@@ -57,9 +57,12 @@ func (c *providerBudgetClock) Wait(ctx context.Context, d time.Duration) error {
 }
 
 func TestProviderSchedulingControlledRecovery(t *testing.T) {
+	coreauth.SetTransientErrorCooldownSeconds(1)
+	t.Cleanup(func() { coreauth.SetTransientErrorCooldownSeconds(0) })
 	for _, test := range []struct {
 		name       string
 		recovery   time.Duration
+		synthetic  bool
 		maxWait    time.Duration
 		backup     bool
 		canceled   bool
@@ -70,6 +73,7 @@ func TestProviderSchedulingControlledRecovery(t *testing.T) {
 		{name: "healthy backup", recovery: 135 * time.Hour, maxWait: time.Second, backup: true, wantStatus: 200, wantCalls: "P"},
 		{name: "exact short recovery", recovery: 700 * time.Millisecond, maxWait: time.Second, wantStatus: 200, wantWait: 700 * time.Millisecond, wantCalls: "A"},
 		{name: "long recovery", recovery: 135 * time.Hour, maxWait: time.Second, wantStatus: 503},
+		{name: "synthetic transient cooldown", synthetic: true, maxWait: 20 * time.Second, wantStatus: 503},
 		{name: "unknown recovery", maxWait: time.Second, wantStatus: 503},
 		{name: "single wait budget", recovery: 700 * time.Millisecond, maxWait: 500 * time.Millisecond, wantStatus: 503},
 		{name: "cancel during wait", recovery: 700 * time.Millisecond, maxWait: time.Second, canceled: true, wantWait: 700 * time.Millisecond},
@@ -78,16 +82,21 @@ func TestProviderSchedulingControlledRecovery(t *testing.T) {
 			f := newCapacityGateRoute(t, "http", func(_ string, emit func(string)) { emit(combinedCapacitySuccess) })
 			m := f.inventory.manager
 			cfg := *f.inventory.server.cfg
-			cfg.Routing.ProviderScheduling = config.ProviderSchedulingConfig{Mode: "enforce"}
+			cfg.Routing.ProviderScheduling = config.ProviderSchedulingConfig{Mode: "enforce", MaxActiveWait: "20s"}
 			m.SetConfig(&cfg)
 			m.SetRetryConfig(0, test.maxWait, 3)
 			m.SetUpstreamErrorRetryLimit(-1)
 			var until time.Time
+			start := time.Now()
 			for _, a := range m.List() {
 				key := a.Attributes["api_key"]
-				if key == "A" && test.recovery > 0 {
+				if key == "A" && (test.recovery > 0 || test.synthetic) {
+					var hint *time.Duration
+					if !test.synthetic {
+						hint = &test.recovery
+					}
 					m.MarkResult(context.Background(), coreauth.Result{
-						AuthID: a.ID, Provider: a.Provider, Model: "capacity-gate-model", RetryAfter: &test.recovery,
+						AuthID: a.ID, Provider: a.Provider, Model: "capacity-gate-model", RetryAfter: hint,
 						Error: &coreauth.Error{HTTPStatus: 429, Code: coreauth.ErrorCodeTransientRateLimit, Message: "rate limited"},
 					})
 					a, _ = m.GetByID(a.ID)
@@ -103,7 +112,9 @@ func TestProviderSchedulingControlledRecovery(t *testing.T) {
 				}
 			}
 			now := time.Now()
-			if !until.IsZero() {
+			if test.synthetic {
+				now = start
+			} else if !until.IsZero() {
 				now = until.Add(-test.recovery)
 			}
 			clock := newProviderBudgetClock(now, !test.canceled)
@@ -161,6 +172,60 @@ func TestProviderSchedulingControlledRecovery(t *testing.T) {
 			}
 			if test.wantWait == 0 && len(clock.waits) != 0 {
 				t.Fatal("a request with no short opportunity waited")
+			}
+		})
+	}
+}
+
+func TestProviderSchedulingHTTPRetryZeroWithTrustedRecovery(t *testing.T) {
+	for _, test := range []struct {
+		name                                string
+		requestRetry, upstreamRetry         int
+		wantStatus, wantAttempts, wantRound int
+		wantWait                            time.Duration
+	}{
+		{"zero overrides unlimited", 0, -1, 429, 1, 0, 0},
+		{"finite round", 1, 1, 200, 2, 1, time.Second},
+		{"unlimited has a concrete short recovery", 1, -1, 200, 2, 1, time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var requests atomic.Int32
+			f := newCapacityGateRoute(t, "http", func(_ string, emit func(string)) {
+				if requests.Add(1) == 1 {
+					emit(`{"type":"error","status":429,"headers":{"Retry-After":"1"},"error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"Codex is at capacity"}}`)
+					return
+				}
+				emit(combinedCapacitySuccess)
+			})
+			m := f.inventory.manager
+			cfg := *f.inventory.server.cfg
+			cfg.Routing.ProviderScheduling = config.ProviderSchedulingConfig{Mode: "enforce"}
+			m.SetConfig(&cfg)
+			m.SetRetryConfig(test.requestRetry, 2*time.Second, 1)
+			m.SetUpstreamErrorRetryLimit(test.upstreamRetry)
+			for _, a := range m.List() {
+				if a.Attributes["api_key"] == "A" {
+					continue
+				}
+				a.Disabled = true
+				if _, err := m.Update(context.Background(), a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock := newProviderBudgetClock(time.Now(), true)
+			m.SetContinuityClockForTest(clock)
+
+			budgetCtx := coreauth.WithRequestBudget(context.Background())
+			handler := openai.NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, m))
+			engine := gin.New()
+			engine.POST("/v1/responses", handler.Responses)
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"capacity-gate-model","input":[]}`)).WithContext(budgetCtx)
+			req.Header.Set("Content-Type", "application/json")
+			engine.ServeHTTP(recorder, req)
+			budget, _ := coreauth.RequestBudgetSnapshotFromContext(budgetCtx)
+			if recorder.Code != test.wantStatus || int(requests.Load()) != test.wantAttempts || budget.Attempts != test.wantAttempts || budget.Round != test.wantRound || budget.ActiveWait != test.wantWait {
+				t.Fatalf("status=%d body=%s actual HTTP=%d budget=%+v", recorder.Code, recorder.Body, requests.Load(), budget)
 			}
 		})
 	}

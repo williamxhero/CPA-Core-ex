@@ -317,6 +317,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, errThread
 	}
 	if RequestBudgetEnforced(ctx) {
+		if m.HomeEnabled() {
+			if unlock := m.lockHomeWebsocketSession(ctx, opts); unlock != nil {
+				defer unlock()
+			}
+		}
 		response, err := runScheduledExecution(m, ctx, normalized, req, opts, nil, func(ctx context.Context, opts cliproxyexecutor.Options, round, retryLimit int, homeLimit *int) (cliproxyexecutor.Response, error) {
 			_, maxCredentials, _ := m.retrySettings()
 			if m.HomeEnabled() {

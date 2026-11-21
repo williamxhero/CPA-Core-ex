@@ -68,6 +68,9 @@ type Error struct {
 	// upstream failure (for example an Antigravity TOS appeal URL) so the
 	// conductor can persist it on the credential record for operator tooling.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// providerRetryAt is local provenance for an explicit upstream recovery
+	// hint. A restored or synthesized cooldown by itself cannot authorize a wait.
+	providerRetryAt time.Time
 }
 
 // Clone returns an independent copy of the error, deep-copying the Metadata

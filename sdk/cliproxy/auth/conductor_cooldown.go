@@ -1573,6 +1573,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
 	now := time.Now()
+	useRequestClock := RequestBudgetEnforced(ctx)
+	if useRequestClock {
+		now = m.getContinuityClock().Now()
+	}
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
 	rejectsToken := !result.Success && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error))
 
@@ -1602,7 +1606,22 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				modelKey = canonicalModelKey(result.RouteModel)
 			}
 		}
-		now = time.Now()
+		if !useRequestClock {
+			now = time.Now()
+		}
+		if !result.Success && result.Error != nil && result.RetryAfter != nil && *result.RetryAfter > 0 {
+			status := statusCodeFromResult(result.Error)
+			// Authorization, funding and unsupported-model failures have no
+			// trusted recovery time for active waiting, even with a header.
+			if status != http.StatusForbidden && isCredentialRetryRoundStatus(status) {
+				hint := *result.RetryAfter
+				if status == http.StatusTooManyRequests && (result.CredentialScope || !isTransientRateLimitResultError(result.Error)) {
+					hint = max(hint, minQuotaCooldownFloor)
+				}
+				result.Error = result.Error.Clone()
+				result.Error.providerRetryAt = now.Add(hint)
+			}
+		}
 		responseHeaders := internallogging.GetResponseHeaders(ctx)
 		var cooldownRecordsBefore []CooldownStateRecord
 		trackCooldownState := m.cooldownStore != nil
