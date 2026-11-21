@@ -134,6 +134,10 @@ func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResul
 }
 
 func (c *Catalog) applyGateWithFenceLocked(op resource.GateOperation, fence string, change bool) (resource.GateResult, error) {
+	return c.applyGateWithPrivateFenceLocked(op, fence, change, "")
+}
+
+func (c *Catalog) applyGateWithPrivateFenceLocked(op resource.GateOperation, fence string, change bool, privateRef string) (resource.GateResult, error) {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateResult{}, ErrUnavailable
 	}
@@ -197,7 +201,12 @@ func (c *Catalog) applyGateWithFenceLocked(op resource.GateOperation, fence stri
 		ledger.Operations[op.OpID] = gateReceipt{Operation: op, Result: result}
 	}
 	if fence != "" {
-		ledger.Operations[fence] = gateReceipt{Operation: op, Result: result}
+		private := op
+		if privateRef != "" {
+			// The non-UUID private fence cannot be looked up through management.
+			private.AuthIndex = privateRef
+		}
+		ledger.Operations[fence] = gateReceipt{Operation: private, Result: result}
 	}
 	next.GateSeal = sealValue(c.key, ledger)
 	raw, _ = json.Marshal(&next)

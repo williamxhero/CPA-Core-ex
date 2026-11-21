@@ -14,10 +14,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
-// ObserveDeepSeekFunding is reached only through the authenticated v8
+// ObserveProviderFunding is reached only through the authenticated v8
 // management route. An evidence-bound challenge cannot be transplanted from
 // the read-only key-match API, another route, or a different observation.
-func (h *Handler) ObserveDeepSeekFunding(c *gin.Context) {
+func (h *Handler) ObserveProviderFunding(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, providerkeymatch.MaxBytes)
 	d := json.NewDecoder(c.Request.Body)
@@ -30,7 +30,7 @@ func (h *Handler) ObserveDeepSeekFunding(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_observation"})
 		return
 	}
-	q, err := providerkeymatch.Decode(input.Proof)
+	q, err := providerkeymatch.DecodeFunding(input.Proof)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "invalid_observation"})
 		return
@@ -60,7 +60,7 @@ func (h *Handler) ObserveDeepSeekFunding(c *gin.Context) {
 		return
 	}
 	source := h.quotaSource(c.Request.Context(), current)
-	err = h.resourceCatalog.ObserveDeepSeekFunding(source.Binding, source.AuthIndex, source.SourceVersion, input.Reading, time.Now())
+	err = h.resourceCatalog.ObserveProviderFunding(q.Adapter, source.Binding, source.AuthIndex, source.SourceVersion, input.Reading, time.Now())
 	switch {
 	case errors.Is(err, resourcecatalog.ErrConflict):
 		providerKeyMatchError(c, 409)

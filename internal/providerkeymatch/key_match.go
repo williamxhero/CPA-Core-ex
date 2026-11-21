@@ -44,7 +44,11 @@ type Response struct {
 	Matched       bool   `json:"matched"`
 }
 
-func Decode(raw []byte) (Request, error) {
+func Decode(raw []byte) (Request, error) { return decode(raw, false) }
+
+func DecodeFunding(raw []byte) (Request, error) { return decode(raw, true) }
+
+func decode(raw []byte, funding bool) (Request, error) {
 	var q Request
 	if len(raw) > MaxBytes || !utf8.Valid(raw) || !validShape(raw) {
 		return q, ErrInvalid
@@ -54,7 +58,7 @@ func Decode(raw []byte) (Request, error) {
 	if d.Decode(&q) != nil || d.Decode(new(any)) != io.EOF {
 		return Request{}, ErrInvalid
 	}
-	if !canonicalUUID(q.Nonce) || q.Version != 1 || q.Adapter != "deepseek" ||
+	if !canonicalUUID(q.Nonce) || q.Version != 1 || (q.Adapter != "deepseek" && (!funding || q.Adapter != "deepinfra")) ||
 		q.AuthIndex == "" || len(q.AuthIndex) > 128 || strings.TrimSpace(q.AuthIndex) != q.AuthIndex ||
 		!printableASCII(q.AuthIndex) || !lowerDigest(q.Digest) || !lowerDigest(q.SourceVersion) || !validBinding(q.Binding) {
 		return Request{}, ErrInvalid
@@ -168,6 +172,10 @@ func MatchesFunding(key string, q Request, reading resource.FundingReading) bool
 	}
 	stamp := sha256.Sum256(raw)
 	m := hmac.New(sha256.New, []byte(key))
-	_, _ = io.WriteString(m, "cpa-provider-funding-v1\n"+q.Nonce+"\n"+q.SourceVersion+"\n"+q.AuthIndex+"\n"+hex.EncodeToString(stamp[:]))
+	domain := "cpa-provider-funding-v1\n"
+	if q.Adapter == "deepinfra" {
+		domain = "cpa-provider-funding/deepinfra-v1\n"
+	}
+	_, _ = io.WriteString(m, domain+q.Nonce+"\n"+q.SourceVersion+"\n"+q.AuthIndex+"\n"+hex.EncodeToString(stamp[:]))
 	return hmac.Equal(m.Sum(nil), provided)
 }

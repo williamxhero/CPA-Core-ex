@@ -13,7 +13,9 @@ import (
 )
 
 const fundingGateOwner = "core.funding.v1/deepseek"
+const deepInfraGateOwner = "core.funding.v1/deepinfra"
 const fundingEvidencePrefix = "funding/deepseek/v1/"
+const deepInfraEvidencePrefix = "funding/deepinfra/v1/"
 
 var fundingDecimal = regexp.MustCompile(`^-?(0|[1-9][0-9]{0,59})(\.[0-9]{1,30})?$`)
 
@@ -22,7 +24,7 @@ var fundingDecimal = regexp.MustCompile(`^-?(0|[1-9][0-9]{0,59})(\.[0-9]{1,30})?
 // Zero/negative totals never establish exhaustion when a positive grant or
 // top-up is still reported, or the platform still considers the key usable.
 func deepSeekFundingState(reading resource.FundingReading) string {
-	if reading.Available == nil || len(reading.Balances) == 0 || len(reading.Balances) > 2 {
+	if reading.DeepInfra != nil || reading.Available == nil || len(reading.Balances) == 0 || len(reading.Balances) > 2 {
 		return ""
 	}
 	seen := map[string]bool{}
@@ -54,14 +56,20 @@ func deepSeekFundingState(reading resource.FundingReading) string {
 }
 
 func IsCoreAdmissionGateOwner(owner string) bool {
-	return owner == fundingGateOwner || IsCoreQuotaGateOwner(owner)
+	return owner == fundingGateOwner || owner == deepInfraGateOwner || IsCoreQuotaGateOwner(owner)
 }
 
 func FundingGateDetails(owner, evidence string) *resource.FundingGateEvidence {
-	if owner != fundingGateOwner || !strings.HasPrefix(evidence, fundingEvidencePrefix) {
+	prefix, adapter := fundingEvidencePrefix, "deepseek"
+	if owner == deepInfraGateOwner {
+		prefix, adapter = deepInfraEvidencePrefix, "deepinfra"
+	} else if owner != fundingGateOwner {
 		return nil
 	}
-	fields := strings.Split(strings.TrimPrefix(evidence, fundingEvidencePrefix), "/")
+	if !strings.HasPrefix(evidence, prefix) {
+		return nil
+	}
+	fields := strings.Split(strings.TrimPrefix(evidence, prefix), "/")
 	if len(fields) != 2 || !validID(fields[1]) {
 		return nil
 	}
@@ -69,13 +77,13 @@ func FundingGateDetails(owner, evidence string) *resource.FundingGateEvidence {
 	if err != nil || date <= 0 {
 		return nil
 	}
-	return &resource.FundingGateEvidence{Source: "deepseek", ObservedAtMS: date}
+	return &resource.FundingGateEvidence{Source: adapter, ObservedAtMS: date}
 }
 
 // The gate mutation and the ordering fence share the same signed v1 ledger
 // commit. A fixed private receipt slot records the latest definitive reading
 // even when there is no gate change. Old readers deserialize the same shape.
-func (c *Catalog) ObserveDeepSeekFunding(b resource.Binding, index, sourceVersion string, reading resource.FundingReading, now time.Time) error {
+func (c *Catalog) ObserveProviderFunding(adapter string, b resource.Binding, index, sourceVersion string, reading resource.FundingReading, now time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.currentLocked() || !c.gateCurrentLocked() {
@@ -87,20 +95,30 @@ func (c *Catalog) ObserveDeepSeekFunding(b resource.Binding, index, sourceVersio
 	if reading.ObservedAtMS <= 0 || reading.ObservedAtMS > now.UnixMilli() || now.UnixMilli()-reading.ObservedAtMS >= time.Hour.Milliseconds() {
 		return nil
 	}
-	action := deepSeekFundingState(reading)
+	action, owner, prefix, payer := "", fundingGateOwner, fundingEvidencePrefix, ""
+	slot := "funding-state/" + b.Targets[0].ResourceID
+	switch adapter {
+	case "deepseek":
+		action = deepSeekFundingState(reading)
+	case "deepinfra":
+		action = deepInfraFundingState(reading, now)
+		if action != "" {
+			payer = "payer/" + reading.DeepInfra.Payer
+		}
+		owner, prefix, slot = deepInfraGateOwner, deepInfraEvidencePrefix, "funding-state/deepinfra/"+b.Targets[0].ResourceID
+	}
 	if action == "" {
 		return nil
 	}
-	stamp := fundingEvidencePrefix + strconv.FormatInt(reading.ObservedAtMS, 10) + "/" + reading.QueryID
-	slot := "funding-state/" + b.Targets[0].ResourceID
+	stamp := prefix + strconv.FormatInt(reading.ObservedAtMS, 10) + "/" + reading.QueryID
 	prior := c.state.Gates.Operations[slot].Operation
 	if facts := FundingGateDetails(prior.Owner, prior.EvidenceID); facts != nil && prior.SourceVersion == sourceVersion &&
-		sameGateSubjects(prior.Targets, b.Targets) && facts.ObservedAtMS >= reading.ObservedAtMS {
+		sameGateSubjects(prior.Targets, b.Targets) && (facts.ObservedAtMS >= reading.ObservedAtMS || (payer != "" && prior.Action == "pause" && prior.AuthIndex != payer)) {
 		return nil
 	}
 
 	op := resource.GateOperation{Version: 1, OpID: uuid.NewString(), ExpectedRevision: c.state.Gates.Revision, Binding: b, AuthIndex: index,
-		SourceVersion: sourceVersion, Subject: "credential", Owner: fundingGateOwner, Action: action, Reason: "funding_exhausted", EvidenceID: stamp}
+		SourceVersion: sourceVersion, Subject: "credential", Owner: owner, Action: action, Reason: "funding_exhausted", EvidenceID: stamp}
 	active := false
 	for _, gate := range c.state.Gates.Gates {
 		if gate.Owner == op.Owner && gate.Model == "" && gate.Subject != "provider" && sameGateSubjects(gate.Targets, b.Targets) {
@@ -108,6 +126,6 @@ func (c *Catalog) ObserveDeepSeekFunding(b resource.Binding, index, sourceVersio
 			break
 		}
 	}
-	_, err := c.applyGateWithFenceLocked(op, slot, (action == "pause") != active)
+	_, err := c.applyGateWithPrivateFenceLocked(op, slot, (action == "pause") != active, payer)
 	return err
 }

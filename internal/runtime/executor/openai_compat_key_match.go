@@ -18,12 +18,22 @@ func (e *OpenAICompatExecutor) ProviderKeyMatch(a *coreauth.Auth, q providerkeym
 }
 
 func (e *OpenAICompatExecutor) ProviderFundingKeyMatch(a *coreauth.Auth, q providerkeymatch.Request, reading resource.FundingReading) (matched, supported bool) {
-	key, supported := e.officialDeepSeekKey(a)
-	return supported && providerkeymatch.MatchesFunding(key, q, reading), supported
+	if q.Adapter == "deepseek" {
+		key, supported := e.officialDeepSeekKey(a)
+		return supported && providerkeymatch.MatchesFunding(key, q, reading), supported
+	}
+	if q.Adapter != "deepinfra" || !e.nativeFundingKeyAllowed(a) {
+		return false, false
+	}
+	base, key := e.resolveCredentials(a)
+	if (base != "https://api.deepinfra.com/v1/openai" && base != "https://api.deepinfra.com/v1/openai/") || key == "" || strings.ContainsAny(key, "\r\n") {
+		return false, false
+	}
+	return providerkeymatch.MatchesFunding(key, q, reading), true
 }
 
 func (e *OpenAICompatExecutor) officialDeepSeekKey(a *coreauth.Auth) (string, bool) {
-	if e == nil || e.cfg != nil && e.cfg.Home.Enabled || !helps.AssociationCandidateAllowed(a) {
+	if !e.nativeFundingKeyAllowed(a) {
 		return "", false
 	}
 	base, key := e.resolveCredentials(a)
@@ -31,4 +41,8 @@ func (e *OpenAICompatExecutor) officialDeepSeekKey(a *coreauth.Auth) (string, bo
 		return "", false
 	}
 	return key, true
+}
+
+func (e *OpenAICompatExecutor) nativeFundingKeyAllowed(a *coreauth.Auth) bool {
+	return e != nil && (e.cfg == nil || !e.cfg.Home.Enabled) && helps.AssociationCandidateAllowed(a)
 }
