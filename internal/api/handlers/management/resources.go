@@ -18,18 +18,27 @@ import (
 
 func (h *Handler) initializeResourceCatalog() {
 	if h.authManager != nil && h.cfg != nil && (h.cfg.ResourceCatalog.Enabled || resourcecatalog.GateFloorRequired(h.configFilePath, h.cfg.ResourceCatalog.StateDir)) {
-		h.authManager.SetInferenceAdmission(func(ctx context.Context, a *coreauth.Auth, model string) error {
+		check := func(_ context.Context, a *coreauth.Auth, model string, inspect bool) (*resource.QuotaGateEvidence, error) {
 			if h.resourceCatalog == nil || a == nil {
-				return resourcecatalog.ErrUnavailable
+				return nil, resourcecatalog.ErrUnavailable
 			}
 			current := h.currentRuntimeSource(a)
 			if current == nil || current.ResourceIdentity == nil {
 				if a.Attributes[coreauth.AttributeLegacyFundingHold] == "true" {
-					return resourcecatalog.ErrGateDenied
+					return nil, resourcecatalog.ErrGateDenied
 				}
-				return h.resourceCatalog.AdmitInference(nil, model)
+				return nil, h.resourceCatalog.AdmitInference(nil, model)
 			}
-			return h.resourceCatalog.AdmitInference(current.ResourceIdentity, model)
+			if inspect {
+				return h.resourceCatalog.InspectInference(current.ResourceIdentity, model)
+			}
+			return nil, h.resourceCatalog.AdmitInference(current.ResourceIdentity, model)
+		}
+		h.authManager.SetInferenceAdmissionInspector(func(ctx context.Context, a *coreauth.Auth, model string) error {
+			_, err := check(ctx, a, model, false)
+			return err
+		}, func(ctx context.Context, a *coreauth.Auth, model string) (*resource.QuotaGateEvidence, error) {
+			return check(ctx, a, model, true)
 		})
 	}
 	h.resourceCatalogReason = h.resourceModeReason()

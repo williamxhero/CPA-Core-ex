@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -46,7 +47,8 @@ type RequestBudgetSnapshot struct {
 }
 
 type requestBudget struct {
-	mu sync.Mutex
+	trace atomic.Pointer[routingTrace]
+	mu    sync.Mutex
 	RequestBudgetSnapshot
 	enforced            bool
 	waiting             bool
@@ -284,6 +286,7 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 		b.credentials[auth.ID] = struct{}{}
 		b.routes[routeIdentity] = struct{}{}
 		b.ReplayUnsafe = b.ReplayUnsafe || unsafe
+		updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 		return nil
 	})
 }

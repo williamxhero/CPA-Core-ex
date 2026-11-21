@@ -2805,6 +2805,14 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 			entry = log.NewEntry(log.StandardLogger())
 		}
 	}
+	if trace := routingTraceFromContext(ctx); trace != nil {
+		entry.WithFields(log.Fields{
+			"routing_request_id": trace.data.RequestID,
+			"model":              trace.data.Model,
+			"status":             statusCodeFromError(err),
+		}).Warn("upstream execution failed")
+		return
+	}
 	authIdent := formatAuthIdentity(auth, provider)
 	errSummary := safeErrorDiagnosticForLog(err)
 	duration = duration.Round(time.Millisecond)

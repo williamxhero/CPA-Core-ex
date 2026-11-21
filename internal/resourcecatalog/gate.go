@@ -270,8 +270,25 @@ func (c *Catalog) GateOperation(id string) (resource.GateOperation, resource.Gat
 // AdmitInference linearizes ONE new business attempt. Its caller may drain the
 // admitted attempt after a later pause, but must call again for every resend.
 func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
+	_, err := c.inspectInference(b, model, false)
+	return err
+}
+
+// InspectInference returns typed native quota facts from the same read-only
+// authority check used for actual selection, without projecting gate metadata.
+func (c *Catalog) InspectInference(b *resource.Binding, model string) (*resource.QuotaGateEvidence, error) {
+	return c.inspectInference(b, model, true)
+}
+
+func (c *Catalog) inspectInference(b *resource.Binding, model string, inspect bool) (*resource.QuotaGateEvidence, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var evidence *resource.QuotaGateEvidence
+	err := c.admitInferenceLocked(b, model, inspect, &evidence)
+	return evidence, err
+}
+
+func (c *Catalog) admitInferenceLocked(b *resource.Binding, model string, inspect bool, evidence **resource.QuotaGateEvidence) error {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return ErrUnavailable
 	}
@@ -303,6 +320,9 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		}
 		if IsCoreQuotaGateOwner(g.Owner) {
 			if matchingCodexGateTarget(g, *b) {
+				if inspect {
+					*evidence, _ = QuotaGateDetails(g.Owner, g.EvidenceID)
+				}
 				return ErrGateDenied
 			}
 			continue

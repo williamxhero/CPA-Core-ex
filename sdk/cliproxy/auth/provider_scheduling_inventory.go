@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -156,6 +157,7 @@ func (m *Manager) appendSchedulingInventory(view *SchedulingDecision) {
 		}
 		view.Candidates = append(view.Candidates, SchedulingCandidateDecision{
 			ResourceID: row.ResourceID, Family: c.family, Priority: c.priority, Reasons: reasons,
+			Refresh: schedulingKnownTime(time.Time{}), Recheck: schedulingKnownTime(time.Time{}),
 		})
 	}
 }

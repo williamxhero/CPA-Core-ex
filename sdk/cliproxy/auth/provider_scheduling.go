@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
 type providerSchedulingCallerKey struct{}
@@ -75,13 +76,16 @@ func (e localNoAvailableRoute) Error() string {
 func newNoAvailableRouteError(model string) error { return localNoAvailableRoute{model: model} }
 
 type scheduledCandidate struct {
-	auth    *Auth
-	owner   string
-	model   string
-	exec    ProviderExecutor
-	limits  []schedulingLimit
-	reasons []string
-	retryAt time.Time
+	auth              *Auth
+	owner             string
+	model             string
+	exec              ProviderExecutor
+	limits            []schedulingLimit
+	reasons           []string
+	retryAt           time.Time
+	diagnosticQuotaAt time.Time
+	diagnosticQuota   bool
+	diagnosticExpired bool
 }
 
 func schedulingResource(a *Auth) (resourceID, parentID string) {
@@ -216,6 +220,14 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			c.reasons = append(c.reasons, configReason)
 		}
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, a, c.model, now, opts.Headers)
+		if routingTraceFromContext(ctx) != nil || schedulingDecisionObserver(ctx) != nil {
+			if exp, known := a.AccessTokenExpirationTimeForRequest(ctx, opts.Headers); known && !exp.IsZero() {
+				c.diagnosticExpired = !exp.After(now)
+			}
+			if a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now) {
+				c.diagnosticQuota, c.diagnosticQuotaAt = true, a.Quota.NextRecoverAt
+			}
+		}
 		if blocked {
 			switch {
 			case reason == blockReasonDisabled:
@@ -232,8 +244,27 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		if selectorExcludesZeroWeight(selector) && authWeight(a) <= 0 {
 			c.reasons = append(c.reasons, "zero_weight")
 		}
-		if authority != nil && authority.check(ctx, a, model) != nil || authority == nil && a.Attributes[AttributeLegacyFundingHold] == "true" {
-			c.reasons = appendSchedulingReason(c.reasons, "inference_admission_blocked")
+		if authority == nil {
+			if a.Attributes[AttributeLegacyFundingHold] == "true" {
+				c.reasons = appendSchedulingReason(c.reasons, "inference_admission_blocked")
+			}
+		} else {
+			var err error
+			if authority.inspect != nil && (routingTraceFromContext(ctx) != nil || schedulingDecisionObserver(ctx) != nil) {
+				var evidence *resource.QuotaGateEvidence
+				evidence, err = authority.inspect(ctx, a, model)
+				if evidence != nil {
+					c.diagnosticQuota = true
+					if evidence.RecheckAtMS > 0 {
+						c.diagnosticQuotaAt = time.UnixMilli(evidence.RecheckAtMS)
+					}
+				}
+			} else {
+				err = authority.check(ctx, a, model)
+			}
+			if err != nil {
+				c.reasons = appendSchedulingReason(c.reasons, "inference_admission_blocked")
+			}
 		}
 	}
 	return candidates, selector
@@ -250,8 +281,9 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		u.mu.Lock()
 		available, byID := m.scheduledAvailable(candidates, model)
 		report := func(selected *Auth) {
-			if sink := schedulingDecisionObserver(ctx); sink != nil {
-				sink(m.schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected))
+			if wantsSchedulingDecision(ctx) {
+				decision := m.schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected, scheduledHardAffinity(selector, model, opts))
+				publishSchedulingDecision(ctx, decision)
 			}
 		}
 		if len(available) == 0 {

@@ -125,6 +125,9 @@ func (h *BaseAPIHandler) newRequestLifecycleTracker(ctx context.Context, sourceF
 		}
 	}
 	if requestID == "" {
+		requestID = coreauth.RoutingTraceID(ctx)
+	}
+	if requestID == "" {
 		requestID = coreauth.ContinuitySessionRequestID(ctx)
 	}
 	if requestID == "" {
@@ -170,6 +173,9 @@ func (t *requestLifecycleTracker) complete(outcome pluginapi.RequestCompletionOu
 		return
 	}
 	t.once.Do(func() {
+		if t.completion.Metadata[modelExecutionMetadataSourceKey] != modelExecutionInternalSource {
+			coreauth.FinishRoutingTrace(t.ctx, statusCode, err)
+		}
 		completion := t.completion
 		completion.Outcome = outcome
 		completion.StatusCode = statusCode
