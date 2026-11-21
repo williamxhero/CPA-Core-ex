@@ -15,27 +15,49 @@ import (
 
 type requestBudgetKey struct{}
 
+// scheduledAlternateRound lets selection explore the next round without
+// spending it until a new credential starts a business attempt.
+type scheduledAlternateRound struct {
+	from     int
+	excluded map[string]struct{}
+}
+
+type scheduledAlternateRoundKey struct{}
+
+func scheduledAlternateRoundFromContext(ctx context.Context) *scheduledAlternateRound {
+	round, _ := ctx.Value(scheduledAlternateRoundKey{}).(*scheduledAlternateRound)
+	return round
+}
+
 // RequestBudgetSnapshot contains request accounting, never route identities or payloads.
 // Round is zero-based. RoundAttempts counts business sends, not selected credentials.
 type RequestBudgetSnapshot struct {
-	Attempts        int
-	Round           int
-	RoundAttempts   int
-	ActiveWait      time.Duration
-	OutputCommitted bool
-	ReplayUnsafe    bool
+	Attempts            int
+	Round               int
+	RoundAttempts       int
+	ActiveWait          time.Duration
+	OutputCommitted     bool
+	ReplayUnsafe        bool
+	UpstreamCategory    string
+	UpstreamRetryAt     time.Time
+	UpstreamRetrySource string
+	ServedModel         string
+	UpstreamDecision    string
 }
 
 type requestBudget struct {
 	mu sync.Mutex
 	RequestBudgetSnapshot
-	enforced       bool
-	waiting        bool
-	deadline       time.Time
-	configuredWait time.Duration
-	credentials    map[string]struct{}
-	routes         map[string]struct{}
-	maxCredentials int
+	enforced            bool
+	waiting             bool
+	deadline            time.Time
+	configuredWait      time.Duration
+	credentials         map[string]struct{}
+	routes              map[string]struct{}
+	maxCredentials      int
+	antigravityFailure  scheduledAntigravityFailure
+	antigravityWaitUsed bool
+	now                 func() time.Time
 }
 
 func requestBudgetFromContext(ctx context.Context) *requestBudget {
@@ -127,6 +149,7 @@ func (m *Manager) setupRequestBudget(ctx context.Context, req executor.Request, 
 		b.enforced = true
 		_, b.maxCredentials, _ = m.retrySettings()
 		b.configuredWait = m.runtimeConfigSnapshot().ProviderSchedulingWait()
+		b.now = m.getContinuityClock().Now
 	}
 	return ctx, opts
 }
@@ -137,11 +160,15 @@ func (b *requestBudget) nextRound(from int) bool {
 	if b.Round != from || b.OutputCommitted || b.ReplayUnsafe {
 		return false
 	}
+	b.advanceRoundLocked()
+	return true
+}
+
+func (b *requestBudget) advanceRoundLocked() {
 	b.Round++
 	b.RoundAttempts = 0
 	clear(b.credentials)
 	clear(b.routes)
-	return true
 }
 
 func (b *requestBudget) credentialSnapshot() map[string]struct{} {
@@ -170,7 +197,13 @@ func roundCredentialLimitReached(ctx context.Context, attempted map[string]struc
 		return false
 	}
 	if RequestBudgetEnforced(ctx) {
-		return requestBudgetFromContext(ctx).routeCount() >= limit
+		b := requestBudgetFromContext(ctx)
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if pending := scheduledAlternateRoundFromContext(ctx); pending != nil && b.Round == pending.from {
+			return false
+		}
+		return len(b.routes) >= limit
 	}
 	return len(attempted) >= limit
 }
@@ -222,13 +255,30 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 			return err
 		}
 		if b.enforced {
+			if !b.antigravityAdmit(sendCtx, auth, req.Model) {
+				return errBudgetCredentialLimit
+			}
 			if b.OutputCommitted || (b.ReplayUnsafe && b.Attempts > 0) {
 				return errBudgetReplayUnsafe
+			}
+			if pending := scheduledAlternateRoundFromContext(sendCtx); pending != nil {
+				_, triedID := pending.excluded[auth.ID]
+				_, triedRoute := pending.excluded[routeIdentity]
+				if triedID || triedRoute || (b.Round != pending.from && b.Round != pending.from+1) {
+					return errBudgetCredentialLimit
+				}
+				if b.Round == pending.from {
+					b.advanceRoundLocked()
+				}
 			}
 			if _, same := b.routes[routeIdentity]; !same && b.maxCredentials > 0 && len(b.routes) >= b.maxCredentials {
 				return errBudgetCredentialLimit
 			}
 		}
+		if b.enforced && b.antigravityFailure.authID != "" && canonicalSchedulingProvider(auth.Provider) != "antigravity" {
+			b.UpstreamDecision = "alternate"
+		}
+		b.ServedModel = ""
 		b.Attempts++
 		b.RoundAttempts++
 		b.credentials[auth.ID] = struct{}{}
@@ -322,9 +372,10 @@ func scheduledTrustedRecovery(a *Auth, model string, deadline, now time.Time) bo
 }
 
 type scheduledRetryOpportunity struct {
-	ready   bool
-	at      time.Time
-	changed <-chan struct{}
+	ready                bool
+	at                   time.Time
+	changed              <-chan struct{}
+	antigravityShortWait bool
 }
 
 func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity scheduledRetryOpportunity, singleLimit time.Duration) (bool, error) {
@@ -342,10 +393,10 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	start := clock.Now()
 	wait := opportunity.at.Sub(start)
 	if wait <= 0 {
-		return true, nil
+		return !opportunity.antigravityShortWait, nil
 	}
 	b.mu.Lock()
-	if b.waiting || wait > singleLimit || wait > b.configuredWait-b.ActiveWait {
+	if b.waiting || (opportunity.antigravityShortWait && b.antigravityWaitUsed) || wait > singleLimit || wait > b.configuredWait-b.ActiveWait {
 		b.mu.Unlock()
 		return false, nil
 	}
@@ -354,6 +405,10 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 		return false, nil
 	}
 	b.waiting = true
+	if opportunity.antigravityShortWait {
+		b.antigravityWaitUsed = true
+		b.UpstreamDecision = "short_wait"
+	}
 	b.mu.Unlock()
 	executor.NotifyContinuityWaitStart(ctx)
 	defer executor.NotifyContinuityWaitEnd(ctx)
@@ -492,6 +547,63 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			room = maxCredentials == 0 || b.routeCount() < maxCredentials
 		}
 		first = false
+		if facts := scheduledAntigravity429(previous); facts != nil {
+			if !m.canOpenScheduledRound(ctx, opts, previous, s.Round, defaultRetry, homeLimit, providers, model) {
+				return zero, scheduledAntigravityTerminal(ctx, facts)
+			}
+			// A full credential round may have stopped before an eligible
+			// provider was reached. Try that provider without waiting. Home
+			// owns its selection, so only a real send opens the next round.
+			if !room && (m.HomeEnabled() || m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready) {
+				probe := &scheduledAlternateRound{from: s.Round, excluded: attempted}
+				alternateCtx := context.WithValue(seedScheduledRoundExclusions(ctx, attempted), scheduledAlternateRoundKey{}, probe)
+				alternateHomeLimit := homeLimit
+				result, alternateErr := execute(alternateCtx, withAttemptedAuthTracker(opts, make(map[string]struct{})), s.Round+1, roundLimit, &alternateHomeLimit)
+				if ctx.Err() != nil {
+					return zero, ctx.Err()
+				}
+				if alternateErr == nil {
+					return result, nil
+				}
+				if current, _ := RequestBudgetSnapshotFromContext(ctx); current.Round != s.Round {
+					if isRequestInvalidError(alternateErr) || isRequestTerminatedError(alternateErr) || isRequestStopError(alternateErr) || isSchedulerRejectError(alternateErr) {
+						return zero, alternateErr
+					}
+					homeLimit = alternateHomeLimit
+					previous, roundCause = alternateErr, alternateErr
+					continue
+				}
+			}
+			delay := facts.RetryAt.Sub(facts.ObservedAt)
+			if delay <= 0 || delay >= 3*time.Second {
+				return zero, scheduledAntigravityTerminal(ctx, facts)
+			}
+			// Immediately usable alternatives have already been exhausted.
+			// This one recovery targets precisely the same credential and model.
+			opportunity := scheduledRetryOpportunity{at: facts.RetryAt, antigravityShortWait: true}
+			proceed, waitErr := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
+			if waitErr != nil {
+				return zero, waitErr
+			}
+			if !proceed || !b.nextRound(s.Round) {
+				return zero, scheduledAntigravityTerminal(ctx, facts)
+			}
+			retryCtx, retryOpts := b.scheduledAntigravityRepeat(ctx, opts)
+			result, retryErr := execute(retryCtx, retryOpts, s.Round+1, roundLimit, &homeLimit)
+			if ctx.Err() != nil {
+				return zero, ctx.Err()
+			}
+			if retryErr == nil {
+				return result, nil
+			}
+			if retryFacts := scheduledAntigravity429(retryErr); retryFacts != nil {
+				return zero, scheduledAntigravityTerminal(ctx, retryFacts)
+			}
+			if hasUpstreamExecutionAttempt(retryErr) || isRequestTerminatedError(retryErr) {
+				return zero, retryErr
+			}
+			return zero, scheduledAntigravityTerminal(ctx, facts)
+		}
 		if room {
 			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, attempted, roundCause)
 			// Home already explored its entire round in one RPC loop. A

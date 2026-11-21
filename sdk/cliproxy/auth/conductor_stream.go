@@ -168,6 +168,9 @@ func readStreamBootstrapWithTimeout(ctx context.Context, ch <-chan cliproxyexecu
 // example because the downstream connection was closed in response to the same upstream error.
 // Errors without RetryAfter, such as plain client cancellations, are not recorded.
 func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, opts cliproxyexecutor.Options, err error, ephemeral bool, executionSeq uint64) {
+	if scheduledAntigravity429(err) != nil {
+		return
+	}
 	retryAfter := retryAfterFromError(err)
 	if m == nil || auth == nil || retryAfter == nil {
 		return
@@ -1180,6 +1183,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		streamResult, errStream = validateStreamResult(streamResult, errStream)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
+		if noteScheduledAntigravityFailure(ctx, errStream, auth, provider, execReq.Model) {
+			return nil, errStream
+		}
 		if errStream != nil {
 			rerr := resultErrorFromError(errStream)
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(ctx))
@@ -1277,6 +1283,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCancel
 			}
+		}
+		if noteScheduledAntigravityFailure(ctx, bootstrapErr, auth, provider, execReq.Model) {
+			discardStreamChunks(streamResult.Chunks)
+			return nil, bootstrapErr
 		}
 		if bootstrapErr != nil {
 			action, okAction := matchRequestScopedErrorAction(auth, bootstrapErr, m.requestScopedErrorConfig(ctx))

@@ -1314,6 +1314,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
+			if noteScheduledAntigravityFailure(execCtx, errExec, auth, provider, execReq.Model) {
+				if !budgetCanRepeat(execCtx) {
+					return cliproxyexecutor.Response{}, errExec
+				}
+				authErr = errExec
+				break
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, auth, execOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
@@ -1733,12 +1740,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
 		if homeMode {
-			if selection != nil && RequestBudgetEnforced(ctx) && !m.scheduledFundingAllows(ctx, auth) {
-				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "funding_ineligible"); errEnd != nil {
+			if reason := m.scheduledHomeExclusion(ctx, auth, provider); selection != nil && reason != "" {
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, reason); errEnd != nil {
 					return nil, errEnd
 				}
 				if _, repeated := tried[auth.ID]; repeated {
-					return nil, newNoAvailableRouteError(routeModel)
+					return nil, preferredExecutionAttemptError(newNoAvailableRouteError(routeModel), upstreamErr)
 				}
 				tried[auth.ID] = struct{}{}
 				homeExcludedAuthIDs[auth.ID] = struct{}{}

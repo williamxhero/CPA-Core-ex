@@ -197,7 +197,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = antigravityHTTPStatusErr(ctx, httpResp, bodyBytes)
 		return nil, err
 	}
 

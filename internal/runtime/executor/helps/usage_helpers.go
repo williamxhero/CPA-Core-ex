@@ -30,6 +30,7 @@ import (
 )
 
 type UsageReporter struct {
+	schedulingContext    context.Context
 	requestID            string
 	traceID              string
 	selectionID          string
@@ -152,6 +153,9 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		generate:        usage.GenerateFromContext(ctx),
 		stream:          usage.StreamFromContext(ctx),
 	}
+	if cliproxyauth.RequestBudgetEnforced(ctx) {
+		reporter.schedulingContext = ctx
+	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
@@ -255,6 +259,9 @@ func (r *UsageReporter) ObserveResponseModel(payload []byte) {
 	r.responseModelMu.Lock()
 	r.responseModel = served
 	r.responseModelMu.Unlock()
+	if r.schedulingContext != nil {
+		cliproxyauth.ObserveScheduledServedModel(r.schedulingContext, served)
+	}
 	if terminal {
 		r.responseModelFinal.Store(true)
 	}
