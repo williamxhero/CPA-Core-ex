@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/base64"
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -61,6 +63,44 @@ func TestHostHTTPClientMarksUpstreamAttempt(t *testing.T) {
 			}
 			if !cliproxyexecutor.UpstreamAttempted(ctx) {
 				t.Fatal("host HTTP request did not mark an upstream attempt")
+			}
+		})
+	}
+}
+
+func TestHostHTTPClientKeepsLocalDenialOutOfUpstreamErrors(t *testing.T) {
+	var sends atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sends.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	host := New()
+	host.runtimeConfig = &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+	client := host.newHTTPClient(nil)
+	recordingDenied := errors.New("fixture budget exhausted")
+	for _, name := range []string{"admission", "budget"} {
+		t.Run(name, func(t *testing.T) {
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx := context.WithValue(t.Context(), "gin", ginCtx)
+			if name == "admission" {
+				ctx = cliproxyexecutor.WithInferenceAdmission(ctx, func(context.Context) error { return errors.New("fixture gate closed") })
+			} else {
+				ctx = cliproxyexecutor.WithBusinessAttemptRecorder(ctx, func(context.Context) error { return recordingDenied })
+			}
+			_, errDo := client.Do(ctx, pluginapi.HTTPRequest{Method: http.MethodPost, URL: upstream.URL + "/?query=url-CANARY"})
+			if name == "admission" && !cliproxyexecutor.IsInferenceAdmissionError(errDo) ||
+				name == "budget" && !errors.Is(errDo, recordingDenied) {
+				t.Fatalf("no typed %s denial: %v", name, errDo)
+			}
+			if strings.Contains(errDo.Error(), "CANARY") {
+				t.Errorf("local denial exposed the upstream URL: %v", errDo)
+			}
+			if raw, exists := ginCtx.Get("API_RESPONSE"); exists {
+				t.Errorf("local denial fabricated an upstream response: %s", raw)
+			}
+			if sends.Load() != 0 {
+				t.Fatalf("locally denied request reached the wire: %d", sends.Load())
 			}
 		})
 	}

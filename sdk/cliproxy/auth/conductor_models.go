@@ -371,6 +371,9 @@ func (m *Manager) filterExecutionModelsForRequest(ctx context.Context, auth *Aut
 		return nil
 	}
 	now := time.Now()
+	if RequestBudgetEnforced(ctx) {
+		now = m.getContinuityClock().Now()
+	}
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {
 		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
@@ -445,6 +448,10 @@ func (m *Manager) inferenceModelCandidates(auth *Auth, routeModel string, req cl
 }
 
 func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel string) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
+	return m.executionModelCandidatesWithAliasOrdered(auth, routeModel, true)
+}
+
+func (m *Manager) executionModelCandidatesWithAliasOrdered(auth *Auth, routeModel string, rotate bool) ([]string, bool, OAuthModelAliasResult, *apiKeyModelRoutingSnapshot) {
 	routing := m.loadAPIKeyModelRouting()
 	requestedModel := rewriteModelForAuth(routeModel, auth)
 	aliasResult := m.resolveExecutionAliasResultForRequestedWithRouting(routing, auth, requestedModel)
@@ -461,7 +468,7 @@ func (m *Manager) executionModelCandidatesWithAlias(auth *Auth, routeModel strin
 	}
 	if len(candidates) == 0 {
 		if pool := resolveOpenAICompatUpstreamModelPool(routing.config, auth, upstreamModel); len(pool) > 0 {
-			if len(pool) == 1 {
+			if len(pool) == 1 || !rotate {
 				candidates = pool
 			} else {
 				offset := m.nextModelPoolOffset(openAICompatModelPoolKey(auth, upstreamModel), len(pool))

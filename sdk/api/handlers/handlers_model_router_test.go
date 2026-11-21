@@ -860,3 +860,72 @@ func TestQueryFromContextNilURLDoesNotPanic(t *testing.T) {
 		t.Fatalf("queryFromContext() = %#v, want nil when URL is nil", got)
 	}
 }
+func TestHandlerModelRouterCannotBypassSchedulingHardRestrictions(t *testing.T) {
+	const model = "hard-restriction-model"
+	const pluginID = "direct-executor"
+	for _, testcase := range []struct {
+		name        string
+		mode        string
+		funding     []string
+		pin         bool
+		wantBlocked bool
+	}{
+		{name: "restricted funding", mode: "enforce", funding: []string{"subscription"}, wantBlocked: true},
+		{name: "pinned credential", mode: "enforce", pin: true, wantBlocked: true},
+		{name: "unrestricted plugin", mode: "enforce"},
+		{name: "shadow never blocks", mode: "shadow", funding: []string{"subscription"}, pin: true},
+	} {
+		t.Run(testcase.name, func(t *testing.T) {
+			host := &handlerDirectExecutorRouteHost{}
+			host.hasRouters = true
+			host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+				return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: pluginID}, true
+			}
+			manager := coreauth.NewManager(nil, nil, nil)
+			cfg := &internalconfig.Config{}
+			cfg.Routing.ProviderScheduling.Mode = testcase.mode
+			cfg.Routing.ProviderScheduling.AllowedFunding = testcase.funding
+			manager.SetConfig(cfg)
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			handler.SetModelRouterHost(host)
+			ctx := context.Background()
+			if testcase.pin {
+				ctx = WithPinnedAuthID(ctx, "existing-hard-binding")
+			}
+			body := []byte("{\"model\":\"hard-restriction-model\"}")
+			assertResult := func(kind string, status int) {
+				t.Helper()
+				if testcase.wantBlocked {
+					if status != http.StatusServiceUnavailable || host.lastPluginID != "" {
+						t.Errorf("%s: status %d, business executor %q; want 503 with no dispatch", kind, status, host.lastPluginID)
+					}
+				} else if status != 0 || host.lastPluginID != pluginID {
+					t.Errorf("%s: status %d, business executor %q; want dispatch to %q", kind, status, host.lastPluginID, pluginID)
+				}
+				host.lastPluginID = ""
+			}
+			_, _, execErr := handler.ExecuteWithAuthManager(ctx, "openai", model, body, "")
+			if execErr != nil {
+				assertResult("execute", execErr.StatusCode)
+			} else {
+				assertResult("execute", 0)
+			}
+			_, _, countErr := handler.ExecuteCountWithAuthManager(ctx, "openai", model, body, "")
+			if countErr != nil {
+				assertResult("count", countErr.StatusCode)
+			} else {
+				assertResult("count", 0)
+			}
+			data, _, streamErrors := handler.ExecuteStreamWithAuthManager(ctx, "openai", model, body, "")
+			if data != nil {
+				for range data {
+				}
+			}
+			if streamErr := <-streamErrors; streamErr != nil {
+				assertResult("stream", streamErr.StatusCode)
+			} else {
+				assertResult("stream", 0)
+			}
+		})
+	}
+}

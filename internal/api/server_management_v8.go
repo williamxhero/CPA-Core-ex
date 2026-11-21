@@ -18,7 +18,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8 := s.engine.Group(prefix)
 	v8.Use(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, prefix+"/inference-gates") || c.Request.URL.Path == prefix+"/credential-quota/credential-association" ||
-			c.Request.URL.Path == prefix+"/credential-quota/sources" || c.Request.URL.Path == prefix+"/resource-capabilities" {
+			strings.HasPrefix(c.Request.URL.Path, prefix+"/observability/routing/") || c.Request.URL.Path == prefix+"/credential-quota/sources" || c.Request.URL.Path == prefix+"/resource-capabilities" {
 			c.Header("Cache-Control", "no-store")
 		}
 	}, s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
@@ -57,6 +57,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/routing/model-definitions/refresh", s.mgmt.RefreshModelDefinitions)
 	v8.POST("/models/refresh", s.mgmt.RefreshModelDefinitions)
 
+	v8.GET("/observability/routing/:id", s.mgmt.GetRoutingTrace)
 	v8.GET("/observability/logs", s.mgmt.GetLogs)
 	v8.DELETE("/observability/logs", s.mgmt.DeleteLogs)
 	v8.GET("/observability/logs/errors", s.mgmt.GetRequestErrorLogs)

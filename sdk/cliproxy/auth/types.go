@@ -157,7 +157,10 @@ type Auth struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq     uint64    `json:"-"`
+	cooldownRecordedSeq uint64 `json:"-"`
+	// providerRetryAt records the deadline of an explicit upstream hint.
+	// A persisted or synthesized cooldown alone cannot authorize waiting.
+	providerRetryAt         time.Time `json:"-"`
 	forceCooldownUntil      time.Time `json:"-"`
 	quotaForceCooldownUntil time.Time `json:"-"`
 	credQuotaForceUntil     time.Time `json:"-"`
@@ -412,7 +415,10 @@ type ModelState struct {
 	// stamped at or below it were dispatched before the cooldown existed and
 	// must not clear it. Runtime only: zero after restart so restored
 	// cooldowns can still be cleared by any success.
-	cooldownRecordedSeq     uint64    `json:"-"`
+	cooldownRecordedSeq uint64 `json:"-"`
+	// providerRetryAt records the deadline of an explicit upstream hint.
+	// A persisted or synthesized cooldown alone cannot authorize waiting.
+	providerRetryAt         time.Time `json:"-"`
 	forceCooldownUntil      time.Time `json:"-"`
 	quotaForceCooldownUntil time.Time `json:"-"`
 	nonQuotaCooldownUntil   time.Time `json:"-"`

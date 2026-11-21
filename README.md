@@ -4,11 +4,12 @@
 
 ## 开始使用
 
-Core 负责请求路由、协议转换、凭证选择与推理门禁。配合 CPA-Manager-Plus-ex 管理配置，配合 CPA-Usage-Keeper-ex 保存用量。
+Core 负责请求路由、协议转换、接入调度与推理门禁。配合 CPA-Manager-Plus-ex 管理配置，配合 CPA-Usage-Keeper-ex 保存用量。
 
 - 配置入口：[config.example.yaml](config.example.yaml)。完整上游说明见 [README-source.md](README-source.md)。
 - 已确认的额度或余额耗尽由 Core 自动暂停：只阻断证据覆盖的接入、模型或钱包成员；后台拿到同一范围的最新有效证据才恢复。普通限流和运营低余额保护仍分别处理。
-- 流恢复以正文输出为边界；正文输出前可以切换凭证，正文输出后保留原错误，避免重复输出。
+- 同一模型有多个接入时，可在配置的 `routing.provider-scheduling` 按模型或调用方启用统一调度。可先设 `shadow` 对照决策，再设 `enforce` 启用；默认关闭。
+- 流已交付文本或工具调用，或无法确认可以安全重放时，不再透明切换接入。
 
 需要 Go 1.26 或更高。在仓库根目录执行：
 
@@ -31,7 +32,8 @@ go build -o cli-proxy-api.exe ./cmd/server
 - **官方 OpenAI 路由与模型参数兼容**：上游官方 API provider 可能因错误 executor、过期资源身份和较低优先级而根本没有被请求；`gpt-6.1-sol` 也要求 `max_completion_tokens` 而不是 `max_tokens`。本 fork 将 `api-wxh` 纳入 OpenAI-compatible 路由、重建有效资源身份并修正最终参数。参数兼容对应 [issue #24](https://github.com/williamxhero/CPA-Core-ex/issues/24)，资源身份问题由本节第一条归档。
 - **reasoning effort 可追溯用量**：上游用量记录无法区分“客户端未指定 effort”和“数据在翻译阶段丢失”。本 fork 用 `auto` 表示未指定、保留 `none` 和具体 effort，并防止上游响应覆盖客户端已选值。对应 [issue #25](https://github.com/williamxhero/CPA-Core-ex/issues/25)。
 - **容量错误与未完成流的内部恢复**：上游遇到容量错误或流在传输中断时通常直接把失败交给客户端。本 fork 在 Core 内对可重试的容量失败和未完成流进行有界重试，同时保留顺序、取消和最终错误语义。对应 [issue #1](https://github.com/williamxhero/CPA-Core-ex/issues/1)、[#26](https://github.com/williamxhero/CPA-Core-ex/issues/26)、[#27](https://github.com/williamxhero/CPA-Core-ex/issues/27) 和 [#29](https://github.com/williamxhero/CPA-Core-ex/issues/29)。
-- **额度耗尽前持续服务**：只要仍有可用 Provider 额度，Core 就会在容量错误、流中断或当前凭证不可用时继续切换候选凭证并重试；只有可用额度全部耗尽后才向客户端返回终止错误。对应 [issue #22](https://github.com/williamxhero/CPA-Core-ex/issues/22) 和 [issue #28](https://github.com/williamxhero/CPA-Core-ex/issues/28)。
+- **同模型统一选路和快返**：订阅与预付费接入在同一个候选池内，先筛模型、能力、资金权限与当前状态，再按优先级选路。允许的可用备用优先；完全无路且无预算内恢复机会时，立即返回 503/`no_available_route`。管理员可用响应关联号查询排除、实发与等待情况。对应父项目 [#59](https://github.com/williamxhero/CPA/issues/59)。
+- **额度耗尽前的既有回退**：现有容量错误、流中断与凭证恢复保留各自的安全条件；未纳入统一调度范围的模型继续使用原策略。对应 [issue #22](https://github.com/williamxhero/CPA-Core-ex/issues/22) 和 [issue #28](https://github.com/williamxhero/CPA-Core-ex/issues/28)。
 - **用量双通道分发**：上游用量入队容易在订阅采集与 HTTP 轮询之间二选一。本 fork 同一条已提交记录同时通知订阅者并提供 HTTP 轮询，Keeper 等外部采集器可以并行工作而不会互相截断。
 - **插件宿主兼容**：上游在 Windows 非 cgo 场景下对插件能力的声明不完整。本 fork 保持插件能力与运行时身份的一致，避免宿主因为构建模式误判而拒绝已验证的插件。
 

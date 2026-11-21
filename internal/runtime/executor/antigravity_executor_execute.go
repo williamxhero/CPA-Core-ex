@@ -108,7 +108,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newAntigravityInferenceHTTPClient(ctx, e.cfg, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	// Credential retry rounds are owned by the conductor. Perform one upstream
 	// request per credential so request-retry is not consumed twice.
@@ -192,7 +192,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = antigravityHTTPStatusErr(ctx, httpResp, bodyBytes)
 		return resp, err
 	}
 
@@ -350,7 +350,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := newAntigravityInferenceHTTPClient(ctx, e.cfg, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	// Credential retry rounds are owned by the conductor. Perform one upstream
@@ -440,7 +440,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		if httpResp.StatusCode == http.StatusForbidden {
 			e.applyAntigravityTOSState(e.cfg, auth, bodyBytes)
 		}
-		err = newAntigravityStatusErr(httpResp.StatusCode, bodyBytes)
+		err = antigravityHTTPStatusErr(ctx, httpResp, bodyBytes)
 		return resp, err
 	}
 

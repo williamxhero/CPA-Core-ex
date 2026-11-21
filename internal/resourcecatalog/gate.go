@@ -270,29 +270,40 @@ func (c *Catalog) GateOperation(id string) (resource.GateOperation, resource.Gat
 // AdmitInference linearizes ONE new business attempt. Its caller may drain the
 // admitted attempt after a later pause, but must call again for every resend.
 func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
+	_, err := c.inspectInference(b, model, false)
+	return err
+}
+
+// InspectInference returns typed native quota facts from the same read-only
+// authority check used for actual selection, without projecting gate metadata.
+func (c *Catalog) InspectInference(b *resource.Binding, model string) (*resource.QuotaGateEvidence, error) {
+	return c.inspectInference(b, model, true)
+}
+
+func (c *Catalog) inspectInference(b *resource.Binding, model string, inspect bool) (*resource.QuotaGateEvidence, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.currentLocked() || !c.gateCurrentLocked() {
-		return ErrUnavailable
+		return nil, ErrUnavailable
 	}
 	if !c.bindingLocked(b) {
 		// Preserve the original unknown-attribution fence for external owners.
 		// Native quota evidence covers a known subject and never expands that fence.
 		if !c.hasExternalGateLocked() {
-			return nil
+			return nil, nil
 		}
-		return ErrConflict
+		return nil, ErrConflict
 	}
 	required, released, err := c.legacyFundingAdmissionLocked(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if required && !released {
-		return ErrGateDenied
+		return nil, ErrGateDenied
 	}
 	parents, err := c.providerParentsLocked(b)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, g := range c.state.Gates.Gates {
 		if g.Model != "" && g.Model != model {
@@ -303,17 +314,21 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		}
 		if IsCoreQuotaGateOwner(g.Owner) {
 			if matchingCodexGateTarget(g, *b) {
-				return ErrGateDenied
+				if inspect {
+					evidence, _ := QuotaGateDetails(g.Owner, g.EvidenceID)
+					return evidence, ErrGateDenied
+				}
+				return nil, ErrGateDenied
 			}
 			continue
 		}
 		if g.Subject == "provider" {
 			applies, err := c.providerGateAppliesLocked(g, parents, b)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if applies {
-				return ErrGateDenied
+				return nil, ErrGateDenied
 			}
 			continue
 		}
@@ -323,12 +338,12 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		for _, gt := range g.Targets {
 			for _, t := range b.Targets {
 				if gt.ResourceID == t.ResourceID && sameGateLifecycle(gt, t) {
-					return ErrGateDenied
+					return nil, ErrGateDenied
 				}
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // BeginOwnedAuthSave serializes a local native store write with publication.

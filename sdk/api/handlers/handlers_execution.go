@@ -46,6 +46,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 }
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	ctx = coreauth.WithRequestBudget(ctx)
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
@@ -55,13 +56,15 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, errMsg
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		h.startRoutingTrace(ctx, originalRequestedModel, modelName, execOptions.AuthSelectionModel, execOptions.InternalSource)
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions, ctx)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
+	h.startRoutingTrace(ctx, originalRequestedModel, normalizedModel, execOptions.AuthSelectionModel, execOptions.InternalSource)
 	reqMeta := requestExecutionMetadata(ctx)
 	if execOptions.Path != "" {
 		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
@@ -110,7 +113,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	ctx = coreauth.WithFreshRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg
@@ -137,7 +140,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions, ctx)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
@@ -181,7 +184,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		return nil, nil, errMsg
@@ -197,12 +200,9 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 }
 
 func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
-	}
-	host := h.pluginExecutorHost()
-	if host == nil {
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
+	host, setupErr := h.pluginExecutorForExecution(ctx, modelName, execOptions.InternalSource)
+	if setupErr != nil {
+		return nil, nil, setupErr
 	}
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, false))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
@@ -225,12 +225,14 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
+	execCtx = h.AuthManager.BindPluginInferenceBudget(execCtx, executorPluginID, req, opts)
+	coreauth.RecordExternalExecutorRouting(execCtx, "")
 	resp, errExecute := host.ExecutePluginExecutor(execCtx, executorPluginID, req, opts)
 	if errExecute != nil {
 		if reporter != nil && !nestedTracker.hasNestedExecution() {
 			reporter.PublishFailure(execCtx, errExecute)
 		}
-		errMsg := executionErrorMessage(errExecute)
+		errMsg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(execCtx, errExecute))
 		lifecycle.completeError(execCtx, errMsg)
 		return nil, nil, errMsg
 	}
@@ -251,6 +253,9 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerType, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
+	}
+	if err := h.AuthManager.CheckProviderSchedulingUnboundExecution(ctx, modelName, pinnedAuthIDFromContext(ctx)); err != nil {
+		return nil, nil, executionErrorMessage(err)
 	}
 	host := h.pluginExecutorHost()
 	if host == nil {

@@ -41,7 +41,7 @@ func (h *BaseAPIHandler) HasAlternativeExecutionTarget(ctx context.Context, hand
 	if routeDecision.ExecutorPluginID != "" {
 		return false
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, false, routeDecision, execOptions, ctx)
 	if errMsg != nil {
 		return false
 	}
@@ -81,16 +81,10 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 }
 
 func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
+	host, setupErr := h.pluginExecutorForExecution(ctx, modelName, execOptions.InternalSource)
+	if setupErr != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
-		close(errChan)
-		return nil, nil, errChan
-	}
-	host := h.pluginExecutorHost()
-	if host == nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
+		errChan <- setupErr
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -121,12 +115,14 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
+	execCtx = h.AuthManager.BindPluginInferenceBudget(execCtx, executorPluginID, req, opts)
+	coreauth.RecordExternalExecutorRouting(execCtx, "")
 	streamResult, errStream := host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
 	if errStream != nil {
 		if reporter != nil && !nestedTracker.hasNestedExecution() {
 			reporter.PublishFailure(execCtx, errStream)
 		}
-		errMsg := executionErrorMessage(errStream)
+		errMsg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(execCtx, errStream))
 		lifecycle.completeError(execCtx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -219,6 +215,9 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		if !coreusage.StreamDeliveryTracked(ctx) {
+			defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
+		}
 		chunkIndex := 0
 		var historyChunks [][]byte
 		for {
@@ -246,10 +245,10 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 				return
 			}
 			if chunk.Err != nil {
-				errMsg := executionErrorMessage(chunk.Err)
+				errMsg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(execCtx, chunk.Err))
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
-				completionErr = chunk.Err
+				completionErr = errMsg.Error
 				select {
 				case errChan <- errMsg:
 				case <-done:
@@ -336,6 +335,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+	ctx = coreauth.WithRequestBudget(ctx)
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
@@ -351,9 +351,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		h.startRoutingTrace(ctx, originalRequestedModel, modelName, execOptions.AuthSelectionModel, execOptions.InternalSource)
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
-	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions)
+	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions, ctx)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -361,6 +362,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
+	h.startRoutingTrace(ctx, originalRequestedModel, normalizedModel, execOptions.AuthSelectionModel, execOptions.InternalSource)
 	reqMeta := requestExecutionMetadata(ctx)
 	if execOptions.Path != "" {
 		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
@@ -413,7 +415,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	ctx = coreauth.WithRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -604,7 +606,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 
 	maxBootstrapRetries := StreamingBootstrapRetries(h.CurrentConfig())
-	if h.AuthManager.HomeEnabled() {
+	if h.AuthManager.HomeEnabled() || coreauth.RequestBudgetEnforced(ctx) {
 		maxBootstrapRetries = 0
 	}
 	for bootstrapRetries := 0; !streamCanceledBeforeRead; {
@@ -613,7 +615,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+			bootstrapErr = executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, bootstrapStreamErr))
 			break
 		}
 		if h.AuthManager != nil {
@@ -629,11 +631,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		bootstrapRetries++
 		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
+			originalBootstrapErr := executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, bootstrapStreamErr))
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
 			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+				bootstrapErr = executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, enrichAuthSelectionError(retryErr, providers, normalizedModel)))
 			}
 			break
 		}
@@ -677,6 +679,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		if !coreusage.StreamDeliveryTracked(ctx) {
+			defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
+		}
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0
@@ -687,6 +692,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
+			lifecycle.finishRoutingTrace(completionStatus, completionErr)
 			if ctx == nil {
 				errChan <- msg
 				return true
@@ -761,10 +767,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return
 			}
 			if chunk.Err != nil {
-				errMsg := executionErrorMessage(chunk.Err)
+				errMsg := executionErrorMessage(coreauth.RoutingErrorForResponse(ctx, chunk.Err))
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
-				completionErr = chunk.Err
+				completionErr = errMsg.Error
 				_ = sendErr(errMsg)
 				return
 			}

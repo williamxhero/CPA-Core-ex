@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -171,7 +172,7 @@ func markUpstreamExecutionAttemptFromContext(ctx context.Context, err error) err
 	if err != nil && cliproxyexecutor.InferenceAdmissionDenied(ctx) {
 		return &cliproxyexecutor.InferenceAdmissionError{}
 	}
-	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) {
+	if err == nil || !cliproxyexecutor.UpstreamAttempted(ctx) || (RequestBudgetEnforced(ctx) && !cliproxyexecutor.BusinessUpstreamAttempted(ctx)) {
 		return err
 	}
 	return markUpstreamExecutionAttemptWithProvider(err, upstreamAttemptProviderFromContext(ctx))
@@ -306,6 +307,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
 	ctx = coreusage.CaptureIdentity(ctx)
 	ctx = contextWithInFlightScope(ctx, scope)
+	ctx, opts = m.setupRequestBudget(ctx, req, opts)
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -313,6 +315,21 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	opts, pinnedThread, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return cliproxyexecutor.Response{}, errThread
+	}
+	if RequestBudgetEnforced(ctx) {
+		if m.HomeEnabled() {
+			if unlock := m.lockHomeWebsocketSession(ctx, opts); unlock != nil {
+				defer unlock()
+			}
+		}
+		response, err := runScheduledExecution(m, ctx, normalized, req, opts, nil, func(ctx context.Context, opts cliproxyexecutor.Options, round, retryLimit int, homeLimit *int) (cliproxyexecutor.Response, error) {
+			_, maxCredentials, _ := m.retrySettings()
+			if m.HomeEnabled() {
+				return m.executeHomeOnce(ctx, normalized, req, opts, false, maxCredentials, homeLimit, round)
+			}
+			return m.executeMixedOnce(ctx, normalized, req, opts, maxCredentials, round, retryLimit)
+		})
+		return response, scheduledExecutionBoundaryError(ctx, err, pinnedThread)
 	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
@@ -600,6 +617,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	ctx = WithCodexClientRequest(ctx, isOpenAIImageExecutionOptions(opts) || IsCodexClientRequest(ctx, opts.Headers))
 	ctx = coreusage.CaptureIdentity(ctx)
 	ctx = contextWithInFlightScope(ctx, scope)
+	ctx, opts = m.setupRequestBudget(ctx, req, opts)
 	if m.HomeEnabled() {
 		if unlockSession := m.lockHomeWebsocketSession(ctx, opts); unlockSession != nil {
 			defer unlockSession()
@@ -620,6 +638,10 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	opts, pinnedThread, errThread := withClaudeThreadAuth(ctx, normalized, req, opts)
 	if errThread != nil {
 		return nil, errThread
+	}
+
+	if RequestBudgetEnforced(ctx) {
+		return m.executeScheduledStream(ctx, normalized, req, opts, pinnedThread)
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
@@ -1122,6 +1144,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if m.providerSchedulingMode(ctx, routeModel) != internalconfig.ProviderSchedulingOff {
+		opts = m.scheduleRequestOptions(req, opts)
+	}
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1138,8 +1163,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var routeReservation *routeReservation
+	defer func() { routeReservation.release() }()
 	for {
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		routeReservation.release()
+		routeReservation = nil
+		if roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
@@ -1154,6 +1183,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 		if errPick == nil {
+			routeReservation = takeRouteReservation(pickOpts)
 			updateInFlightScopeProvider(ctx, provider)
 		}
 		if errPick != nil {
@@ -1238,9 +1268,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = withUpstreamAttemptProvider(syncMetadataSessionToContext(execCtx, execOpts.Metadata), provider)
 			executionSeq := m.nextExecutionSeq()
 			startExec := time.Now()
-			resp, errExec := m.executeGateAttempt(execCtx, executor, auth, execReq, execOpts)
+			businessCtx := m.withBusinessInferenceBudget(execCtx, auth, execReq, execOpts, routeModel)
+			resp, errExec := m.executeGateAttempt(businessCtx, executor, auth, execReq, execOpts)
 			errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 			durationExec := time.Since(startExec)
+			if isBudgetReplayStop(errExec) {
+				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(errExec, upstreamErr)
+			}
 			if errExec != nil {
 				if hasUpstreamExecutionAttempt(errExec) {
 					upstreamErr = errExec
@@ -1249,14 +1283,15 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					return cliproxyexecutor.Response{}, errCtx
 				}
 				refreshCtx := newUpstreamAttemptContext(execCtx)
-				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized, execOpts.Headers); okRefresh {
+				if refreshed, okRefresh := m.tryRefreshAfterUnauthorized(refreshCtx, auth, errExec, didRefreshOnUnauthorized || !budgetCanRepeat(execCtx), execOpts.Headers); okRefresh {
 					auth = refreshed
 					didRefreshOnUnauthorized = true
 					execCtx = withUpstreamAttemptProvider(m.newUpstreamAttemptContext(execCtx), provider)
 					execCtx = syncMetadataSessionToContext(execCtx, execOpts.Metadata)
 					executionSeq = m.nextExecutionSeq()
 					startRetry := time.Now()
-					resp, errExec = m.executeGateAttempt(execCtx, executor, auth, execReq, execOpts)
+					businessCtx = m.withBusinessInferenceBudget(execCtx, auth, execReq, execOpts, routeModel)
+					resp, errExec = m.executeGateAttempt(businessCtx, executor, auth, execReq, execOpts)
 					errExec = markUpstreamExecutionAttemptFromContext(execCtx, errExec)
 					durationRetry := time.Since(startRetry)
 					if errExec != nil {
@@ -1275,6 +1310,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
+			if noteScheduledAntigravityFailure(execCtx, errExec, auth, provider, execReq.Model) {
+				if !budgetCanRepeat(execCtx) {
+					return cliproxyexecutor.Response{}, errExec
+				}
+				authErr = errExec
+				break
+			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: errExec == nil, CompletedResponse: errExec == nil && !resp.Incomplete && isCompletedExecutionPayload(resp.Payload), Options: execOpts, AccessToken: authAccessTokenForRequest(execCtx, auth, execOpts.Headers), RefreshToken: authRefreshToken(auth), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 			if errExec != nil {
 				result.Error = resultErrorFromError(errExec)
@@ -1292,6 +1334,9 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					m.MarkResult(execCtx, result)
 					errExec = annotateTrustedRetryAfterByHint(errExec)
 					syncPreferredUpstreamError(&upstreamErr, errExec)
+				}
+				if !budgetCanRepeat(execCtx) {
+					return cliproxyexecutor.Response{}, preferredExecutionAttemptError(errExec, upstreamErr)
 				}
 				if okAction {
 					if isRequestScopedStop(action, okAction) {
@@ -1348,6 +1393,9 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	routeModel := authSelectionModelFromOptions(opts, req.Model)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if m.providerSchedulingMode(ctx, routeModel) != internalconfig.ProviderSchedulingOff {
+		opts = m.scheduleRequestOptions(req, opts)
+	}
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1364,7 +1412,11 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var routeReservation *routeReservation
+	defer func() { routeReservation.release() }()
 	for {
+		routeReservation.release()
+		routeReservation = nil
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
@@ -1380,6 +1432,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 		if errPick == nil {
+			routeReservation = takeRouteReservation(pickOpts)
 			updateInFlightScopeProvider(ctx, provider)
 		}
 		if errPick != nil {
@@ -1580,6 +1633,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	responseAlias := requestedModelAliasFromOptions(opts, routeModel)
 	executionModel, restoreExecutionModel := executionModelForAuthSelection(opts, req.Model)
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	if m.providerSchedulingMode(ctx, routeModel) != internalconfig.ProviderSchedulingOff {
+		opts = m.scheduleRequestOptions(req, opts)
+	}
 	homeMode := m.HomeEnabled()
 	homeAuthCount := 1
 	tried := make(map[string]struct{})
@@ -1614,14 +1670,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	var routeReservation *routeReservation
+	defer func() { routeReservation.release() }()
 	var roundTiming homeRetryRoundTiming
 	for {
-		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
+		routeReservation.release()
+		routeReservation = nil
+		allowSameAuthRetry := homeMode && !(RequestBudgetEnforced(ctx) && requestSentToCredential(ctx, lastHomeAuthID)) && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
+		if roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) && !allowSameAuthRetry {
 			if lastErr != nil {
 				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
 				if homeMode {
-					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), true)
+					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), !RequestBudgetEnforced(ctx))
 				}
 				return nil, preferredErr
 			}
@@ -1642,6 +1702,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var errPick error
 		if homeMode {
 			selection, errPick = m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
+			if errPick != nil {
+				recordHomeRoutingPickFailure(ctx, errPick)
+			}
 			if selection != nil {
 				auth = selection.CloneAuthForRoute(routeModel)
 				executor = selection.Executor
@@ -1650,6 +1713,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		} else {
 			auth, executor, provider, errPick = m.pickNextMixedForInference(ctx, providers, routeModel, pickOpts, tried)
 			if errPick == nil {
+				routeReservation = takeRouteReservation(pickOpts)
 				updateInFlightScopeProvider(ctx, provider)
 			}
 		}
@@ -1675,14 +1739,27 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
 		if homeMode {
+			if reason := m.scheduledHomeExclusion(ctx, auth, provider); selection != nil && reason != "" {
+				recordHomeRoutingStage(ctx, auth, reason)
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, reason); errEnd != nil {
+					return nil, errEnd
+				}
+				if _, repeated := tried[auth.ID]; repeated {
+					return nil, preferredExecutionAttemptError(newNoAvailableRouteError(routeModel), upstreamErr)
+				}
+				tried[auth.ID] = struct{}{}
+				homeExcludedAuthIDs[auth.ID] = struct{}{}
+				homeAuthCount++
+				continue
+			}
 			m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		}
-		if selection != nil && allowSameAuthRetry && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && auth.ID != lastHomeAuthID {
+		if selection != nil && allowSameAuthRetry && roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) && auth.ID != lastHomeAuthID {
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "max_retry_credentials"); errEnd != nil {
 				return nil, errEnd
 			}
 			if lastErr != nil {
-				return nil, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), true)
+				return nil, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), !RequestBudgetEnforced(ctx))
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1695,7 +1772,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			// round while retaining the explicit same-auth retry path, which
 			// intentionally leaves the credential out of homeExcludedAuthIDs.
 			if _, alreadyTried := tried[auth.ID]; alreadyTried {
-				if _, excluded := homeExcludedAuthIDs[auth.ID]; excluded {
+				if _, excluded := homeExcludedAuthIDs[auth.ID]; excluded || (RequestBudgetEnforced(ctx) && requestSentToCredential(ctx, auth.ID)) {
+					recordHomeRoutingStage(ctx, auth, "request_excluded")
 					if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_excluded_auth"); errEnd != nil {
 						return nil, errEnd
 					}
@@ -1739,6 +1817,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				selection.End("attempt_bind_failed")
 				return nil, errBind
 			}
+			recordHomeRoutingStage(ctx, auth, "")
 		}
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
@@ -1881,7 +1960,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			action, okAction := matchRequestScopedErrorAction(auth, errStream, m.requestScopedErrorConfig(execCtx))
 			stoppedByRule := isRequestStopError(errStream) || isRequestScopedStop(action, okAction)
-			if stoppedByRule || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
+			if stoppedByRule || !budgetCanRepeat(execCtx) || (!okAction && (isRequestInvalidError(errStream) || cliproxyexecutor.IsUpstreamWebsocketTurnError(errStream))) {
 				// Only redispatch needs a release acknowledgement. Preserve the final
 				// response even when Home cannot acknowledge the released admission.
 				if selection != nil {
@@ -1938,7 +2017,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
-		return streamResult, nil
+		wrapped := wrapRouteReservationStream(ctx, streamResult, routeReservation)
+		routeReservation = nil
+		return wrapped, nil
 	}
 }
 
@@ -2726,6 +2807,14 @@ func warnLogUpstreamFailure(ctx context.Context, entry *log.Entry, provider, mod
 			entry = log.NewEntry(log.StandardLogger())
 		}
 	}
+	if trace := routingTraceFromContext(ctx); trace != nil {
+		entry.WithFields(log.Fields{
+			"routing_request_id": trace.data.RequestID,
+			"model":              trace.data.Model,
+			"status":             statusCodeFromError(err),
+		}).Warn("upstream execution failed")
+		return
+	}
 	authIdent := formatAuthIdentity(auth, provider)
 	errSummary := safeErrorDiagnosticForLog(err)
 	duration = duration.Round(time.Millisecond)
@@ -3161,4 +3250,14 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 		return updated, &Error{Code: "credential_superseded", Message: "credential was replaced during verification; re-run verification for the new credential", HTTPStatus: http.StatusConflict}
 	}
 	return updated, nil
+}
+
+func scheduledExecutionBoundaryError(ctx context.Context, err error, pinnedThread bool) error {
+	if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
+		err = unwrapExecutionBoundaryError(err)
+	}
+	if pinnedThread && err != nil && !isRequestStopError(err) {
+		return claudeThreadReplayError(err)
+	}
+	return err
 }

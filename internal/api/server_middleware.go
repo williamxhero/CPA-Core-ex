@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/safemode"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
@@ -523,6 +524,7 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
 				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
+				reqCtx = coreauth.WithProviderSchedulingCaller(reqCtx, result.Provider, result.Principal)
 				c.Request = c.Request.WithContext(reqCtx)
 			}
 			middleware.CaptureAuthenticatedRequestBody(c)

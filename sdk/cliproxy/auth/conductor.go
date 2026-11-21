@@ -191,6 +191,10 @@ type resultPolicyHolder struct {
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
+	routingTraces             routingTraceStore
+	schedulingInventory       atomic.Pointer[schedulingInventoryReader]
+	providerSchedulingUse     providerSchedulingUse
+	providerSchedulingWake    providerSchedulingWake
 	inFlightTracker           *inFlightTracker
 	store                     Store
 	cooldownStore             CooldownStateStore

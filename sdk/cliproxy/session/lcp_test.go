@@ -399,6 +399,42 @@ func TestMerklePrefixMatcherTTLAndAuthInvalidation(t *testing.T) {
 	}
 }
 
+func TestMerklePrefixMatcherPeekDoesNotRenewBinding(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		request    []CanonicalTurn
+		compaction bool
+	}{
+		{name: "extension", request: turnsFromTexts("turn1", "turn2", "turn3", "turn4", "turn5", "turn6")},
+		{name: "compaction", request: turnsFromTexts("summary-of-1-to-3", "turn4", "turn5", "turn6"), compaction: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			start := time.Unix(60, 0)
+			now := start
+			matcher := NewMerklePrefixMatcherWithConfig(MerklePrefixMatcherConfig{
+				TTL: time.Minute, NowFunc: func() time.Time { return now },
+			})
+			const namespace = "lcp:v1:peek:model:caller"
+			bound := matcher.BindWithResult(namespace, turnsFromTexts("turn1", "turn2", "turn3", "turn4", "turn5"), "route-a")
+			fp, minPrefix, tails, env := matcher.PrepareExt(tt.request)
+
+			now = start.Add(45 * time.Second)
+			match, ok := matcher.PeekFingerprintsWithContext(namespace, fp, tails, env, minPrefix)
+			if !ok || match.AuthID != "route-a" || match.IsFork || match.IsCompaction != tt.compaction || match.AccessNumber != bound.AccessNumber {
+				t.Fatalf("peek should identify the existing route without recording an access: got %+v, found=%v", match, ok)
+			}
+
+			now = start.Add(time.Minute)
+			if _, ok := matcher.PeekFingerprintsWithContext(namespace, fp, tails, env, minPrefix); ok {
+				t.Fatal("peek should ignore the expired route")
+			}
+			if _, ok := matcher.Match(namespace, tt.request); ok {
+				t.Fatal("peek should not keep the route alive for later selection")
+			}
+		})
+	}
+}
+
 func TestMerklePrefixMatcherConcurrentAccess(t *testing.T) {
 	matcher := NewMerklePrefixMatcher(time.Minute)
 	defer matcher.Clear()

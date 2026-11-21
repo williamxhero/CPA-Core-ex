@@ -9,6 +9,7 @@ type downstreamWebsocketContextKey struct{}
 type requireUpstreamWebsocketContextKey struct{}
 type upstreamAttemptTrackerContextKey struct{}
 type localWebsocketTurnTrackerContextKey struct{}
+type businessAttemptRecorderKey struct{}
 type continuityWaitObserverContextKey struct{}
 
 // ContinuityWaitObserver notifies a downstream transport when a real continuity wait starts and ends.
@@ -19,6 +20,7 @@ type ContinuityWaitObserver interface {
 
 type upstreamAttemptTracker struct {
 	attempted       atomic.Bool
+	businessSent    atomic.Bool
 	admissionDenied atomic.Bool
 }
 
@@ -80,6 +82,46 @@ func MarkUpstreamAttempt(ctx context.Context) {
 		return
 	}
 	tracker.attempted.Store(true)
+}
+
+// WithBusinessAttemptRecorder binds one request accounting callback to the actual send boundary.
+func WithBusinessAttemptRecorder(ctx context.Context, record func(context.Context) error) context.Context {
+	return context.WithValue(ctx, businessAttemptRecorderKey{}, record)
+}
+
+func businessAttemptRecorder(ctx context.Context) func(context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	record, _ := ctx.Value(businessAttemptRecorderKey{}).(func(context.Context) error)
+	return record
+}
+
+// MarkBusinessUpstreamAttempt is called exactly once per business send, after
+// admission and before delegating to the transport. Handshakes and auth
+// preparation may use MarkUpstreamAttempt but must not call this function.
+func MarkBusinessUpstreamAttempt(ctx context.Context) error {
+	record := businessAttemptRecorder(ctx)
+	if record == nil {
+		return nil
+	}
+	if err := record(ctx); err != nil {
+		return err
+	}
+	if tracker, _ := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker); tracker != nil {
+		tracker.businessSent.Store(true)
+		tracker.attempted.Store(true)
+	}
+	return nil
+}
+
+// BusinessUpstreamAttempted reports business dispatch evidence for this executor invocation.
+func BusinessUpstreamAttempted(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	tracker, _ := ctx.Value(upstreamAttemptTrackerContextKey{}).(*upstreamAttemptTracker)
+	return tracker != nil && tracker.businessSent.Load()
 }
 
 // UpstreamAttempted reports whether the tracked provider execution reached an upstream transport boundary.

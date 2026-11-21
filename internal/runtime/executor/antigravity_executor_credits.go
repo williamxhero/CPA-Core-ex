@@ -18,6 +18,7 @@ import (
 	homekv "github.com/router-for-me/CLIProxyAPI/v8/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -400,6 +401,27 @@ func parseAntigravityTOSViolation(body []byte) *antigravityTOSViolation {
 		}
 	}
 	return nil
+}
+
+// antigravityHTTPStatusErr is called only with a real inference HTTP response.
+func antigravityHTTPStatusErr(ctx context.Context, resp *http.Response, body []byte) error {
+	if resp.StatusCode != http.StatusTooManyRequests || !cliproxyauth.RequestBudgetEnforced(ctx) || !ojson.ValidBytes(body) {
+		return newAntigravityStatusErr(resp.StatusCode, body)
+	}
+	status := ojson.GetBytesNoCopy(body, "error.status")
+	if status.Type != ojson.String || !strings.EqualFold(strings.TrimSpace(status.String()), "RESOURCE_EXHAUSTED") {
+		return newAntigravityStatusErr(resp.StatusCode, body)
+	}
+	switch reason := strings.ToUpper(decideAntigravity429(body).reason); reason {
+	case "QUOTA_EXHAUSTED", "INSUFFICIENT_G1_CREDITS_BALANCE", "RATE_LIMIT_EXCEEDED":
+		return newAntigravityStatusErr(resp.StatusCode, body)
+	}
+	now := cliproxyauth.RequestBudgetNow(ctx)
+	retryAt, source := helps.ParseAntigravityRecovery(resp.Header, body, now)
+	return &cliproxyexecutor.AntigravityResourceExhausted{ObservedAt: now, RetryAt: retryAt, RetrySource: source, Cause: statusErr{
+		code: http.StatusTooManyRequests,
+		msg:  `{"error":{"code":429,"message":"Antigravity upstream resources are temporarily unavailable.","status":"RESOURCE_EXHAUSTED"}}`,
+	}}
 }
 
 func newAntigravityStatusErr(statusCode int, body []byte) statusErr {

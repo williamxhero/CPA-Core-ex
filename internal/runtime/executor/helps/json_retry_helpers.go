@@ -51,6 +51,66 @@ func ParseGoogleRetryAfter(statusCode int, headers http.Header, errorBody []byte
 	return parseGoogleMessageRetryDelay(errorBody, false)
 }
 
+// ParseAntigravityRecovery trusts only one HTTP Retry-After field or typed
+// RetryInfo. The later valid time wins.
+func ParseAntigravityRecovery(headers http.Header, body []byte, now time.Time) (time.Time, string) {
+	var at time.Time
+	source := ""
+	if values := headers.Values("Retry-After"); len(values) == 1 {
+		raw := strings.TrimSpace(values[0])
+		if decimalRetryDigits(raw) {
+			n, err := strconv.ParseUint(raw, 10, 64)
+			if err == nil && n <= uint64(math.MaxInt64/int64(time.Second)) {
+				at = now.Add(time.Duration(n) * time.Second)
+			}
+		} else if date, err := http.ParseTime(raw); err == nil && !date.Before(now) {
+			at = date
+		}
+		if !at.IsZero() {
+			source = "retry_after"
+		}
+	}
+	for _, detail := range ojson.GetBytesNoCopy(body, "error.details").Array() {
+		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.RetryInfo" {
+			continue
+		}
+		value := detail.Get("retryDelay")
+		if value.Type != ojson.String {
+			continue
+		}
+		raw := value.String()
+		seconds, ok := strings.CutSuffix(raw, "s")
+		whole, fraction, dotted := strings.Cut(seconds, ".")
+		if !ok || !decimalRetryDigits(whole) || (dotted && (!decimalRetryDigits(fraction) || len(fraction) > 9)) {
+			continue
+		}
+		n, err := strconv.ParseUint(whole, 10, 64)
+		if err != nil || n > 315576000000 {
+			continue
+		}
+		duration, err := time.ParseDuration(raw)
+		if err != nil {
+			duration = time.Duration(math.MaxInt64)
+		}
+		if candidate := now.Add(duration); candidate.After(at) {
+			at, source = candidate, "retry_info"
+		}
+	}
+	return at, source
+}
+
+func decimalRetryDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // ParseRetryDelay extracts the retry delay from a Google API 429 error response,
 // preserving explicit zero-delay hints used by callers such as Antigravity.
 func ParseRetryDelay(errorBody []byte) (*time.Duration, error) {

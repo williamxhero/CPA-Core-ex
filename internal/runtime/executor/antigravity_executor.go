@@ -480,7 +480,17 @@ func antigravityCredentialScope(prefix, secret string) string {
 // negotiates TLS 1.3 without advertising an ALPN protocol and therefore never uses h2.
 // The underlying Transport is always shared so keep-alive connections survive across
 // requests instead of forcing a fresh TCP + TLS handshake every time.
-func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
+func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return buildAntigravityHTTPClient(ctx, cfg, auth, timeout, false)
+}
+
+// newAntigravityInferenceHTTPClient gates the final decorated transport once,
+// regardless of scheduling mode.
+func newAntigravityInferenceHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) *http.Client {
+	return cliproxyexecutor.GateHTTPClient(ctx, buildAntigravityHTTPClient(ctx, cfg, auth, 0, true))
+}
+
+func buildAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration, gateDecoratedTransport bool) (clientOut *http.Client) {
 	defer func() { clientOut = httptransport.Decorate(ctx, clientOut) }()
 	// Native Antigravity reuses one transport across requests. Opt into a
 	// credential-scoped proxy transport only here so other providers keep their
@@ -493,7 +503,14 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		// context transport fallback, preserving the previous behavior.
 	}
 
-	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
+	// Keep auxiliary request behavior intact; inference adds its single
+	// admission check at the final network boundary.
+	var client *http.Client
+	if gateDecoratedTransport || cliproxyauth.RequestBudgetEnforced(ctx) {
+		client = helps.NewProxyAwareHTTPClientBase(ctx, cfg, auth, timeout)
+	} else {
+		client = helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
+	}
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
