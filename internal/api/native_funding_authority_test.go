@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +34,55 @@ func TestNativeFundingRejectsLegacyAutoHeldMutations(t *testing.T) {
 		x.f.server.engine.ServeHTTP(w, req)
 		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "native_funding_owns_auto_hold") {
 			t.Errorf("%s %s = %d %s", tc.method, tc.path, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestNativeFundingFencesStaleReorderedIndexAndRawConfig(t *testing.T) {
+	x := newProviderKeyMatchFixture(t, "https://api.deepseek.com/v1", func(raw string) string {
+		raw = strings.Replace(raw, "- name: not-an-account-a", "- name: not-an-account-a\n      auto-held: true", 1)
+		first := strings.Index(raw, "    - name: not-an-account-a")
+		second := strings.Index(raw, "    - name: not-an-account-b")
+		return raw[:first] + raw[second:] + raw[first:second]
+	})
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		x.f.server.engine.ServeHTTP(w, req)
+		return w
+	}
+	v8 := request(http.MethodGet, "/v8/management/config/api-keys/openai-compatibility", "")
+	var list []map[string]any
+	if v8.Code != 200 || json.Unmarshal(v8.Body.Bytes(), &list) != nil || len(list) != 2 || list[0]["name"] != "not-an-account-b" || list[1]["name"] != "not-an-account-a" || list[0]["native-funding"] != true || list[1]["native-funding"] != true {
+		t.Fatalf("unexpected authoritative readback: %d %s", v8.Code, v8.Body.String())
+	}
+	before, err := os.ReadFile(x.f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	yaml := strings.Replace(string(before), "auto-held: true", "auto-held: false", 1)
+	if yaml == string(before) {
+		t.Fatal("fixture missing persisted marker")
+	}
+	for _, tc := range []struct {
+		method, path, body string
+		status             int
+	}{
+		{http.MethodPatch, "/v0/management/openai-compatibility", `{"index":0,"value":{"auto-held":true}}`, 409},
+		{http.MethodPatch, "/v0/management/openai-compatibility", `{"index":1,"value":{"auto-held":false}}`, 409},
+		{http.MethodPut, "/v0/management/config.yaml", yaml, 500},
+		{http.MethodPut, "/v8/management/config.yaml", yaml, 409},
+	} {
+		got := request(tc.method, tc.path, tc.body)
+		if got.Code != tc.status {
+			t.Fatalf("%s got %d %s", tc.path, got.Code, got.Body.String())
+		}
+		after, err := os.ReadFile(x.f.path)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("rejected stale write reached disk: %v", err)
 		}
 	}
 }

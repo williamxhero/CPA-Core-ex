@@ -111,6 +111,13 @@ func WriteConfig(path string, data []byte) error {
 		}
 	}
 	data = config.NormalizeCommentIndentation(data)
+	if before, errRead := os.ReadFile(path); errRead == nil {
+		if err := nativeFundingBytesGuard(before, data); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(errRead) {
+		return errRead
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -159,17 +166,13 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	candidate, err := config.LoadConfigOptional(tempFile, false)
+	_, err = config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if changesNativeFundingMarker(h.cfg, candidate) {
-		nativeFundingConflict(c)
-		return
-	}
 	if WriteConfig(h.configFilePath, body) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return

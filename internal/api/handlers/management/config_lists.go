@@ -908,12 +908,6 @@ func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	next := *h.cfg
-	next.OpenAICompatibility = filtered
-	if changesNativeFundingMarker(h.cfg, &next) {
-		nativeFundingConflict(c)
-		return
-	}
 	h.cfg.OpenAICompatibility = filtered
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)
@@ -965,7 +959,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 	}
 
 	entry := h.cfg.OpenAICompatibility[targetIndex]
-	original := entry
 	if body.Value.Name != nil {
 		entry.Name = strings.TrimSpace(*body.Value.Name)
 	}
@@ -1019,11 +1012,6 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
 	}
 	normalizeOpenAICompatibilityEntry(&entry)
-	if body.Value.AutoHeld != nil && original.AutoHeld != entry.AutoHeld &&
-		(h.cfg.NativeFundingAdapter(&original) != "" || h.cfg.NativeFundingAdapter(&entry) != "") {
-		nativeFundingConflict(c)
-		return
-	}
 	h.cfg.OpenAICompatibility[targetIndex] = entry
 	h.cfg.SanitizeOpenAICompatibility()
 	h.persistLocked(c)

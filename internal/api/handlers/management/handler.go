@@ -513,6 +513,9 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 
 // saveManagementConfig selects API semantics independently of output layout.
 func (h *Handler) saveManagementConfig(c *gin.Context) error {
+	if err := h.checkPersistedFundingOwnership(); err != nil {
+		return err
+	}
 	if c.GetBool(ConfigV8ContextKey) {
 		return config.SaveConfigPreserveCommentsForManagement(h.configFilePath, h.cfg, true)
 	}
@@ -531,6 +534,10 @@ func (h *Handler) persist(c *gin.Context) bool {
 func (h *Handler) persistLocked(c *gin.Context) bool {
 	// Preserve comments when writing
 	if err := h.saveManagementConfig(c); err != nil {
+		if err == errNativeFundingOwnership {
+			nativeFundingConflict(c)
+			return false
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
