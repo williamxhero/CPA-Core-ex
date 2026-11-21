@@ -2374,8 +2374,16 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 }
 
 func (s *SessionAffinitySelector) boundAuthForRequest(providers []string, model string, opts cliproxyexecutor.Options) (string, bool) {
+	return s.resolveBoundAuth(providers, model, opts, false)
+}
+
+func (s *SessionAffinitySelector) resolveBoundAuth(providers []string, model string, opts cliproxyexecutor.Options, readOnly bool) (string, bool) {
 	if s == nil {
 		return "", false
+	}
+	if readOnly {
+		// Explicit session extraction may annotate fork and parent information.
+		opts.Metadata = maps.Clone(opts.Metadata)
 	}
 	modelKey := canonicalModelKey(model)
 	candidateProviders := make([]string, 0, len(providers)+1)
@@ -2393,9 +2401,13 @@ func (s *SessionAffinitySelector) boundAuthForRequest(providers []string, model 
 		if len(turns) > 0 {
 			fingerprints, minPrefixLength, tailFingerprints, envDigest := s.matcher.PrepareExt(turns)
 			if len(fingerprints) > 0 && minPrefixLength > 0 && minPrefixLength <= len(fingerprints) {
+				findMatch := s.matcher.MatchFingerprintsWithContext
+				if readOnly {
+					findMatch = s.matcher.PeekFingerprintsWithContext
+				}
 				for _, candProvider := range candidateProviders {
 					if namespace := lcpAffinityNamespace(candProvider, model, opts.Metadata); namespace != "" {
-						if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok && !match.IsFork && match.AuthID != "" {
+						if match, ok := findMatch(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok && !match.IsFork && match.AuthID != "" {
 							return match.AuthID, true
 						}
 					}
@@ -2425,19 +2437,27 @@ func (s *SessionAffinitySelector) boundAuthForRequest(providers []string, model 
 	}
 	isSubagent := !isFork && isSubagentSession(primaryID, fallbackID)
 
-	if primaryID != "" {
+	boundByID := func(sessionID string) (string, bool) {
+		if sessionID == "" {
+			return "", false
+		}
 		for _, candProvider := range candidateProviders {
-			if authID, ok := s.cache.Get(candProvider + "::" + primaryID + "::" + modelKey); ok && authID != "" {
+			key := candProvider + "::" + sessionID + "::" + modelKey
+			if readOnly {
+				if authID := s.cache.peek(key); authID != "" {
+					return authID, true
+				}
+			} else if authID, ok := s.cache.Get(key); ok && authID != "" {
 				return authID, true
 			}
 		}
+		return "", false
+	}
+	if authID, ok := boundByID(primaryID); ok {
+		return authID, true
 	}
 	if fallbackID != "" && fallbackID != primaryID && !isSubagent && !isFork {
-		for _, candProvider := range candidateProviders {
-			if authID, ok := s.cache.Get(candProvider + "::" + fallbackID + "::" + modelKey); ok && authID != "" {
-				return authID, true
-			}
-		}
+		return boundByID(fallbackID)
 	}
 	return "", false
 }

@@ -11,7 +11,6 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
-	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 type schedulingLimit struct {
@@ -195,12 +194,8 @@ func scheduledHardAffinity(selector Selector, model string, opts cliproxyexecuto
 	if !ok || !affinity.rebindOnNever {
 		return ""
 	}
-	primary, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	if primary == "" {
-		primary, _ = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	}
-	if primary == "" {
-		return ""
-	}
-	return affinity.cache.peek("mixed::" + cliproxysession.BoundSessionIdentity(primary) + "::" + canonicalModelKey(selectionArgForSelector(selector, model)))
+	// The enforcing selector picks in the mixed namespace, not the individual
+	// upstream provider namespaces used by legacy paths.
+	authID, _ := affinity.resolveBoundAuth(nil, selectionArgForSelector(selector, model), opts, true)
+	return authID
 }

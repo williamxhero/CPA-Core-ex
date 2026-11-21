@@ -81,3 +81,59 @@ func TestProviderSchedulingHardAffinityDoesNotLoseLowerPriorityBinding(t *testin
 		})
 	}
 }
+
+func TestProviderSchedulingHardLCPBindingWaitsForItsOwnRoute(t *testing.T) {
+	f := newSchedulingHTTPFixture(t, nil)
+	f.manager.SetSelector(coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
+		Fallback: &coreauth.FillFirstSelector{}, RebindOn: coreauth.SessionAffinityRebindOnNever,
+	}))
+	f.manager.SetRetryConfig(0, time.Second, 3)
+	f.manager.SetUpstreamErrorRetryLimit(-1)
+	send := func(messages string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"public-scheduling-model","messages":`+messages+`}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer open")
+		w := httptest.NewRecorder()
+		f.server.engine.ServeHTTP(w, req)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"content":"A"`) {
+			t.Fatalf("hard-bound session should route to A; got status %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	send(`[{"role":"user","content":"Explain why ocean tides vary."}]`)
+	const model = "public-scheduling-model"
+	a := f.auths["A"]
+	retryAfter := 700 * time.Millisecond
+	f.manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID: a.ID, Provider: a.Provider, Model: model, RetryAfter: &retryAfter,
+		Error: &coreauth.Error{HTTPStatus: 429, Code: coreauth.ErrorCodeTransientRateLimit, Message: "rate limited"},
+	})
+	a, _ = f.manager.GetByID(a.ID)
+	retryAt := a.ModelStates[model].NextRetryAfter
+	if retryAt.IsZero() {
+		t.Fatal("fixture did not record the trusted upstream retry time")
+	}
+	clock := newProviderBudgetClock(retryAt.Add(-retryAfter), true)
+	f.manager.SetContinuityClockForTest(clock)
+
+	send(`[{"role":"user","content":"Explain why ocean tides vary."},{"role":"assistant","content":"A"},{"role":"user","content":"How does the moon contribute?"}]`)
+	select {
+	case wait := <-clock.waits:
+		if wait != retryAfter {
+			t.Fatalf("wait = %s; want %s", wait, retryAfter)
+		}
+	default:
+		t.Fatal("session did not wait for its bound route")
+	}
+	select {
+	case extra := <-clock.waits:
+		t.Fatalf("unexpected second wait: %s", extra)
+	default:
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := fmt.Sprint(f.calls); got != "[A A]" {
+		t.Fatalf("sends = %s; want [A A] despite an unrelated healthy route", got)
+	}
+}

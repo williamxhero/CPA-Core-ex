@@ -848,6 +848,15 @@ func (m *MerklePrefixMatcher) MatchFingerprints(namespace string, fingerprints [
 
 // MatchFingerprintsWithContext returns the longest known prefix match or compaction continuation with explicit tail and environment context.
 func (m *MerklePrefixMatcher) MatchFingerprintsWithContext(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int) (MerklePrefixMatch, bool) {
+	return m.matchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, true)
+}
+
+// PeekFingerprintsWithContext finds a binding without refreshing its lifetime or changing the index.
+func (m *MerklePrefixMatcher) PeekFingerprintsWithContext(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int) (MerklePrefixMatch, bool) {
+	return m.matchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, false)
+}
+
+func (m *MerklePrefixMatcher) matchFingerprintsWithContext(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int, touch bool) (MerklePrefixMatch, bool) {
 	if m == nil || namespace == "" {
 		return MerklePrefixMatch{}, false
 	}
@@ -863,12 +872,10 @@ func (m *MerklePrefixMatcher) MatchFingerprintsWithContext(namespace string, fin
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.prepareLocked()
-	match, matchOK := m.matchLocked(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, m.now())
-	if !matchOK {
-		return MerklePrefixMatch{}, false
+	if touch {
+		m.prepareLocked()
 	}
-	return match, true
+	return m.matchLocked(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, m.now(), touch)
 }
 
 // Bind records a request sequence for an auth and returns its stable LCP session identity.
@@ -1247,7 +1254,7 @@ func (m *MerklePrefixMatcher) bindLocked(namespace string, fingerprints, tailFin
 	isFork := false
 	isCompaction := false
 	nodeKind := ""
-	if match, ok := m.matchLocked(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, now); ok {
+	if match, ok := m.matchLocked(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, now, true); ok {
 		sessionID = match.SessionID
 		parentSessionID = match.ParentSessionID
 		isFork = match.IsFork
@@ -1395,7 +1402,15 @@ func (m *MerklePrefixMatcher) removeGroupLocked(group *lcpGroup) {
 	}
 }
 
-func (m *MerklePrefixMatcher) matchLocked(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int, now time.Time) (MerklePrefixMatch, bool) {
+func (m *MerklePrefixMatcher) touchMatchLocked(group *lcpGroup, now time.Time) {
+	group.expiresAt = now.Add(m.ttl)
+	group.lastAccessNumber = m.nextAccessNumberLocked()
+	if element := m.lruElements[group]; element != nil {
+		m.lru.MoveToBack(element)
+	}
+}
+
+func (m *MerklePrefixMatcher) matchLocked(namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int, now time.Time, touch bool) (MerklePrefixMatch, bool) {
 	ns := m.groups[namespace]
 	if ns == nil || len(fingerprints) == 0 || minPrefixLength <= 0 || minPrefixLength > len(fingerprints) {
 		return MerklePrefixMatch{}, false
@@ -1417,10 +1432,8 @@ func (m *MerklePrefixMatcher) matchLocked(namespace string, fingerprints, tailFi
 		low = middle + 1
 	}
 	if best != nil {
-		best.expiresAt = now.Add(m.ttl)
-		best.lastAccessNumber = m.nextAccessNumberLocked()
-		if element := m.lruElements[best]; element != nil {
-			m.lru.MoveToBack(element)
+		if touch {
+			m.touchMatchLocked(best, now)
 		}
 
 		sessionID := best.sessionID
@@ -1434,7 +1447,7 @@ func (m *MerklePrefixMatcher) matchLocked(namespace string, fingerprints, tailFi
 		if bestLength < len(best.fingerprints) && len(fingerprints) > bestLength {
 			// Before declaring this a divergent fork, check if the candidate request preserves
 			// a trailing subsequence of the parent trajectory (in-place compaction milestone).
-			if compactionMatch, okCompaction := m.matchCompactionLocked(ns, namespace, fingerprints, tailFingerprints, envDigest, prefixKeys, minPrefixLength, bestLength, now); okCompaction {
+			if compactionMatch, okCompaction := m.matchCompactionLocked(ns, namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, bestLength, now, touch); okCompaction {
 				return compactionMatch, true
 			}
 
@@ -1456,10 +1469,10 @@ func (m *MerklePrefixMatcher) matchLocked(namespace string, fingerprints, tailFi
 		}, true
 	}
 
-	return m.matchCompactionLocked(ns, namespace, fingerprints, tailFingerprints, envDigest, prefixKeys, minPrefixLength, 0, now)
+	return m.matchCompactionLocked(ns, namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength, 0, now, touch)
 }
 
-func (m *MerklePrefixMatcher) matchCompactionLocked(ns *lcpNamespace, namespace string, fingerprints, tailFingerprints []string, envDigest string, prefixKeys []string, minPrefixLength int, bestLength int, now time.Time) (MerklePrefixMatch, bool) {
+func (m *MerklePrefixMatcher) matchCompactionLocked(ns *lcpNamespace, namespace string, fingerprints, tailFingerprints []string, envDigest string, minPrefixLength int, bestLength int, now time.Time, touch bool) (MerklePrefixMatch, bool) {
 	candTail := tailFingerprints
 	if len(candTail) == 0 {
 		candTail = extractTailFingerprints(fingerprints)
@@ -1480,17 +1493,21 @@ func (m *MerklePrefixMatcher) matchCompactionLocked(ns *lcpNamespace, namespace 
 		if len(candidateGroups) == 0 {
 			continue
 		}
-		// Lazy prune expired entries from the bucket and count live active groups
+		// Count live groups; only matching with touch may prune expired entries.
 		activeCount := 0
 		for group := range candidateGroups {
 			if group == nil || !now.Before(group.expiresAt) {
-				delete(candidateGroups, group)
+				if touch {
+					delete(candidateGroups, group)
+				}
 				continue
 			}
 			activeCount++
 		}
-		if len(candidateGroups) == 0 {
-			delete(ns.tails, tailKey)
+		if activeCount == 0 {
+			if touch {
+				delete(ns.tails, tailKey)
+			}
 			continue
 		}
 		if activeCount > maxTailsPerKey {
@@ -1498,7 +1515,7 @@ func (m *MerklePrefixMatcher) matchCompactionLocked(ns *lcpNamespace, namespace 
 			continue
 		}
 		for group := range candidateGroups {
-			if group.environmentDigest != envDigest {
+			if group == nil || !now.Before(group.expiresAt) || group.environmentDigest != envDigest {
 				continue
 			}
 			tails := group.tailFingerprints
@@ -1539,7 +1556,7 @@ func (m *MerklePrefixMatcher) matchCompactionLocked(ns *lcpNamespace, namespace 
 	for _, c1 := range maxCandidates {
 		isAncestor := false
 		for _, c2 := range maxCandidates {
-			if c1.sessionID != c2.sessionID && isAncestorSession(ns, c1.sessionID, c2.sessionID) {
+			if c1.sessionID != c2.sessionID && isAncestorSession(ns, c1.sessionID, c2.sessionID, now) {
 				isAncestor = true
 				break
 			}
@@ -1556,10 +1573,8 @@ func (m *MerklePrefixMatcher) matchCompactionLocked(ns *lcpNamespace, namespace 
 
 	best := leaves[0]
 
-	best.expiresAt = now.Add(m.ttl)
-	best.lastAccessNumber = m.nextAccessNumberLocked()
-	if element := m.lruElements[best]; element != nil {
-		m.lru.MoveToBack(element)
+	if touch {
+		m.touchMatchLocked(best, now)
 	}
 
 	parentSessionID := best.sessionID
@@ -1596,7 +1611,7 @@ func environmentDigest(fingerprints []string, minPrefixLength int) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
-func isAncestorSession(ns *lcpNamespace, ancestorID, descendantID string) bool {
+func isAncestorSession(ns *lcpNamespace, ancestorID, descendantID string, now time.Time) bool {
 	if ns == nil || ancestorID == "" || descendantID == "" || ancestorID == descendantID {
 		return false
 	}
@@ -1604,7 +1619,7 @@ func isAncestorSession(ns *lcpNamespace, ancestorID, descendantID string) bool {
 	for depth := 0; depth < 32; depth++ {
 		parentID := ""
 		for _, g := range ns.groups {
-			if g.sessionID == currID && g.parentSessionID != "" {
+			if g.sessionID == currID && g.parentSessionID != "" && now.Before(g.expiresAt) {
 				parentID = g.parentSessionID
 				break
 			}
