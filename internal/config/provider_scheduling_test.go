@@ -14,7 +14,11 @@ func TestProviderSchedulingRollout(t *testing.T) {
 		t.Fatalf("default active wait = %s", got)
 	}
 
-	defaulted, err := ParseConfigBytes([]byte("config-version: 8\nrouting:\n  provider-scheduling:\n    mode: enforce\n    models: ['shared']\n    callers: ['Alice']\n    max-active-wait: '0s'\n"))
+	document := []byte("config-version: 8\nrouting:\n  provider-scheduling:\n    mode: enforce\n    models: ['shared']\n    callers: ['Alice']\n    max-active-wait: '0s'\n")
+	if err := ValidateV8Config(document); err != nil {
+		t.Fatalf("management config rejected valid rollout: %v", err)
+	}
+	defaulted, err := ParseConfigBytes(document)
 	if err != nil {
 		t.Fatal(err)
 	}
