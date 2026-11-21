@@ -83,20 +83,21 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
+		errChan <- externalExecutorSetupError(ctx, execOptions.InternalSource, coreauth.ExternalExecutorDisabledByHome(ctx, modelName))
 		close(errChan)
 		return nil, nil, errChan
 	}
 	if err := h.AuthManager.CheckProviderSchedulingUnboundExecution(ctx, modelName, pinnedAuthIDFromContext(ctx)); err != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- executionErrorMessage(err)
+		errChan <- externalExecutorSetupError(ctx, execOptions.InternalSource, err)
 		close(errChan)
 		return nil, nil, errChan
 	}
 	host := h.pluginExecutorHost()
 	if host == nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
+		coreauth.RecordExternalExecutorRouting(ctx, "executor_not_available")
+		errChan <- externalExecutorSetupError(ctx, execOptions.InternalSource, &coreauth.Error{HTTPStatus: http.StatusBadGateway, Message: "plugin executor host is unavailable"})
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -127,12 +128,13 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
+	coreauth.RecordExternalExecutorRouting(execCtx, "")
 	streamResult, errStream := host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
 	if errStream != nil {
 		if reporter != nil && !nestedTracker.hasNestedExecution() {
 			reporter.PublishFailure(execCtx, errStream)
 		}
-		errMsg := executionErrorMessage(errStream)
+		errMsg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(execCtx, errStream))
 		lifecycle.completeError(execCtx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
@@ -253,10 +255,10 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 				return
 			}
 			if chunk.Err != nil {
-				errMsg := executionErrorMessage(chunk.Err)
+				errMsg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(execCtx, chunk.Err))
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
-				completionErr = chunk.Err
+				completionErr = errMsg.Error
 				select {
 				case errChan <- errMsg:
 				case <-done:
@@ -359,6 +361,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		h.startRoutingTrace(ctx, originalRequestedModel, modelName, execOptions.AuthSelectionModel, execOptions.InternalSource)
 		return h.streamWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions, ctx)

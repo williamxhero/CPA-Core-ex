@@ -40,16 +40,20 @@ type SchedulingCounts struct {
 
 // SchedulingDecision is one redacted route evaluation for an authenticated request.
 type SchedulingDecision struct {
-	Mode               string                        `json:"mode"`
-	Model              string                        `json:"model"`
-	SelectedResourceID string                        `json:"selected_resource_id,omitempty"`
-	Candidates         []SchedulingCandidateDecision `json:"candidates"`
-	Counts             SchedulingCounts              `json:"counts"`
-	OmittedCandidates  int                           `json:"omitted_candidates,omitempty"`
-	ActualResourceID   string                        `json:"actual_resource_id,omitempty"`
-	ProposedResourceID string                        `json:"proposed_resource_id,omitempty"`
-	Proposal           string                        `json:"proposal,omitempty"`
-	Comparison         string                        `json:"comparison,omitempty"`
+	Source              string                        `json:"source,omitempty"`
+	Coverage            string                        `json:"coverage,omitempty"`
+	Reason              string                        `json:"reason,omitempty"`
+	TransportVisibility string                        `json:"transport_visibility,omitempty"`
+	Mode                string                        `json:"mode"`
+	Model               string                        `json:"model"`
+	SelectedResourceID  string                        `json:"selected_resource_id,omitempty"`
+	Candidates          []SchedulingCandidateDecision `json:"candidates"`
+	Counts              SchedulingCounts              `json:"counts"`
+	OmittedCandidates   int                           `json:"omitted_candidates,omitempty"`
+	ActualResourceID    string                        `json:"actual_resource_id,omitempty"`
+	ProposedResourceID  string                        `json:"proposed_resource_id,omitempty"`
+	Proposal            string                        `json:"proposal,omitempty"`
+	Comparison          string                        `json:"comparison,omitempty"`
 }
 
 type schedulingDecisionKey struct{}

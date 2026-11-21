@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"golang.org/x/net/context"
 )
@@ -34,4 +35,12 @@ func IsRoutingCorrelationHeader(c *gin.Context, key string) bool {
 
 func routingExecutionError(ctx context.Context, err error) error {
 	return coreauth.RoutingErrorForResponse(ctx, err)
+}
+
+func externalExecutorSetupError(ctx context.Context, internal bool, err error) *interfaces.ErrorMessage {
+	msg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(ctx, err))
+	if !internal {
+		coreauth.FinishRoutingTrace(ctx, msg.StatusCode, msg.Error)
+	}
+	return msg
 }
