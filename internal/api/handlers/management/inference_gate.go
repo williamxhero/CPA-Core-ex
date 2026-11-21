@@ -76,7 +76,7 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 		return
 	}
 	op := request.GateOperation
-	if resourcecatalog.IsCoreQuotaGateOwner(op.Owner) {
+	if resourcecatalog.IsCoreAdmissionGateOwner(op.Owner) {
 		c.JSON(422, gin.H{"error": "core_quota_owner_reserved"})
 		return
 	}

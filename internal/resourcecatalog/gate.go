@@ -123,13 +123,17 @@ func (c *Catalog) GateState() (resource.GateState, error) {
 func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if IsCoreQuotaGateOwner(op.Owner) {
+	if IsCoreAdmissionGateOwner(op.Owner) {
 		return resource.GateResult{}, ErrConflict
 	}
 	return c.applyGateLocked(op)
 }
 
 func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResult, error) {
+	return c.applyGateWithFenceLocked(op, "", true)
+}
+
+func (c *Catalog) applyGateWithFenceLocked(op resource.GateOperation, fence string, change bool) (resource.GateResult, error) {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateResult{}, ErrUnavailable
 	}
@@ -162,32 +166,39 @@ func (c *Catalog) applyGateLocked(op resource.GateOperation) (resource.GateResul
 	var next diskState
 	_ = json.Unmarshal(raw, &next)
 	ledger := next.Gates
-	ledger.Revision++
-	// Provider reconciliation replaces only its own stable parent lineage.
-	// Credential pause/clear replaces any prior owner+model row on the same
-	// primary credential slot, including drifted incarnations and projection
-	// membership changes left after rotation or child delete.
-	filtered := []resource.Gate{}
-	for _, g := range ledger.Gates {
-		matching := g.Subject != "provider" && op.Subject == "credential" && sameGateCredentialSlot(g.Targets, targets)
-		if g.Subject == "provider" && op.Subject == "provider" && len(g.Targets) > 0 {
-			matching = sameProviderLineage(g.Targets[0], targets[0])
+	if change {
+		ledger.Revision++
+		// Provider reconciliation replaces only its own stable parent lineage.
+		// Credential pause/clear replaces any prior owner+model row on the same
+		// primary credential slot, including drifted incarnations and projection
+		// membership changes left after rotation or child delete.
+		filtered := []resource.Gate{}
+		for _, g := range ledger.Gates {
+			matching := g.Subject != "provider" && op.Subject == "credential" && sameGateCredentialSlot(g.Targets, targets)
+			if g.Subject == "provider" && op.Subject == "provider" && len(g.Targets) > 0 {
+				matching = sameProviderLineage(g.Targets[0], targets[0])
+			}
+			if g.Owner == op.Owner && g.Model == op.Model && matching {
+				continue
+			}
+			filtered = append(filtered, g)
 		}
-		if g.Owner == op.Owner && g.Model == op.Model && matching {
-			continue
+		ledger.Gates = filtered
+		if op.Action == "pause" {
+			subject := ""
+			if op.Subject == "provider" {
+				subject = "provider"
+			}
+			ledger.Gates = append(ledger.Gates, resource.Gate{Subject: subject, Targets: append([]resource.Target(nil), targets...), Owner: op.Owner, Model: op.Model, Reason: op.Reason, EvidenceID: op.EvidenceID, SourceVersion: op.SourceVersion, Revision: ledger.Revision})
 		}
-		filtered = append(filtered, g)
-	}
-	ledger.Gates = filtered
-	if op.Action == "pause" {
-		subject := ""
-		if op.Subject == "provider" {
-			subject = "provider"
-		}
-		ledger.Gates = append(ledger.Gates, resource.Gate{Subject: subject, Targets: append([]resource.Target(nil), targets...), Owner: op.Owner, Model: op.Model, Reason: op.Reason, EvidenceID: op.EvidenceID, SourceVersion: op.SourceVersion, Revision: ledger.Revision})
 	}
 	result := resource.GateResult{Version: 1, OpID: op.OpID, Status: "applied", Revision: ledger.Revision, DurableRevision: ledger.Revision, AppliedRevision: ledger.Revision, Durable: true, Applied: true}
-	ledger.Operations[op.OpID] = gateReceipt{Operation: op, Result: result}
+	if change {
+		ledger.Operations[op.OpID] = gateReceipt{Operation: op, Result: result}
+	}
+	if fence != "" {
+		ledger.Operations[fence] = gateReceipt{Operation: op, Result: result}
+	}
 	next.GateSeal = sealValue(c.key, ledger)
 	raw, _ = json.Marshal(&next)
 	values, errValues := sourceContentValues(c.configPath, c.authDir, c.key)
@@ -234,6 +245,9 @@ func (c *Catalog) GateOperation(id string) (resource.GateOperation, resource.Gat
 	defer c.mu.Unlock()
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateOperation{}, resource.GateResult{}, ErrUnavailable
+	}
+	if !validID(id) {
+		return resource.GateOperation{}, resource.GateResult{}, os.ErrNotExist
 	}
 	r, ok := c.state.Gates.Operations[id]
 	if !ok {

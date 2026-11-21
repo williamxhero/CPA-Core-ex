@@ -171,7 +171,7 @@ func canClearCodexQuotaWindow(model string, paused resource.QuotaGateEvidence, w
 // external owners. Native evidence cannot establish unrelated source scope.
 func (c *Catalog) hasExternalGateLocked() bool {
 	for _, g := range c.state.Gates.Gates {
-		if !IsCoreQuotaGateOwner(g.Owner) {
+		if !IsCoreAdmissionGateOwner(g.Owner) {
 			return true
 		}
 	}

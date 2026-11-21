@@ -81,7 +81,8 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 func quotaGateState(state resource.GateState) any {
 	type gateView struct {
 		resource.Gate
-		Quota *resource.QuotaGateEvidence `json:"quota,omitempty"`
+		Quota   *resource.QuotaGateEvidence   `json:"quota,omitempty"`
+		Funding *resource.FundingGateEvidence `json:"funding,omitempty"`
 	}
 	var gates []gateView
 	if state.Gates != nil {
@@ -89,7 +90,7 @@ func quotaGateState(state resource.GateState) any {
 	}
 	for _, gate := range state.Gates {
 		facts, _ := resourcecatalog.QuotaGateDetails(gate.Owner, gate.EvidenceID)
-		gates = append(gates, gateView{Gate: gate, Quota: facts})
+		gates = append(gates, gateView{Gate: gate, Quota: facts, Funding: resourcecatalog.FundingGateDetails(gate.Owner, gate.EvidenceID)})
 	}
 	return struct {
 		resource.GateState
