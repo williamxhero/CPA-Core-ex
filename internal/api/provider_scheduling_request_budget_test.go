@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func TestProviderSchedulingUnlimitedRetryDoesNotPollWithoutTrustedHint(t *testing.T) {
@@ -384,6 +387,74 @@ func TestProviderSchedulingHomeUnlimitedDoesNotInventImmediateRecovery(t *testin
 	budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
 	if recorder.Code != 429 || dispatch.calls.Load() != 1 || budget.Attempts != 1 || budget.Round != 0 || budget.ActiveWait != 0 {
 		t.Fatalf("status=%d body=%s dispatch=%d budget=%+v", recorder.Code, recorder.Body, dispatch.calls.Load(), budget)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := strings.Join(f.attempts, ","); got != "A" {
+		t.Fatalf("actual upstream sends = %q, want A", got)
+	}
+}
+
+type budgetNestedRouter struct {
+	handlers.PluginExecutorHost
+	handler   *handlers.BaseAPIHandler
+	snapshots []coreauth.RequestBudgetSnapshot
+}
+
+func (*budgetNestedRouter) HasModelRouters() bool { return true }
+func (*budgetNestedRouter) RouteModel(_ context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+	if req.RequestedModel != "budget-bridge" {
+		return pluginapi.ModelRouteResponse{}, false
+	}
+	return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: "budget-bridge"}, true
+}
+func (b *budgetNestedRouter) ExecutePluginExecutor(ctx context.Context, _ string, _ coreexecutor.Request, _ coreexecutor.Options) (coreexecutor.Response, error) {
+	request := handlers.ModelExecutionRequest{
+		EntryProtocol: "openai-response", ExitProtocol: "openai-response", Model: "capacity-gate-model",
+		Body: []byte(`{"model":"capacity-gate-model","input":[]}`), SkipRouterPluginID: "budget-bridge",
+	}
+	first, firstErr := b.handler.ExecuteModel(ctx, request)
+	firstBudget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	b.snapshots = append(b.snapshots, firstBudget)
+	if firstErr != nil {
+		return coreexecutor.Response{}, firstErr.Error
+	}
+	_, nextErr := b.handler.ExecuteModel(ctx, request)
+	nextBudget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	b.snapshots = append(b.snapshots, nextBudget)
+	if nextErr == nil {
+		return coreexecutor.Response{}, errors.New("second nested execution exceeded the one-route budget")
+	}
+	if nextErr.StatusCode != http.StatusServiceUnavailable {
+		return coreexecutor.Response{}, nextErr.Error
+	}
+	return coreexecutor.Response{Payload: first.Body, Headers: first.Headers}, nil
+}
+
+func TestProviderSchedulingNestedBridgeSharesRoundBudget(t *testing.T) {
+	f := newCapacityGateRoute(t, "http", func(_ string, emit func(string)) { emit(combinedCapacitySuccess) })
+	m := f.inventory.manager
+	cfg := *f.inventory.server.cfg
+	cfg.Routing.ProviderScheduling = config.ProviderSchedulingConfig{Mode: "enforce"}
+	m.SetConfig(&cfg)
+	m.SetRetryConfig(0, time.Second, 1)
+	driver := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, m)
+	bridge := &budgetNestedRouter{handler: driver}
+	driver.SetModelRouterHost(bridge)
+	handler := openai.NewOpenAIResponsesAPIHandler(driver)
+	engine := gin.New()
+	engine.POST("/v1/responses", handler.Responses)
+	ctx := coreauth.WithRequestBudget(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"budget-bridge","input":[]}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+	budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), "healthy-B") || budget.Attempts != 1 || budget.Round != 0 || budget.ActiveWait != 0 {
+		t.Fatalf("status=%d body=%s budget=%+v", recorder.Code, recorder.Body, budget)
+	}
+	if len(bridge.snapshots) != 2 || bridge.snapshots[0] != budget || bridge.snapshots[1] != budget {
+		t.Fatalf("bridge snapshots = %+v, want the same round ledger %+v", bridge.snapshots, budget)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
