@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -224,14 +225,13 @@ func TestProviderSchedulingHTTPReservesLastSlotBeforeDispatch(t *testing.T) {
 	go func() {
 		resp, err := f.requestModel(ctx, "open", simpleSchedulingChat)
 		if err == nil {
-			defer func() {
-				if errClose := resp.Body.Close(); errClose != nil {
-					t.Error(errClose)
-				}
-			}()
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr != nil || resp.StatusCode != 200 || !strings.Contains(string(body), `"content":"A"`) {
-				err = fmt.Errorf("held request: %d %s (%v)", resp.StatusCode, body, readErr)
+			body, errRead := io.ReadAll(resp.Body)
+			errClose := resp.Body.Close()
+			if errRead != nil || resp.StatusCode != 200 || !strings.Contains(string(body), `"content":"A"`) {
+				err = fmt.Errorf("held request: %d %s (%v)", resp.StatusCode, body, errRead)
+			}
+			if errClose != nil {
+				err = errors.Join(err, fmt.Errorf("close held response: %w", errClose))
 			}
 		}
 		held <- err
