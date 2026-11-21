@@ -3465,7 +3465,6 @@ func sanitizeRenewalMessage(raw string) string {
 func isTerminalRefreshGrantMessage(message string) bool {
 	lower := strings.ToLower(message)
 	for _, token := range []string{
-		"refresh_outcome_unknown",
 		"refresh_token_reused",
 		"refresh_token_expired",
 		// Anthropic returns {"error": "invalid_grant", "error_description": "Refresh token expired"}.
@@ -3481,6 +3480,19 @@ func isTerminalRefreshGrantMessage(message string) bool {
 	return false
 }
 
+func isUncertainRefreshError(err error) bool {
+	if codex.IsRefreshOutcomeUnknown(err) {
+		return true
+	}
+	var authErr *Error
+	return errors.As(err, &authErr) && authErr != nil && authErr.Code == "refresh_outcome_unknown"
+}
+
+// A blocked grant must not be submitted again, even when its rejection is unconfirmed.
+func isBlockedRefreshGrantError(auth *Auth, err error) bool {
+	return isUncertainRefreshError(err) || isTerminalRefreshError(auth, err)
+}
+
 func isTerminalRefreshError(auth *Auth, err error) bool {
 	if err == nil || codex.IsRefreshPreSendError(err) {
 		return false
@@ -3492,6 +3504,13 @@ func isTerminalRefreshError(auth *Auth, err error) bool {
 	if errors.As(err, &partErr) && partErr != nil {
 		return isTerminalRefreshError(auth, partErr.OuterRefreshError()) ||
 			isTerminalRefreshError(auth, partErr.SIWCRefreshError())
+	}
+	if isUncertainRefreshError(err) {
+		return false
+	}
+	var rejection *codex.OAuthError
+	if errors.As(err, &rejection) && rejection != nil {
+		return isInvalidGrantError(err) || isTerminalRefreshGrantMessage(rejection.Code)
 	}
 	var authErr *Error
 	if errors.As(err, &authErr) && authErr != nil && isTerminalRefreshGrantMessage(authErr.Code) {
@@ -3547,10 +3566,18 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 			err = outerErr
 		} else if siwcErr != nil && isTerminalRefreshError(auth, siwcErr) {
 			err = siwcErr
+		} else if isUncertainRefreshError(outerErr) {
+			err = outerErr
+		} else if isUncertainRefreshError(siwcErr) {
+			err = siwcErr
 		}
 	}
 	raw := err.Error()
 	statusCode := statusCodeFromError(err)
+	var rejection *codex.OAuthError
+	if errors.As(err, &rejection) && rejection != nil {
+		statusCode = rejection.StatusCode
+	}
 	if statusCode == 0 {
 		if isUnauthorizedError(err) {
 			statusCode = http.StatusUnauthorized
@@ -3558,34 +3585,24 @@ func sanitizeRenewalError(auth *Auth, err error) *Error {
 			statusCode = http.StatusBadRequest
 		}
 	}
-	terminal := isTerminalRefreshError(auth, err)
+	blocked := isBlockedRefreshGrantError(auth, err)
 	code := terminalRefreshErrorCode(raw, statusCode)
+	if isUncertainRefreshError(err) {
+		code = "refresh_outcome_unknown"
+		statusCode = http.StatusServiceUnavailable
+	} else if codex.IsRefreshPreSendError(err) {
+		code = "refresh_transport_before_send"
+	}
 	var existingAuthErr *Error
 	if errors.As(err, &existingAuthErr) && existingAuthErr != nil && isKnownSafeOAuthErrorCode(existingAuthErr.Code) {
 		code = strings.ToLower(strings.TrimSpace(existingAuthErr.Code))
 	}
 	return &Error{
 		Code:       code,
-		Message:    sanitizeRenewalMessage(raw),
+		Message:    code,
 		HTTPStatus: statusCode,
-		Retryable:  !terminal,
+		Retryable:  !blocked,
 	}
-}
-
-func refreshErrorFromError(err error) *Error {
-	if err == nil {
-		return nil
-	}
-	statusCode := statusCodeFromError(err)
-	if statusCode == 0 && isUnauthorizedError(err) {
-		statusCode = http.StatusUnauthorized
-	}
-	authErr := &Error{Message: sanitizeRenewalMessage(err.Error()), HTTPStatus: statusCode}
-	if statusCode == http.StatusUnauthorized {
-		authErr.Code = "unauthorized"
-		authErr.Retryable = false
-	}
-	return authErr
 }
 
 func retryAfterFromError(err error) *time.Duration {

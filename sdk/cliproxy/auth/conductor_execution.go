@@ -2948,6 +2948,9 @@ func (m *Manager) VerifyInference(ctx context.Context, id, model string) (*Auth,
 	if auth.RequiresSignIn {
 		return auth, &Error{Code: "sign_in_required", Message: "credential requires sign-in before inference verification", HTTPStatus: http.StatusConflict}
 	}
+	if auth.RequiresCredentialRecovery() && !auth.HasValidAccessToken(time.Now()) {
+		return auth, &Error{Code: "credential_recovery_needed", Message: "credential recovery is needed before inference verification", HTTPStatus: http.StatusConflict}
+	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	m.mu.RLock()
 	executor := m.executors[provider]

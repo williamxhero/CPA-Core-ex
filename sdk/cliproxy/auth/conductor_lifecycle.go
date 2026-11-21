@@ -558,11 +558,10 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 						auth.NextRefreshAfter = time.Time{}
 					}
 				}
-				canServeWithAccessToken := !auth.RequiresSignIn || auth.HasValidAccessToken(now)
+				canServeWithAccessToken := !auth.refreshGrantBlocked() || auth.HasValidAccessToken(now)
 				isAuthOrGrantFailure := hasUnauthorizedAuthFailure(existing) ||
-					existing.RequiresSignIn ||
-					(existing.RefreshError != nil && isTerminalRefreshError(existing, existing.RefreshError)) ||
-					(auth.LastError != nil && (isUnauthorizedError(auth.LastError) || isInvalidGrantResultError(auth.LastError) || isTerminalRefreshError(auth, auth.LastError)))
+					existing.refreshGrantBlocked() ||
+					(auth.LastError != nil && (isUnauthorizedError(auth.LastError) || isInvalidGrantResultError(auth.LastError) || isBlockedRefreshGrantError(auth, auth.LastError)))
 				if canServeWithAccessToken && !auth.Quota.NextRecoverAt.After(now) &&
 					(isAuthOrGrantFailure || (auth.Unavailable && !auth.NextRetryAfter.After(now))) {
 					auth.Unavailable = false
@@ -590,7 +589,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 					if len(resumed) > 0 {
 						cooldownStateChanged = true
 					}
-				} else if auth.RequiresSignIn && !auth.HasValidAccessToken(now) {
+				} else if !canServeWithAccessToken {
 					auth.Unavailable = true
 					auth.Status = StatusError
 					if auth.StatusMessage == "" {
@@ -726,6 +725,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		auth.RejectedSIWCAccessToken = probe.RejectedSIWCAccessToken
 	}
 	if existing.RequiresSignIn != existingBeforeSave.RequiresSignIn ||
+		existing.ConsecutiveRenewalFailures != existingBeforeSave.ConsecutiveRenewalFailures ||
 		!equalErrorPtr(existing.RefreshError, existingBeforeSave.RefreshError) ||
 		existing.RejectedRefreshToken != existingBeforeSave.RejectedRefreshToken ||
 		existing.RejectedSIWCRefreshToken != existingBeforeSave.RejectedSIWCRefreshToken ||
@@ -739,6 +739,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		probe.CodexRefreshPatch = refreshPatchBeforeSave
 		applyPreservedRenewalState(existing, probe, mode, now)
 		auth.RequiresSignIn = probe.RequiresSignIn
+		auth.ConsecutiveRenewalFailures = probe.ConsecutiveRenewalFailures
 		auth.RefreshError = probe.RefreshError
 		auth.RejectedRefreshToken = probe.RejectedRefreshToken
 		auth.RejectedSIWCRefreshToken = probe.RejectedSIWCRefreshToken
@@ -750,7 +751,7 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 		auth.LastInferenceVerifiedAt = probe.LastInferenceVerifiedAt
 		auth.RenewalVerified = probe.RenewalVerified
 		auth.LastRenewalVerifiedAt = probe.LastRenewalVerifiedAt
-		if authHasUnchangedRejectedRefreshToken(auth) && !existingBeforeSave.RequiresSignIn {
+		if authHasUnchangedRejectedRefreshToken(auth) && !authHasUnchangedRejectedRefreshToken(existingBeforeSave) {
 			if exp, okExp := auth.AccessTokenExpirationTime(); okExp && !exp.IsZero() && exp.After(now) {
 				if auth.NextRefreshAfter.IsZero() || auth.NextRefreshAfter.Before(exp) {
 					auth.NextRefreshAfter = exp
