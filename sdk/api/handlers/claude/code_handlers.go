@@ -552,9 +552,12 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 }
 
 type claudeErrorDetail struct {
-	Type    string              `json:"type"`
-	Message string              `json:"message"`
-	Details *claudeErrorDetails `json:"details,omitempty"`
+	Type      string              `json:"type"`
+	Message   string              `json:"message"`
+	Details   *claudeErrorDetails `json:"details,omitempty"`
+	Code      string              `json:"code,omitempty"`
+	Model     string              `json:"model,omitempty"`
+	RequestID string              `json:"request_id,omitempty"`
 }
 
 type claudeErrorDetails struct {
@@ -608,7 +611,13 @@ func (h *ClaudeCodeAPIHandler) toClaudeErrorWithRetryAfter(msg *interfaces.Error
 			Message: message,
 		},
 	}
-	if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
+	var routingFailure *coreauth.RoutingFailure
+	if msg != nil && errors.As(msg.Error, &routingFailure) {
+		response.Error.Type = claudeErrorTypeFromStatus(status)
+		response.Error.Code = routingFailure.Code
+		response.Error.Model = routingFailure.Model
+		response.Error.RequestID = routingFailure.RequestID
+	} else if clienterror.IsClaudeThreadNotFound(status, errors.New(errText)) {
 		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
 	}
 	return response
@@ -621,7 +630,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	if msg != nil && msg.DirectResponse {
 		for key, values := range handlers.FilterUpstreamHeaders(msg.Headers) {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || handlers.IsRoutingCorrelationHeader(c, key) {
 				continue
 			}
 			c.Writer.Header().Del(key)
@@ -656,7 +665,7 @@ func (h *ClaudeCodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *interface
 	}
 	if msg != nil && msg.Addon != nil && handlers.PassthroughHeadersEnabled(h.CurrentConfig()) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) {
+			if len(values) == 0 || handlers.IsCPAReservedResponseHeader(key) || handlers.IsRoutingCorrelationHeader(c, key) {
 				continue
 			}
 			// A locally trusted cooldown deadline outranks the raw upstream

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/MoeForge/moego/ojson"
@@ -46,7 +47,8 @@ type RequestBudgetSnapshot struct {
 }
 
 type requestBudget struct {
-	mu sync.Mutex
+	trace atomic.Pointer[routingTrace]
+	mu    sync.Mutex
 	RequestBudgetSnapshot
 	enforced            bool
 	waiting             bool
@@ -227,6 +229,7 @@ func RecordRequestStreamOutput(ctx context.Context, payload []byte) {
 		if b := requestBudgetFromContext(ctx); b != nil {
 			b.mu.Lock()
 			b.OutputCommitted = true
+			updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 			b.mu.Unlock()
 		}
 	}
@@ -284,6 +287,7 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 		b.credentials[auth.ID] = struct{}{}
 		b.routes[routeIdentity] = struct{}{}
 		b.ReplayUnsafe = b.ReplayUnsafe || unsafe
+		updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 		return nil
 	})
 }
@@ -417,6 +421,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	b.mu.Lock()
 	b.ActiveWait += max(0, elapsed)
 	b.waiting = false
+	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 	b.mu.Unlock()
 	return err == nil, err
 }
@@ -683,7 +688,9 @@ func (m *Manager) executeScheduledStream(ctx context.Context, providers []string
 		})
 	}
 	res, err := run(ctx, nil)
-	err = unwrapExecutionBoundaryError(err)
+	if RoutingTraceID(ctx) == "" || !hasUpstreamExecutionAttempt(err) {
+		err = unwrapExecutionBoundaryError(err)
+	}
 	if pinnedThread && err != nil && !isRequestStopError(err) {
 		err = claudeThreadReplayError(err)
 	}

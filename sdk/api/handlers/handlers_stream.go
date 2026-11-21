@@ -225,6 +225,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
 		chunkIndex := 0
 		var historyChunks [][]byte
 		for {
@@ -368,6 +369,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		return nil, nil, errChan
 	}
 	providers = adjustExecutionProvidersForEntryProtocol(entryProtocol, providers)
+	h.startRoutingTrace(ctx, originalRequestedModel, normalizedModel, execOptions.AuthSelectionModel, execOptions.InternalSource)
 	reqMeta := requestExecutionMetadata(ctx)
 	if execOptions.Path != "" {
 		reqMeta[coreexecutor.RequestPathMetadataKey] = execOptions.Path
@@ -420,7 +422,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	ctx = coreauth.WithRequestContinuitySession(enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata))
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		err = enrichAuthSelectionError(err, providers, normalizedModel)
+		err = routingExecutionError(ctx, enrichAuthSelectionError(err, providers, normalizedModel))
 		errMsg := executionErrorMessage(err)
 		lifecycle.completeError(ctx, errMsg)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -620,7 +622,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			break
 		}
 		if bootstrapRetries >= maxBootstrapRetries || !bootstrapEligible(bootstrapStreamErr) {
-			bootstrapErr = executionErrorMessage(bootstrapStreamErr)
+			bootstrapErr = executionErrorMessage(routingExecutionError(ctx, bootstrapStreamErr))
 			break
 		}
 		if h.AuthManager != nil {
@@ -636,11 +638,11 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		bootstrapRetries++
 		retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 		if retryErr != nil {
-			originalBootstrapErr := executionErrorMessage(bootstrapStreamErr)
+			originalBootstrapErr := executionErrorMessage(routingExecutionError(ctx, bootstrapStreamErr))
 			if isAuthSelectionUnavailable(retryErr) && originalBootstrapErr.StatusCode >= http.StatusInternalServerError {
 				bootstrapErr = originalBootstrapErr
 			} else {
-				bootstrapErr = executionErrorMessage(enrichAuthSelectionError(retryErr, providers, normalizedModel))
+				bootstrapErr = executionErrorMessage(routingExecutionError(ctx, enrichAuthSelectionError(retryErr, providers, normalizedModel)))
 			}
 			break
 		}
@@ -684,6 +686,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		// Publish the execution receipt before EOF reaches the HTTP consumer.
+		// Delivery tracking separately waits for that consumer after close.
+		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0
@@ -694,6 +699,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
+			lifecycle.finishRoutingTrace(completionStatus, completionErr)
 			if ctx == nil {
 				errChan <- msg
 				return true
@@ -768,10 +774,10 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return
 			}
 			if chunk.Err != nil {
-				errMsg := executionErrorMessage(chunk.Err)
+				errMsg := executionErrorMessage(routingExecutionError(ctx, chunk.Err))
 				completionOutcome = pluginapi.RequestCompletionFailed
 				completionStatus = errMsg.StatusCode
-				completionErr = chunk.Err
+				completionErr = errMsg.Error
 				_ = sendErr(errMsg)
 				return
 			}
