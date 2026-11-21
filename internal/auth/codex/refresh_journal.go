@@ -92,7 +92,7 @@ type RefreshOutcomeUnknownError struct {
 }
 
 func (e *RefreshOutcomeUnknownError) Error() string {
-	return "refresh_outcome_unknown: " + e.Stage + "; reconcile the refresh result or sign in again"
+	return "refresh_outcome_unknown: " + e.Stage + "; recover the credential before retrying"
 }
 
 func (e *RefreshOutcomeUnknownError) Unwrap() error { return e.Cause }

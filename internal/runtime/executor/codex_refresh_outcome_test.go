@@ -47,7 +47,7 @@ func TestCodexUnknownRefreshSurvivesForcedRefreshAndFileAlias(t *testing.T) {
 			t.Fatalf("expected unknown outcome, got %v", errRefresh)
 		}
 		updated, _ := manager.GetByID(auth.ID)
-		if !updated.RequiresSignIn || updated.Unavailable {
+		if updated.RequiresSignIn || !updated.RequiresCredentialRecovery() || updated.Unavailable {
 			t.Fatal("must require refresh recovery but preserve valid access")
 		}
 	}

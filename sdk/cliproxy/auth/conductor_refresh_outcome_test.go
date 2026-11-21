@@ -25,7 +25,7 @@ func TestUnknownRefreshOutcomeRequiresRecoveryWithoutDiscardingAccess(t *testing
 		}
 		manager.refreshAuth(ctx, auth.ID)
 		updated, _ := manager.GetByID(auth.ID)
-		if updated == nil || !updated.RequiresSignIn || updated.RefreshError == nil || updated.RefreshError.Code != "refresh_outcome_unknown" {
+		if updated == nil || updated.RequiresSignIn || !updated.RequiresCredentialRecovery() || updated.RenewalStateAt(time.Now()) != RenewalStateCredentialRecoveryNeeded {
 			t.Fatalf("unknown outcome not retained as recovery-required: %+v", updated)
 		}
 		if updated.Unavailable || updated.Status != StatusActive {
@@ -62,8 +62,8 @@ func TestRejectedRefreshJobDoesNotImmediatelyReschedule(t *testing.T) {
 			// The JWT expired in 2020 even though the file metadata claims a future expiry.
 			auth := &Auth{
 				ID: "expired-rejected-refresh", Provider: "codex", Status: StatusActive,
-				RequiresSignIn: true, RejectedRefreshToken: "rejected-grant",
-				RefreshError: &Error{Code: "refresh_outcome_unknown", Message: "refresh_outcome_unknown: transport", HTTPStatus: http.StatusServiceUnavailable},
+				RejectedRefreshToken: "rejected-grant",
+				RefreshError:         &Error{Code: "refresh_outcome_unknown", Message: "refresh_outcome_unknown: transport", HTTPStatus: http.StatusServiceUnavailable},
 				Metadata: map[string]any{
 					"access_token":  "eyJhbGciOiJub25lIn0.eyJleHAiOjE1Nzc4MzY4MDB9.sig",
 					"refresh_token": "rejected-grant",
@@ -111,8 +111,8 @@ func TestRejectedRefreshJobDoesNotImmediatelyReschedule(t *testing.T) {
 			}
 			manager.finishRefreshJob(job, time.Time{}, false)
 			current, _ := manager.GetByID(auth.ID)
-			if !current.Unavailable || current.Status != wantStatus || !current.RequiresSignIn {
-				t.Fatalf("expired credential must remain unavailable and require sign-in with status %s", wantStatus)
+			if !current.Unavailable || current.Status != wantStatus || current.RequiresSignIn || !current.RequiresCredentialRecovery() {
+				t.Fatalf("expired credential must remain unavailable and require recovery with status %s", wantStatus)
 			}
 			if current.LastError == nil || current.LastError.Code != "refresh_outcome_unknown" || current.LastError.HTTPStatus != http.StatusServiceUnavailable {
 				t.Fatalf("unknown refresh outcome must not become an access-token rejection: %#v", current.LastError)
