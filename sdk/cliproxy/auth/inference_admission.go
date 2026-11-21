@@ -58,7 +58,7 @@ func (m *Manager) withInferenceAdmission(ctx context.Context, a *Auth, model str
 	})
 }
 
-// Check historical native holds before consuming a credential attempt. The
+// Check native funding admission before consuming a credential attempt. The
 // final transport still rechecks admission to close the selection/send race.
 func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	var held bool
@@ -66,15 +66,24 @@ func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []str
 		a, executor, provider, err := m.pickNextMixed(ctx, providers, model, opts, tried)
 		if err != nil {
 			if held && isCredentialSelectionFailure(err) {
-				return nil, nil, "", &Error{Code: "auth_unavailable", Message: "no auth available: legacy_funding_unverified", HTTPStatus: 503}
+				return nil, nil, "", &Error{Code: "auth_unavailable", Message: "no auth available: inference admission restricted", HTTPStatus: 503}
 			}
 			return a, executor, provider, err
 		}
-		if a == nil || a.Attributes[AttributeLegacyFundingHold] != "true" {
+		if a == nil {
+			return a, executor, provider, nil
+		}
+		historical := a.Attributes[AttributeLegacyFundingHold] == "true"
+		boundNative := a.ResourceIdentity != nil && a.Attributes[AttributeNativeFunding] == "true"
+		if !historical && !boundNative {
 			return a, executor, provider, nil
 		}
 		authority := m.inferenceAdmission.Load()
-		if authority != nil && authority.check(ctx, a, model) == nil {
+		if authority == nil {
+			if !historical {
+				return a, executor, provider, nil
+			}
+		} else if authority.check(ctx, a, model) == nil {
 			return a, executor, provider, nil
 		}
 		tried[a.ID] = struct{}{}
