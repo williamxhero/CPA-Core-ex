@@ -266,7 +266,14 @@ func newAuthUnavailableError(next, now time.Time) error {
 }
 
 func newAuthUnavailableErrorWithCause(next, now time.Time, cause error) error {
-	err := &Error{Code: "auth_unavailable", Message: "no auth available"}
+	return newAuthUnavailableErrorWithMessage(next, now, cause, "no auth available")
+}
+
+func newAuthUnavailableErrorWithMessage(next, now time.Time, cause error, message string) error {
+	if message == "" {
+		message = "no auth available"
+	}
+	err := &Error{Code: "auth_unavailable", Message: message}
 	if next.After(now) {
 		err.HTTPStatus = http.StatusServiceUnavailable
 		err.Retryable = true

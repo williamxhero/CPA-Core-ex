@@ -2879,6 +2879,41 @@
   ],
   "codex-free": [
     {
+      "id": "gpt-6.2-sol",
+      "object": "model",
+      "created": 1794873600,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Sol for everyday coding and writing.",
+      "context_length": 272000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-6-chat-thinking",
       "object": "model",
       "created": 1790035200,
@@ -2923,41 +2958,6 @@
       "version": "gpt-6.0",
       "description": "GPT-6 Luna Codex model.",
       "context_length": 272000,
-      "max_completion_tokens": 128000,
-      "supported_parameters": [
-        "tools"
-      ],
-      "thinking": {
-        "levels": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      },
-      "supportedInputModalities": [
-        "text",
-        "image"
-      ],
-      "supportedOutputModalities": [
-        "text"
-      ],
-      "native_capabilities": {
-        "web_search": true
-      },
-      "support_configuration_update": true
-    },
-    {
-      "id": "gpt-6.1-terra",
-      "object": "model",
-      "created": 1792972800,
-      "owned_by": "openai",
-      "type": "openai",
-      "display_name": "GPT 6.1 Terra",
-      "version": "gpt-6.0",
-      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
-      "context_length": 500000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3163,14 +3163,14 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-6.1-sol",
+      "id": "gpt-6.2-sol",
       "object": "model",
-      "created": 1790640000,
+      "created": 1794873600,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 6.1 Sol",
-      "version": "gpt-6.0",
-      "description": "Latest workhorse model for coding and everyday work.",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Sol for everyday coding and writing.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -3198,15 +3198,15 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-6.1-terra",
+      "id": "gpt-6.2-astra",
       "object": "model",
-      "created": 1792972800,
+      "created": 1794873600,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 6.1 Terra",
-      "version": "gpt-6.0",
-      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
-      "context_length": 500000,
+      "display_name": "GPT 6.2 Astra",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra for complex coding and professional work.",
+      "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3516,14 +3516,14 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-6.1-sol",
+      "id": "gpt-6.2-sol",
       "object": "model",
-      "created": 1790640000,
+      "created": 1794873600,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 6.1 Sol",
-      "version": "gpt-6.0",
-      "description": "Latest workhorse model for coding and everyday work.",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Sol for everyday coding and writing.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -3551,15 +3551,15 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-6.1-terra",
+      "id": "gpt-6.2-astra",
       "object": "model",
-      "created": 1792972800,
+      "created": 1794873600,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 6.1 Terra",
-      "version": "gpt-6.0",
-      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
-      "context_length": 500000,
+      "display_name": "GPT 6.2 Astra",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra for complex coding and professional work.",
+      "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"
@@ -3869,14 +3869,14 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-6.1-sol",
+      "id": "gpt-6.2-sol",
       "object": "model",
-      "created": 1790640000,
+      "created": 1794873600,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 6.1 Sol",
-      "version": "gpt-6.0",
-      "description": "Latest workhorse model for coding and everyday work.",
+      "display_name": "GPT 6.2 Sol",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Sol for everyday coding and writing.",
       "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
@@ -3904,15 +3904,15 @@
       "support_configuration_update": true
     },
     {
-      "id": "gpt-6.1-terra",
+      "id": "gpt-6.2-astra",
       "object": "model",
-      "created": 1792972800,
+      "created": 1794873600,
       "owned_by": "openai",
       "type": "openai",
-      "display_name": "GPT 6.1 Terra",
-      "version": "gpt-6.0",
-      "description": "A fast, efficient model for visual reasoning, precise computer use, and clear, natural writing.",
-      "context_length": 500000,
+      "display_name": "GPT 6.2 Astra",
+      "version": "gpt-6.2",
+      "description": "GPT-6.2 Astra for complex coding and professional work.",
+      "context_length": 272000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
         "tools"

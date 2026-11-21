@@ -877,6 +877,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 	cooldownCount := 0
 	unauthorizedCount := 0
 	var earliest time.Time
+	blockedReasons := make([]string, 0, len(auths))
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, clientHeaders...)
@@ -888,6 +889,7 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 		if reason == blockReasonCooldown {
 			cooldownCount++
 		}
+		blockedReasons = append(blockedReasons, authBlockedReasonText(ctx, candidate, checkModel, reason, next, now, clientHeaders...))
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
 		}
@@ -927,10 +929,23 @@ func (m *Manager) availableAuthsForRouteModelForRequest(ctx context.Context, aut
 				HTTPStatus: http.StatusServiceUnavailable,
 			}, terminalCause)
 		}
-		return nil, newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
+		return nil, newAuthUnavailableErrorWithMessage(earliest, now, lastCandidateErr, authUnavailableMessage(routeModel, blockedReasons))
 	}
 
 	return availableAuthsFromPriorityBuckets(availableByPriority, allPriorities), nil
+}
+
+// authUnavailableMessage keeps the client-visible reason short and free of
+// credential identifiers while still explaining why no candidate was selected.
+func authUnavailableMessage(model string, blockedReasons []string) string {
+	message := "no auth available"
+	if strings.TrimSpace(model) != "" {
+		message = fmt.Sprintf("no auth available for model %q", model)
+	}
+	if len(blockedReasons) == 0 {
+		return message
+	}
+	return message + ": " + strings.Join(blockedReasons, "; ")
 }
 
 // availableAuthsForSelector reports the candidates handed to priority-scoped consumers such as
@@ -1835,9 +1850,14 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 		return 0, false
 	}
 	status := statusCodeFromError(err)
+	// A credential-selection failure means no credential can carry this request.
+	// Its wait is bounded by credential recovery, not by an upstream retry policy;
+	// treating it as a transient upstream failure turns a long quota cooldown into
+	// a short re-selection loop that only ends when the client gives up.
+	credentialSelection := isCredentialSelectionFailure(err)
 	hiddenRetry := clienterror.IsHiddenClientRetry(err.Error()) &&
 		(status != 0 || hasUpstreamExecutionAttempt(err)) &&
-		!isTransientRateLimitError(err) && !isCredentialSelectionFailure(err)
+		!isTransientRateLimitError(err) && !credentialSelection
 	configuredUpstreamLimit := m.configuredUpstreamErrorRetryLimit()
 	failureClass := clienterror.Classify(status, err.Error())
 	if failureClass == clienterror.FailureQuotaExhausted && m.allCandidatesQuotaTerminated(providers, model) {
@@ -1847,8 +1867,9 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	// A quota-shaped error is only terminal after both resource classes are
 	// explicitly exhausted across every eligible credential. Until then it is
 	// a retryable upstream failure, including when one class is unknown or the
-	// provider's quota read failed.
-	if failureClass == clienterror.FailureQuotaExhausted {
+	// provider's quota read failed. Selection failures keep their own cooldown
+	// schedule and never borrow the upstream unlimited-retry override.
+	if failureClass == clienterror.FailureQuotaExhausted && !credentialSelection {
 		transientUpstream = true
 	}
 	if status == http.StatusOK && !hiddenRetry {
@@ -1866,7 +1887,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	// is still required when the provider omitted Retry-After: disabling
 	// credential cooling must never turn an unlimited retry policy into a hot
 	// loop that starves the CPA process.
-	if configuredUpstreamLimit != -2 && transientUpstream {
+	if configuredUpstreamLimit != -2 && transientUpstream && !credentialSelection {
 		if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
 			return *retryAfter, true
 		}
@@ -3229,6 +3250,60 @@ func authCoolingSummary(auth *Auth, model string, next time.Time, now time.Time)
 	return fmt.Sprintf("[%s, reason=%s, remaining=%s]", ident, reason, remaining)
 }
 
+// authBlockedSummary explains a candidate that is unavailable for a reason
+// other than a timed cooldown, such as an expired token or a rejected refresh.
+func authBlockedSummary(ctx context.Context, auth *Auth, model string, reason blockReason, next time.Time, now time.Time, clientHeaders ...http.Header) string {
+	if auth == nil {
+		return ""
+	}
+	ident := formatAuthIdentity(auth, auth.Provider)
+	return fmt.Sprintf("[%s, reason=%s]", ident, authBlockedReasonText(ctx, auth, model, reason, next, now, clientHeaders...))
+}
+
+// authBlockedReasonText names the blocking cause without the credential identity.
+func authBlockedReasonText(ctx context.Context, auth *Auth, model string, reason blockReason, next time.Time, now time.Time, clientHeaders ...http.Header) string {
+	if auth == nil {
+		return "blocked"
+	}
+	reasonText := "blocked"
+	switch {
+	case auth.Disabled || auth.Status == StatusDisabled:
+		reasonText = "disabled"
+	case hasUnauthorizedAuthFailure(auth):
+		reasonText = "unauthorized"
+	case authAccessTokenExpiredForRequest(ctx, auth, now, clientHeaders...):
+		reasonText = "access_token_expired"
+	default:
+		stateReason := ""
+		if model != "" && len(auth.ModelStates) > 0 {
+			if state := existingModelState(auth, model); state != nil {
+				stateReason = cooldownReason(state.StatusMessage, state.Quota, state.LastError)
+			}
+		}
+		if stateReason == "" {
+			stateReason = cooldownReason(auth.StatusMessage, auth.Quota, auth.LastError)
+		}
+		if stateReason != "" {
+			reasonText = stateReason
+		} else if reason == blockReasonCooldown {
+			reasonText = "cooldown"
+		} else if auth.Quota.Exceeded {
+			reasonText = "quota_exceeded"
+		} else if auth.Unavailable {
+			reasonText = "unavailable"
+		}
+	}
+	if !next.IsZero() && next.After(now) {
+		return fmt.Sprintf("%s, remaining=%s", reasonText, next.Sub(now).Round(time.Second).String())
+	}
+	return reasonText
+}
+
+func authAccessTokenExpiredForRequest(ctx context.Context, auth *Auth, now time.Time, clientHeaders ...http.Header) bool {
+	exp, okExp := auth.AccessTokenExpirationTimeForRequest(ctx, clientHeaders...)
+	return okExp && !exp.IsZero() && !exp.After(now)
+}
+
 func selectorExcludesZeroWeight(selector Selector) bool {
 	if _, weighted := selector.(*WeightedRoundRobinSelector); weighted {
 		return true
@@ -3385,6 +3460,7 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 	registryRef := registry.GetGlobalRegistry()
 
 	coolingSummaries := make([]string, 0)
+	otherBlockedSummaries := make([]string, 0)
 	totalCandidates := 0
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
@@ -3416,21 +3492,42 @@ func (m *Manager) warnLogAuthUnavailable(ctx context.Context, providers []string
 		totalCandidates++
 		checkModel := m.selectionModelForAuth(candidate, model)
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, candidate, checkModel, now, opts.Headers)
-		if blocked && reason == blockReasonCooldown {
-			coolingSummaries = append(coolingSummaries, authCoolingSummary(candidate, checkModel, next, now))
+		if !blocked {
+			continue
 		}
+		if reason == blockReasonCooldown {
+			coolingSummaries = append(coolingSummaries, authCoolingSummary(candidate, checkModel, next, now))
+			continue
+		}
+		otherBlockedSummaries = append(otherBlockedSummaries, authBlockedSummary(ctx, candidate, checkModel, reason, next, now, opts.Headers))
 	}
 
-	if len(coolingSummaries) > 0 {
+	if len(coolingSummaries) > 0 || len(otherBlockedSummaries) > 0 {
 		sort.Strings(coolingSummaries)
+		sort.Strings(otherBlockedSummaries)
 		entry := logEntryWithRequestID(ctx)
 		providerText := strings.Join(providers, ",")
-		if len(providers) == 1 {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (provider=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
-		} else {
-			entry.Warnf("auth unavailable: %d of %d candidate(s) for model %q (providers=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerText, strings.Join(coolingSummaries, ", "))
-		}
+		entry.Warn(formatAuthUnavailableSummary(providers, providerText, model, totalCandidates, coolingSummaries, otherBlockedSummaries))
 	}
+}
+
+// formatAuthUnavailableSummary explains every blocked candidate so an operator
+// can see why a seemingly available credential was not selected.
+func formatAuthUnavailableSummary(providers []string, providerText, model string, totalCandidates int, coolingSummaries, otherBlockedSummaries []string) string {
+	cooldownText := strings.Join(coolingSummaries, ", ")
+	otherText := strings.Join(otherBlockedSummaries, ", ")
+	if len(coolingSummaries) == 0 {
+		return fmt.Sprintf("auth unavailable: no selectable candidate for model %q (provider=%s); blocked: %s", model, providerText, otherText)
+	}
+	providerLabel := "provider"
+	if len(providers) != 1 {
+		providerLabel = "providers"
+	}
+	message := fmt.Sprintf("auth unavailable: %d of %d candidate(s) for model %q (%s=%s) are in cooldown: %s", len(coolingSummaries), totalCandidates, model, providerLabel, providerText, cooldownText)
+	if otherText != "" {
+		message += "; other blocked: " + otherText
+	}
+	return message
 }
 
 // Storage returns the configured persistence adapter for capability attestation.
