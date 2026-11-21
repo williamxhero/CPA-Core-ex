@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 func TestProviderSchedulingUnlimitedRetryDoesNotPollWithoutTrustedHint(t *testing.T) {
@@ -319,5 +321,73 @@ func TestProviderSchedulingHTTPDoesNotRepeatObservableOrUnsafeExecution(t *testi
 				t.Fatalf("independent request response=%d %s actual HTTP=%d budget=%+v", next.Code, next.Body, requests.Load(), nextBudget)
 			}
 		})
+	}
+}
+
+type budgetHomeDispatch struct {
+	baseURL string
+	calls   atomic.Int32
+}
+
+func (*budgetHomeDispatch) HeartbeatOK() bool { return true }
+func (d *budgetHomeDispatch) RPopAuth(ctx context.Context, model, session string, headers http.Header, count int) ([]byte, error) {
+	return d.RPopAuthWithRetryRoundConstraints(ctx, model, session, headers, count, 0, nil, "")
+}
+func (*budgetHomeDispatch) AbortAmbiguousDispatch() {}
+func (d *budgetHomeDispatch) RPopAuthWithRetryRoundConstraints(_ context.Context, model, _ string, _ http.Header, _ int, round int, _ []string, _ string) ([]byte, error) {
+	if d.calls.Add(1) > 5 {
+		return []byte(`{"error":{"type":"auth_not_found","message":"guard nonterminating retry"}}`), nil
+	}
+	return json.Marshal(map[string]any{
+		"model":      model,
+		"auth_index": "home-budget",
+		"auth": map[string]any{
+			"id": "home-budget", "provider": "codex", "status": "active",
+			"attributes": map[string]string{"api_key": "A", "base_url": d.baseURL},
+			"metadata":   map[string]any{"access_token": "A"},
+		},
+	})
+}
+
+func TestProviderSchedulingHomeUnlimitedDoesNotInventImmediateRecovery(t *testing.T) {
+	f := newCapacityGateRoute(t, "http", func(_ string, emit func(string)) {
+		emit(`{"type":"error","error":{"type":"server_error","code":"rate_limit_exceeded","message":"rate limited"}}`)
+	})
+	m := f.inventory.manager
+	cfg := *f.inventory.server.cfg
+	cfg.Home.Enabled = true
+	cfg.Routing.ProviderScheduling = config.ProviderSchedulingConfig{Mode: "enforce"}
+	m.SetConfig(&cfg)
+	m.SetRetryConfig(1, time.Second, 1)
+	m.SetUpstreamErrorRetryLimit(-1)
+	var upstream string
+	for _, a := range m.List() {
+		if a.Attributes["api_key"] == "A" {
+			upstream = a.Attributes["base_url"]
+		}
+	}
+	if upstream == "" {
+		t.Fatal("fixture has no upstream base URL")
+	}
+	dispatch := &budgetHomeDispatch{baseURL: upstream}
+	m.PublishHomeDispatch(dispatch, executionregistry.New(), 1)
+	timeout, stop := context.WithTimeout(context.Background(), 4*time.Second)
+	defer stop()
+	ctx := coreauth.WithRequestBudget(timeout)
+	handler := openai.NewOpenAIResponsesAPIHandler(handlers.NewBaseAPIHandlers(&cfg.SDKConfig, m))
+	engine := gin.New()
+	engine.POST("/v1/responses", handler.Responses)
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"capacity-gate-model","input":[]}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(recorder, req)
+	budget, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	if recorder.Code != 429 || dispatch.calls.Load() != 1 || budget.Attempts != 1 || budget.Round != 0 || budget.ActiveWait != 0 {
+		t.Fatalf("status=%d body=%s dispatch=%d budget=%+v", recorder.Code, recorder.Body, dispatch.calls.Load(), budget)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := strings.Join(f.attempts, ","); got != "A" {
+		t.Fatalf("actual upstream sends = %q, want A", got)
 	}
 }

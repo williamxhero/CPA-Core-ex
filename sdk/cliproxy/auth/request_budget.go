@@ -163,6 +163,29 @@ func (b *requestBudget) routeCount() int {
 	return len(b.routes)
 }
 
+// The legacy loops counted credentials as soon as they selected one. An
+// enforced round only spends a credential slot when business dispatch starts.
+func roundCredentialLimitReached(ctx context.Context, attempted map[string]struct{}, limit int) bool {
+	if limit == 0 {
+		return false
+	}
+	if RequestBudgetEnforced(ctx) {
+		return requestBudgetFromContext(ctx).routeCount() >= limit
+	}
+	return len(attempted) >= limit
+}
+
+func requestSentToCredential(ctx context.Context, id string) bool {
+	b := requestBudgetFromContext(ctx)
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_, ok := b.credentials[id]
+	return ok
+}
+
 // RecordRequestStreamOutput marks a payload offered for downstream delivery.
 // Marking just before handoff also closes the window between the reader
 // receiving output and the scheduler receiving the next failure.
@@ -282,11 +305,8 @@ func scheduledTrustedRecovery(a *Auth, model string, deadline, now time.Time) bo
 	if a == nil || !deadline.After(now) {
 		return false
 	}
-	matches := func(err *Error) bool {
-		return err != nil && err.providerRetryAt.Equal(deadline)
-	}
 	if a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now) {
-		return a.Quota.NextRecoverAt.Equal(deadline) && matches(a.LastError)
+		return a.Quota.NextRecoverAt.Equal(deadline) && a.providerRetryAt.Equal(deadline)
 	}
 	modelKey := canonicalModelLookupKey(model)
 	for key, state := range a.ModelStates {
@@ -294,11 +314,11 @@ func scheduledTrustedRecovery(a *Auth, model string, deadline, now time.Time) bo
 			continue
 		}
 		blocked, _, next := availabilityBlock(state.Unavailable, state.Quota.Exceeded, state.NextRetryAfter, state.Quota.NextRecoverAt, now)
-		if blocked && next.Equal(deadline) && matches(state.LastError) {
+		if blocked && next.Equal(deadline) && state.providerRetryAt.Equal(deadline) {
 			return true
 		}
 	}
-	return matches(a.LastError) && (a.credentialRetryAfter.Equal(deadline) || (modelKey == "" && a.NextRetryAfter.Equal(deadline)))
+	return a.providerRetryAt.Equal(deadline) && (a.credentialRetryAfter.Equal(deadline) || (modelKey == "" && a.NextRetryAfter.Equal(deadline)))
 }
 
 type scheduledRetryOpportunity struct {
@@ -395,7 +415,7 @@ func (m *Manager) scheduledOpportunity(ctx context.Context, providers []string, 
 			if exhausted.retryNow {
 				return scheduledRetryOpportunity{ready: true}
 			}
-			if wait := trustedRetryAfterFromError(err); wait != nil && *wait > 0 {
+			if wait := exhausted.RetryAfter(); hasUpstreamExecutionAttempt(err) && wait != nil && *wait > 0 {
 				return scheduledRetryOpportunity{at: now.Add(*wait)}
 			}
 		}
@@ -429,6 +449,8 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 	}
 	first := true
+	homeWaitedAfter := -1
+	roundCause := prior
 	for {
 		if err := ctx.Err(); err != nil {
 			return zero, err
@@ -454,8 +476,14 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			if isRequestInvalidError(err) || isRequestTerminatedError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
 				return zero, err
 			}
+			// Keep the best actual upstream result for the public
+			// response, but never authorize a new round using evidence
+			// from an earlier round that exhausted its opportunity.
 			if previous == nil || hasUpstreamExecutionAttempt(err) {
 				previous = err
+			}
+			if hasUpstreamExecutionAttempt(err) || roundCause == nil {
+				roundCause = err
 			}
 			if !budgetCanRepeat(ctx) {
 				return zero, previous
@@ -465,11 +493,11 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		first = false
 		if room {
-			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, attempted, previous)
+			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, attempted, roundCause)
 			// Home already explored its entire round in one RPC loop. A
 			// typed pre-admission cooldown is the sole same-round wait.
 			if m.HomeEnabled() {
-				if !isHomeDispatchCooldown(previous) {
+				if !isHomeDispatchCooldown(roundCause) || homeWaitedAfter == s.Attempts {
 					opportunity = scheduledRetryOpportunity{}
 				}
 			}
@@ -479,17 +507,19 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				if proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait); err != nil {
 					return zero, err
 				} else if proceed {
+					homeWaitedAfter = s.Attempts
+					roundCause = nil
 					first = true
 					continue
 				}
 			}
 		}
-		if !m.canOpenScheduledRound(ctx, opts, previous, s.Round, defaultRetry, homeLimit, providers, model) {
+		if !m.canOpenScheduledRound(ctx, opts, roundCause, s.Round, defaultRetry, homeLimit, providers, model) {
 			break
 		}
-		opportunity := m.scheduledOpportunity(ctx, providers, model, opts, nil, previous)
-		if m.configuredUpstreamErrorRetryLimit() == -1 && opportunity.ready && !m.HomeEnabled() &&
-			!m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
+		opportunity := m.scheduledOpportunity(ctx, providers, model, opts, nil, roundCause)
+		if m.configuredUpstreamErrorRetryLimit() == -1 && opportunity.ready &&
+			(m.HomeEnabled() || !m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready) {
 			// Unlimited means bounded recovery from actual transient failure.
 			// Do not turn disabled cooldown/no hint into an unbounded tight loop.
 			break
@@ -501,6 +531,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		if !proceed || !b.nextRound(s.Round) {
 			break
 		}
+		roundCause = nil
 		first = true
 	}
 	if previous != nil && (hasUpstreamExecutionAttempt(previous) || isBudgetReplayStop(previous)) {
