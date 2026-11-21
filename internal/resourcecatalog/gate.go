@@ -488,22 +488,26 @@ func (c *Catalog) GateRefreshContinuity(previous, current resource.Binding) (boo
 	if !c.bindingLocked(&current) {
 		return false, ErrConflict
 	}
+	return c.gateRefreshContinuityLocked(previous, current), nil
+}
+
+// gateRefreshContinuityLocked uses the sealed edges after the caller has
+// verified the ledger and the current binding.
+func (c *Catalog) gateRefreshContinuityLocked(previous, current resource.Binding) bool {
 	if previous.Scope.InstanceID != c.state.InstanceID || previous.Scope.InstanceIncarnation != c.state.InstanceIncarnation || len(previous.Targets) == 0 {
-		return false, nil
+		return false
 	}
 	cursor := previous.Targets
-	traversed := false
 	for _, edge := range c.state.Gates.Refreshes {
 		if edge.From.Scope.InstanceID != previous.Scope.InstanceID || edge.From.Scope.InstanceIncarnation != previous.Scope.InstanceIncarnation || !gateRefreshConfigurationForward(cursor, edge.From.Targets) {
 			continue
 		}
 		cursor = edge.To
-		traversed = true
 		if gateRefreshConfigurationForward(cursor, current.Targets) {
-			return traversed, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // Configuration versions do not rotate the credential's sealed lifecycle.

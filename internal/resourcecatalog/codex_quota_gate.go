@@ -56,7 +56,9 @@ func (c *Catalog) codexQuotaFenceLocked(op resource.GateOperation) (gateReceipt,
 	for _, receipt := range c.state.Gates.Operations {
 		prior := receipt.Operation
 		if latest.Result.Revision >= receipt.Result.Revision || prior.Owner != op.Owner || prior.Model != op.Model ||
-			prior.SourceVersion != op.SourceVersion || !sameGateSubjects(prior.Targets, op.Targets) {
+			prior.SourceVersion != op.SourceVersion || prior.Scope.InstanceID != op.Scope.InstanceID ||
+			prior.Scope.InstanceIncarnation != op.Scope.InstanceIncarnation ||
+			(!gateRefreshConfigurationForward(prior.Targets, op.Targets) && !c.gateRefreshContinuityLocked(prior.Binding, op.Binding)) {
 			continue
 		}
 		if details, stamp := QuotaGateDetails(prior.Owner, prior.EvidenceID); details != nil {
@@ -111,16 +113,15 @@ func (c *Catalog) RecheckCodexQuota(index string, start time.Time, obs resource.
 			g.SourceVersion != obs.SourceVersion || !matchingCodexGateTarget(g, obs.Binding) {
 			continue
 		}
-		facts, _ := QuotaGateDetails(g.Owner, g.EvidenceID)
-		if facts == nil || obs.ObservedAtMS <= facts.ObservedAtMS || !canClearCodexQuotaWindow(g.Model, *facts, obs.Windows, time.Now()) {
+		// The sealed active row carries the pause's original intake across
+		// certified rotation. Historical operation receipts remain unchanged.
+		facts, intake := QuotaGateDetails(g.Owner, g.EvidenceID)
+		if facts == nil || start.UnixNano() <= intake || obs.ObservedAtMS <= facts.ObservedAtMS ||
+			!canClearCodexQuotaWindow(g.Model, *facts, obs.Windows, time.Now()) {
 			continue
 		}
 		w := resource.QuotaGateEvidence{Window: facts.Window, WindowSeconds: facts.WindowSeconds, ObservedAtMS: obs.ObservedAtMS}
 		op := c.codexQuotaOperationLocked(obs.Binding, index, obs.SourceVersion, g.Model, "clear", w, time.Now())
-		prior, priorFacts, intake := c.codexQuotaFenceLocked(op)
-		if priorFacts == nil || prior.Operation.Action != "pause" || start.UnixNano() <= intake {
-			continue
-		}
 		if _, err := c.applyGateLocked(op); err != nil {
 			return recovered, err
 		}
