@@ -51,8 +51,10 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	var exchanges atomic.Int32
 	var mu sync.Mutex
 	sends := map[string]int{}
-	openedAt := time.Now()
-	reset := openedAt.Add(135 * time.Hour).Unix()
+	rejectionAt := time.Now().UTC().Truncate(time.Second)
+	// Model a cached response whose timestamp cannot become fresh across a slow restart.
+	staleWHAMAt := rejectionAt.Add(-time.Second)
+	reset := rejectionAt.Add(135 * time.Hour).Unix()
 	weeklyWindow := func(percent int, seconds int64) string {
 		return fmt.Sprintf(`{"used_percent":%d,"reset_at":%d,"limit_window_seconds":%d}`, percent, reset, seconds)
 	}
@@ -107,7 +109,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 					}
 					fmt.Fprintf(w, `{"plan_type":%q,"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[],"credits":{"has_credits":true,"unlimited":false,"overage_limit_reached":%t,"balance":%q}}`, plan, weeklyWindow(25, 18000), weeklyWindow(100, 604800), overage, amount)
 				case 1:
-					w.Header().Set("Date", time.Now().Add(-2*time.Second).UTC().Format(http.TimeFormat))
+					w.Header().Set("Date", staleWHAMAt.Format(http.TimeFormat))
 					fmt.Fprintf(w, `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[]}`, weeklyWindow(25, 18000), weeklyWindow(42, 604800))
 				case 2:
 					fmt.Fprint(w, `{"unverified":"observation"}`)
@@ -121,9 +123,9 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 				}
 				return
 			}
-			clock := time.Now().Add(-2 * time.Second)
-			if mode.Load() != 1 {
-				clock = time.Now().Add(time.Second)
+			clock := time.Now().Add(time.Second)
+			if mode.Load() == 1 {
+				clock = staleWHAMAt
 			}
 			w.Header().Set("Date", clock.UTC().Format(http.TimeFormat))
 			base := fmt.Sprintf(`"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s}`, weeklyWindow(12, 18000), weeklyWindow(25, 604800))
@@ -149,8 +151,8 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 		mu.Unlock()
 		if req.Model == model && ((key == "Bearer quota-A-CANARY" && (mode.Load() == 0 || mode.Load() >= 5)) ||
 			(renew && key == "Bearer rotated-A-2-CANARY" && mode.Load() == 8)) {
-			if renew {
-				w.Header().Set("Date", openedAt.UTC().Format(http.TimeFormat))
+			if renew || mode.Load() == 0 {
+				w.Header().Set("Date", rejectionAt.Format(http.TimeFormat))
 			}
 			limit, header := "codex_bengalfox", "X-Codex-Bengalfox"
 			if whole {
@@ -296,7 +298,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 				break
 			}
 		}
-		if !matched || hint.RecheckAtMS != reset*1000 || hint.ObservedAtMS <= 0 ||
+		if !matched || hint.RecheckAtMS != reset*1000 || hint.ObservedAtMS != rejectionAt.UnixMilli() ||
 			hint.RecheckAtMS <= hint.ObservedAtMS || hint.ResetID == "" || (resetID != "" && resetID != hint.ResetID) {
 			t.Fatalf("wrong native reset recheck: %+v", hint)
 		}
@@ -399,7 +401,10 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	readGate(f, 1)
 	for _, invalid := range []int32{1, 2, 3} {
 		mode.Store(invalid)
-		queryQuota(t, f, q, 200)
+		obs := queryQuota(t, f, q, 200)
+		if invalid == 1 && (obs.TimestampProvenance != "upstream_http_date" || obs.ObservedAtMS != staleWHAMAt.UnixMilli() || len(obs.ClearedQuotaWindows) != 0) {
+			t.Fatalf("cached WHAM reply was not recognized as older than the rejection: %+v", obs)
+		}
 		readGate(f, 1)
 	}
 	gateWrite := func(owner, action string, revision uint64, id string, want int) {
@@ -437,7 +442,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	}
 	obs := queryQuota(t, f, q, 200)
 	mode.Store(4)
-	if len(obs.ClearedQuotaWindows) != 1 {
+	if obs.TimestampProvenance != "upstream_http_date" || obs.ObservedAtMS <= rejectionAt.UnixMilli() || len(obs.ClearedQuotaWindows) != 1 {
 		t.Fatalf("missing fresh recovery acknowledgement: %+v", obs)
 	}
 	if whole {
