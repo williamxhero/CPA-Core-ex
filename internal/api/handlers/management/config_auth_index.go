@@ -143,6 +143,7 @@ func deleteMapKey(mapping *yaml.Node, key string) bool {
 }
 
 func stripAPIKeysAuthIndexesFromGroup(group *yaml.Node) {
+	deleteMapKey(group, "native-funding")
 	if group == nil || group.Kind != yaml.MappingNode {
 		return
 	}
@@ -460,6 +461,11 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 				groupBase := strings.TrimSpace(yamlMapScalar(group, "base-url"))
 				if groupBase == "" {
 					continue
+				}
+				deleteMapKey(group, "native-funding")
+				if validGroupIdx < len(cfg.OpenAICompatibility) {
+					current := &cfg.OpenAICompatibility[validGroupIdx]
+					group.Content = append(group.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "native-funding"}, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(cfg.NativeFundingAdapter(current) != "")})
 				}
 				targetGroupIdxStr := strconv.Itoa(validGroupIdx)
 				validGroupIdx++

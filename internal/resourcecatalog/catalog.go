@@ -393,7 +393,11 @@ func (c *Catalog) reconcileLocked() error {
 		}
 		snapshot.Version.Revision = state.Revision
 	}
-	if state.SourceSeal != c.state.SourceSeal || recordsChanged {
+	gatesChanged, err := c.materializeLegacyFundingGuards(&state, snapshot, files, rows)
+	if err != nil {
+		return err
+	}
+	if state.SourceSeal != c.state.SourceSeal || recordsChanged || gatesChanged {
 		if err = c.publish(&state, files, rows, values); err != nil {
 			return err
 		}

@@ -58,6 +58,30 @@ func (m *Manager) withInferenceAdmission(ctx context.Context, a *Auth, model str
 	})
 }
 
+// Check historical native holds before consuming a credential attempt. The
+// final transport still rechecks admission to close the selection/send race.
+func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
+	var held bool
+	for {
+		a, executor, provider, err := m.pickNextMixed(ctx, providers, model, opts, tried)
+		if err != nil {
+			if held && isCredentialSelectionFailure(err) {
+				return nil, nil, "", &Error{Code: "auth_unavailable", Message: "no auth available: legacy_funding_unverified", HTTPStatus: 503}
+			}
+			return a, executor, provider, err
+		}
+		if a == nil || a.Attributes[AttributeLegacyFundingHold] != "true" {
+			return a, executor, provider, nil
+		}
+		authority := m.inferenceAdmission.Load()
+		if authority != nil && authority.check(ctx, a, model) == nil {
+			return a, executor, provider, nil
+		}
+		tried[a.ID] = struct{}{}
+		held = true
+	}
+}
+
 func (m *Manager) executeGateAttempt(ctx context.Context, e ProviderExecutor, a *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	ctx = m.withInferenceAdmission(ctx, a, req.Model)
 	if err := cliproxyexecutor.AdmitInference(ctx); err != nil {

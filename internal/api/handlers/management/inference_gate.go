@@ -1,13 +1,13 @@
 package management
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"reflect"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resourcecatalog"
@@ -42,7 +42,7 @@ func (h *Handler) InferenceGates(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "gate_unavailable"})
 		return
 	}
-	c.JSON(200, quotaGateState(state))
+	c.JSON(200, quotaGateState(state, h.codexQuotaRechecks(c.Request.Context(), state)))
 }
 func (h *Handler) InferenceGateOperation(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")

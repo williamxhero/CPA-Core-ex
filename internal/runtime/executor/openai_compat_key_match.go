@@ -26,7 +26,7 @@ func (e *OpenAICompatExecutor) ProviderFundingKeyMatch(a *coreauth.Auth, q provi
 		return false, false
 	}
 	base, key := e.resolveCredentials(a)
-	if (base != "https://api.deepinfra.com/v1/openai" && base != "https://api.deepinfra.com/v1/openai/") || key == "" || strings.ContainsAny(key, "\r\n") {
+	if providerkeymatch.FundingAdapter(base) != "deepinfra" || key == "" || strings.ContainsAny(key, "\r\n") {
 		return false, false
 	}
 	return providerkeymatch.MatchesFunding(key, q, reading), true
@@ -37,7 +37,7 @@ func (e *OpenAICompatExecutor) officialDeepSeekKey(a *coreauth.Auth) (string, bo
 		return "", false
 	}
 	base, key := e.resolveCredentials(a)
-	if !helps.OfficialDeepSeekBase(base) || key == "" || strings.ContainsAny(key, "\r\n") {
+	if providerkeymatch.FundingAdapter(base) != "deepseek" || key == "" || strings.ContainsAny(key, "\r\n") {
 		return "", false
 	}
 	return key, true

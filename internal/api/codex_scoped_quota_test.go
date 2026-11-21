@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -245,6 +246,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 			t.Fatalf("unexpected inference dispatches: %v", sends)
 		}
 	}
+	var resetID string
 	readGate := func(f *inventoryHarness, want int) resource.Gate {
 		t.Helper()
 		raw := f.request("inference-gates", 200)
@@ -252,6 +254,16 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 			t.Fatal("quota status disclosed identity material")
 		}
 		var state struct {
+			QuotaRechecks []struct {
+				resource.Binding
+				AuthIndex     string `json:"auth_index"`
+				SourceID      string `json:"sourceId"`
+				SubjectID     string `json:"subjectId"`
+				SourceVersion string `json:"sourceVersion"`
+				ObservedAtMS  int64  `json:"observedAtMs"`
+				RecheckAtMS   int64  `json:"recheckAtMs"`
+				ResetID       string `json:"resetId"`
+			}
 			Gates []struct {
 				resource.Gate
 				Quota resource.QuotaGateEvidence
@@ -263,9 +275,32 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 		if len(state.Gates) != want {
 			t.Fatalf("quota status=%s; want %d gates", raw, want)
 		}
+		if len(state.QuotaRechecks) != want {
+			t.Fatalf("reset rechecks=%+v; want %d", state.QuotaRechecks, want)
+		}
 		if want == 0 {
 			return resource.Gate{}
 		}
+		hint := state.QuotaRechecks[0]
+		var roster struct{ Sources []resource.QuotaSource }
+		if err := json.Unmarshal(f.request("credential-quota/sources", 200), &roster); err != nil {
+			t.Fatal(err)
+		}
+		var matched bool
+		for _, source := range roster.Sources {
+			if source.SubjectID == state.Gates[0].Targets[0].ResourceID &&
+				hint.SubjectID == source.SubjectID && hint.SourceID == source.SourceID &&
+				hint.AuthIndex == source.AuthIndex && hint.SourceVersion == source.SourceVersion &&
+				reflect.DeepEqual(hint.Binding, source.Binding) {
+				matched = true
+				break
+			}
+		}
+		if !matched || hint.RecheckAtMS != reset*1000 || hint.ObservedAtMS <= 0 ||
+			hint.RecheckAtMS <= hint.ObservedAtMS || hint.ResetID == "" || (resetID != "" && resetID != hint.ResetID) {
+			t.Fatalf("wrong native reset recheck: %+v", hint)
+		}
+		resetID = hint.ResetID
 		row := state.Gates[0]
 		if row.Model != gateModel || row.Reason != "quota_windows_exhausted" || row.Applicability != "current" || row.Quota.Window != "secondary" || row.Quota.WindowSeconds != 604800 || row.Quota.RecheckAtMS != reset*1000 {
 			t.Fatalf("wrong model pause: %+v", row)
