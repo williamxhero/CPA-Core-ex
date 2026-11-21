@@ -493,7 +493,14 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		// context transport fallback, preserving the previous behavior.
 	}
 
-	client := helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
+	// The enforced inference paths gate the final decorated client once.
+	// A second gate here would count a single dispatch twice.
+	var client *http.Client
+	if cliproxyauth.RequestBudgetEnforced(ctx) {
+		client = helps.NewProxyAwareHTTPClientBase(ctx, cfg, auth, timeout)
+	} else {
+		client = helps.NewProxyAwareHTTPClient(httptransport.WithoutDecorator(ctx), cfg, auth, timeout)
+	}
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
 	if client.Transport == nil {
 		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)

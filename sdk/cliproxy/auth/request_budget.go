@@ -18,24 +18,32 @@ type requestBudgetKey struct{}
 // RequestBudgetSnapshot contains request accounting, never route identities or payloads.
 // Round is zero-based. RoundAttempts counts business sends, not selected credentials.
 type RequestBudgetSnapshot struct {
-	Attempts        int
-	Round           int
-	RoundAttempts   int
-	ActiveWait      time.Duration
-	OutputCommitted bool
-	ReplayUnsafe    bool
+	Attempts            int
+	Round               int
+	RoundAttempts       int
+	ActiveWait          time.Duration
+	OutputCommitted     bool
+	ReplayUnsafe        bool
+	UpstreamCategory    string
+	UpstreamRetryAt     time.Time
+	UpstreamRetrySource string
+	ServedModel         string
+	UpstreamDecision    string
 }
 
 type requestBudget struct {
 	mu sync.Mutex
 	RequestBudgetSnapshot
-	enforced       bool
-	waiting        bool
-	deadline       time.Time
-	configuredWait time.Duration
-	credentials    map[string]struct{}
-	routes         map[string]struct{}
-	maxCredentials int
+	enforced            bool
+	waiting             bool
+	deadline            time.Time
+	configuredWait      time.Duration
+	credentials         map[string]struct{}
+	routes              map[string]struct{}
+	maxCredentials      int
+	antigravityFailure  scheduledAntigravityFailure
+	antigravityWaitUsed bool
+	now                 func() time.Time
 }
 
 func requestBudgetFromContext(ctx context.Context) *requestBudget {
@@ -127,6 +135,7 @@ func (m *Manager) setupRequestBudget(ctx context.Context, req executor.Request, 
 		b.enforced = true
 		_, b.maxCredentials, _ = m.retrySettings()
 		b.configuredWait = m.runtimeConfigSnapshot().ProviderSchedulingWait()
+		b.now = m.getContinuityClock().Now
 	}
 	return ctx, opts
 }
@@ -199,6 +208,9 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 			return err
 		}
 		if b.enforced {
+			if !b.antigravityAdmit(sendCtx, auth, req.Model) {
+				return errBudgetCredentialLimit
+			}
 			if b.OutputCommitted || (b.ReplayUnsafe && b.Attempts > 0) {
 				return errBudgetReplayUnsafe
 			}
@@ -206,6 +218,10 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 				return errBudgetCredentialLimit
 			}
 		}
+		if b.enforced && b.antigravityFailure.authID != "" && canonicalSchedulingProvider(auth.Provider) != "antigravity" {
+			b.UpstreamDecision = "alternate"
+		}
+		b.ServedModel = ""
 		b.Attempts++
 		b.RoundAttempts++
 		b.credentials[auth.ID] = struct{}{}
@@ -302,9 +318,10 @@ func scheduledTrustedRecovery(a *Auth, model string, deadline, now time.Time) bo
 }
 
 type scheduledRetryOpportunity struct {
-	ready   bool
-	at      time.Time
-	changed <-chan struct{}
+	ready                bool
+	at                   time.Time
+	changed              <-chan struct{}
+	antigravityShortWait bool
 }
 
 func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity scheduledRetryOpportunity, singleLimit time.Duration) (bool, error) {
@@ -322,10 +339,10 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	start := clock.Now()
 	wait := opportunity.at.Sub(start)
 	if wait <= 0 {
-		return true, nil
+		return !opportunity.antigravityShortWait, nil
 	}
 	b.mu.Lock()
-	if b.waiting || wait > singleLimit || wait > b.configuredWait-b.ActiveWait {
+	if b.waiting || (opportunity.antigravityShortWait && b.antigravityWaitUsed) || wait > singleLimit || wait > b.configuredWait-b.ActiveWait {
 		b.mu.Unlock()
 		return false, nil
 	}
@@ -334,6 +351,10 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 		return false, nil
 	}
 	b.waiting = true
+	if opportunity.antigravityShortWait {
+		b.antigravityWaitUsed = true
+		b.UpstreamDecision = "short_wait"
+	}
 	b.mu.Unlock()
 	executor.NotifyContinuityWaitStart(ctx)
 	defer executor.NotifyContinuityWaitEnd(ctx)
@@ -464,6 +485,38 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			room = maxCredentials == 0 || b.routeCount() < maxCredentials
 		}
 		first = false
+		if facts := scheduledAntigravity429(previous); facts != nil {
+			delay := facts.RetryAt.Sub(facts.ObservedAt)
+			if delay <= 0 || delay >= 3*time.Second ||
+				!m.canOpenScheduledRound(ctx, opts, previous, s.Round, defaultRetry, homeLimit, providers, model) {
+				return zero, scheduledAntigravityTerminal(ctx, previous, facts)
+			}
+			// Immediately usable alternatives have already been exhausted.
+			// This one recovery targets precisely the same credential and model.
+			opportunity := scheduledRetryOpportunity{at: facts.RetryAt, antigravityShortWait: true}
+			proceed, waitErr := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
+			if waitErr != nil {
+				return zero, waitErr
+			}
+			if !proceed || !b.nextRound(s.Round) {
+				return zero, scheduledAntigravityTerminal(ctx, previous, facts)
+			}
+			retryCtx, retryOpts := b.scheduledAntigravityRepeat(ctx, opts)
+			result, retryErr := execute(retryCtx, retryOpts, s.Round+1, roundLimit, &homeLimit)
+			if ctx.Err() != nil {
+				return zero, ctx.Err()
+			}
+			if retryErr == nil {
+				return result, nil
+			}
+			if retryFacts := scheduledAntigravity429(retryErr); retryFacts != nil {
+				return zero, scheduledAntigravityTerminal(ctx, retryErr, retryFacts)
+			}
+			if hasUpstreamExecutionAttempt(retryErr) || isRequestTerminatedError(retryErr) {
+				return zero, retryErr
+			}
+			return zero, scheduledAntigravityTerminal(ctx, previous, facts)
+		}
 		if room {
 			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, attempted, previous)
 			// Home already explored its entire round in one RPC loop. A

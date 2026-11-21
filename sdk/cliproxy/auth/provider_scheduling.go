@@ -206,7 +206,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		_, excludeByAuth := tried[a.ID]
 		_, excludeByIdentity := tried[routeID]
 		_, excludeByDuplicate := excludedRoutes[routeID]
-		if excludeByAuth || excludeByIdentity || excludeByDuplicate {
+		if excludeByAuth || excludeByIdentity || excludeByDuplicate || scheduledAntigravityExcludes(ctx, a.ID, c.owner) {
 			c.reasons = append(c.reasons, "request_excluded")
 		}
 		id, parent := schedulingResource(a)

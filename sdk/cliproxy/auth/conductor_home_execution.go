@@ -112,12 +112,12 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			selection.End("missing_execution_target")
 			return cliproxyexecutor.Response{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
-		if !countTokens && RequestBudgetEnforced(ctx) && !m.scheduledFundingAllows(ctx, auth) {
-			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "funding_ineligible"); errEnd != nil {
+		if reason := m.scheduledHomeExclusion(ctx, auth, selection.Provider); !countTokens && reason != "" {
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, reason); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
 			if _, repeated := tried[auth.ID]; repeated {
-				return cliproxyexecutor.Response{}, newNoAvailableRouteError(routeModel)
+				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(newNoAvailableRouteError(routeModel), upstreamErr)
 			}
 			tried[auth.ID] = struct{}{}
 			continue
@@ -276,6 +276,15 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 					upstreamErr = errExecute
 				}
 				warnLogUpstreamFailure(execCtx, entry, selection.Provider, upstreamModel, preparedAuth, durationHomeExec, errExecute)
+			}
+			if noteScheduledAntigravityFailure(execCtx, errExecute, preparedAuth, selection.Provider, execReq.Model) {
+				lastErr = errExecute
+				if ctx.Err() != nil || !budgetCanRepeat(execCtx) {
+					releaseAttempt()
+					selection.End("request_stopped")
+					return cliproxyexecutor.Response{}, errExecute
+				}
+				break
 			}
 			result := Result{AuthID: preparedAuth.ID, Provider: selection.Provider, Model: resultModel, RouteModel: routeModel, Success: errExecute == nil, Options: execOpts}
 			if errExecute == nil {

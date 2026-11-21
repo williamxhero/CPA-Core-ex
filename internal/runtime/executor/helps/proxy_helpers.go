@@ -33,8 +33,12 @@ import (
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
-func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) (clientOut *http.Client) {
-	defer func() { clientOut = cliproxyexecutor.GateHTTPClient(ctx, httptransport.Decorate(ctx, clientOut)) }()
+func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	return cliproxyexecutor.GateHTTPClient(ctx, httptransport.Decorate(ctx, NewProxyAwareHTTPClientBase(ctx, cfg, auth, timeout)))
+}
+
+// NewProxyAwareHTTPClientBase leaves transport decoration and admission to the caller.
+func NewProxyAwareHTTPClientBase(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
 	if timeout > 0 {
 		httpClient.Timeout = timeout
