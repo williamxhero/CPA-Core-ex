@@ -1,9 +1,10 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
-
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,30 +29,54 @@ type scopedQuotaTransport struct{ rt http.RoundTripper }
 func (p scopedQuotaTransport) RoundTripperFor(*coreauth.Auth) http.RoundTripper { return p.rt }
 
 func TestScopedCodexQuotaInferenceAndRecovery(t *testing.T) {
-	testNativeQuotaInferenceAndRecovery(t, false)
+	testNativeQuotaInferenceAndRecovery(t, false, false)
 }
 
 func TestWholeCodexQuotaInferenceAndRecovery(t *testing.T) {
-	testNativeQuotaInferenceAndRecovery(t, true)
+	testNativeQuotaInferenceAndRecovery(t, true, false)
 }
 
-func testNativeQuotaInferenceAndRecovery(t *testing.T, whole bool) {
+func TestScopedCodexQuotaRecoveryAfterNativeRenewal(t *testing.T) {
+	testNativeQuotaInferenceAndRecovery(t, false, true)
+}
+
+func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	model, sibling, gateModel := "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.3-codex-spark"
 	if whole {
 		model, sibling, gateModel = "gpt-5.4", "gpt-5.4-mini", ""
 	}
 	var mode atomic.Int32
 	var hangingReads atomic.Int32
+	var exchanges atomic.Int32
 	var mu sync.Mutex
 	sends := map[string]int{}
-	reset := time.Now().Add(135 * time.Hour).Unix()
+	openedAt := time.Now()
+	reset := openedAt.Add(135 * time.Hour).Unix()
 	weeklyWindow := func(percent int, seconds int64) string {
 		return fmt.Sprintf(`{"used_percent":%d,"reset_at":%d,"limit_window_seconds":%d}`, percent, reset, seconds)
 	}
 	upstream, quotaNetwork := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Authorization")
+		if renew && r.URL.Path == "/oauth/token" {
+			call := exchanges.Add(1)
+			grant := "quota-refresh-CANARY"
+			if call == 2 {
+				grant = "rotated-grant-1-CANARY"
+			}
+			if err := r.ParseForm(); err != nil || call > 2 || r.Form.Get("refresh_token") != grant {
+				t.Error("unexpected OAuth renewal grant")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			fmt.Fprintf(w, `{"access_token":"rotated-A-%d-CANARY","refresh_token":"rotated-grant-%d-CANARY","expires_in":3600}`, call, call)
+			return
+		}
 		if r.URL.Path == "/backend-api/wham/usage" {
-			if key != "Bearer quota-A-CANARY" || r.Header.Get("Chatgpt-Account-Id") != "acct-A-CANARY" {
+			wantKey := "Bearer quota-A-CANARY"
+			if count := exchanges.Load(); count > 0 {
+				wantKey = fmt.Sprintf("Bearer rotated-A-%d-CANARY", count)
+			}
+			if key != wantKey || r.Header.Get("Chatgpt-Account-Id") != "acct-A-CANARY" {
 				t.Error("query did not address the inference account")
 			}
 			if whole {
@@ -106,7 +131,11 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole bool) {
 		mu.Lock()
 		sends[key+"/"+req.Model]++
 		mu.Unlock()
-		if key == "Bearer quota-A-CANARY" && req.Model == model && (mode.Load() == 0 || mode.Load() >= 5) {
+		if req.Model == model && ((key == "Bearer quota-A-CANARY" && (mode.Load() == 0 || mode.Load() >= 5)) ||
+			(renew && key == "Bearer rotated-A-2-CANARY" && mode.Load() == 8)) {
+			if renew {
+				w.Header().Set("Date", openedAt.UTC().Format(http.TimeFormat))
+			}
 			limit, header := "codex_bengalfox", "X-Codex-Bengalfox"
 			if whole {
 				limit, header = "codex", "X-Codex"
@@ -128,13 +157,31 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole bool) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"model\":%q,\"status\":\"completed\",\"output\":[]}}\n\n", req.Model)
 	}))
+	if renew {
+		tr := upstream.Client().Transport.(*http.Transport).Clone()
+		tr.Proxy = nil
+		tr.TLSClientConfig.ServerName = "chatgpt.com"
+		tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != "auth.openai.com:443" {
+				return nil, fmt.Errorf("unexpected OAuth destination: %s", address)
+			}
+			return quotaNetwork.DialContext(ctx, network, address)
+		}
+		original := http.DefaultTransport
+		http.DefaultTransport = tr
+		t.Cleanup(func() { http.DefaultTransport = original; tr.CloseIdleConnections() })
+	}
 	dir := t.TempDir()
 	authDir := filepath.Join(dir, "auth")
 	if err := os.MkdirAll(authDir, 0700); err != nil {
 		t.Fatal(err)
 	}
 	for _, label := range []string{"A", "B"} {
-		if err := os.WriteFile(filepath.Join(authDir, "fixture-"+label+"-CANARY.json"), []byte(fmt.Sprintf(`{"type":"codex","access_token":"quota-%s-CANARY","account_id":"acct-%s-CANARY","disabled":false}`, label, label)), 0600); err != nil {
+		extra := ""
+		if renew && label == "A" {
+			extra = `,"refresh_token":"quota-refresh-CANARY","priority":100`
+		}
+		if err := os.WriteFile(filepath.Join(authDir, "fixture-"+label+"-CANARY.json"), []byte(fmt.Sprintf(`{"type":"codex","access_token":"quota-%s-CANARY","account_id":"acct-%s-CANARY","disabled":false%s}`, label, label, extra)), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -153,7 +200,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole bool) {
 		f.manager.SetRoundTripperProvider(scopedQuotaTransport{rt})
 		for _, a := range f.manager.List() {
 			// Explicit priority ensures A is selected before B every time A is available.
-			if a.Metadata["access_token"] == "quota-A-CANARY" {
+			if !renew && a.Metadata["access_token"] == "quota-A-CANARY" {
 				a.Attributes["priority"] = "100"
 				if _, err := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); err != nil {
 					t.Fatal(err)
@@ -230,18 +277,68 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole bool) {
 	gate := readGate(f, 1)
 	infer(f, model)
 	expect(1, 3, other)
-	var view struct{ Sources []resource.QuotaSource }
-	if err := json.Unmarshal(f.request("credential-quota/sources", 200), &view); err != nil {
-		t.Fatal(err)
-	}
-	var q resource.QuotaQuery
-	for _, source := range view.Sources {
-		if source.SubjectID == gate.Targets[0].ResourceID {
-			q = resource.QuotaQuery{Binding: source.Binding, AuthIndex: source.AuthIndex, SourceVersion: source.SourceVersion, SourceID: source.SourceID, SubjectID: source.SubjectID}
+	quotaQuery := func() resource.QuotaQuery {
+		t.Helper()
+		var view struct{ Sources []resource.QuotaSource }
+		if err := json.Unmarshal(f.request("credential-quota/sources", 200), &view); err != nil {
+			t.Fatal(err)
 		}
-	}
-	if q.AuthIndex == "" {
+		for _, source := range view.Sources {
+			if source.SubjectID == gate.Targets[0].ResourceID {
+				return resource.QuotaQuery{Binding: source.Binding, AuthIndex: source.AuthIndex, SourceVersion: source.SourceVersion, SourceID: source.SourceID, SubjectID: source.SubjectID}
+			}
+		}
 		t.Fatal("paused quota source unavailable")
+		return resource.QuotaQuery{}
+	}
+	q := quotaQuery()
+	if renew {
+		rotate := func(wantExchanges int32) {
+			t.Helper()
+			req := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/refresh", strings.NewReader(`{"name":"fixture-A-CANARY.json"}`))
+			req.RemoteAddr = "127.0.0.1:1234"
+			req.Header.Set("Authorization", "Bearer test-password")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			f.server.engine.ServeHTTP(w, req)
+			if w.Code != http.StatusOK || exchanges.Load() != wantExchanges {
+				t.Fatalf("native OAuth rotation failed: status=%d exchanges=%d body=%s", w.Code, exchanges.Load(), w.Body)
+			}
+		}
+		rotate(1)
+		priorQuery := q
+		q = quotaQuery()
+		if q.Targets[0].CredentialVersion == priorQuery.Targets[0].CredentialVersion {
+			t.Fatal("renewal did not rotate the credential version")
+		}
+		rotatedGate := readGate(f, 1)
+		if rotatedGate.Targets[0].CredentialVersion != q.Targets[0].CredentialVersion {
+			t.Fatal("certified refresh did not carry the native quota pause")
+		}
+		mode.Store(4)
+		queryQuota(t, f, priorQuery, 409)
+		infer(f, model)
+		expect(1, 4, other)
+		fresh := queryQuota(t, f, q, 200)
+		if len(fresh.ClearedQuotaWindows) != 1 {
+			t.Fatalf("fresh WHAM did not clear the certified rotation's pause: %+v", fresh)
+		}
+		readGate(f, 0)
+		infer(f, model)
+		expect(1, 4, other)
+		rotate(2)
+		mode.Store(8) // Replay the original rejection timestamp against the newest grant.
+		infer(f, model)
+		readGate(f, 0)
+		mode.Store(4)
+		infer(f, model)
+		expect(1, 5, other)
+		mu.Lock()
+		defer mu.Unlock()
+		if sends["Bearer rotated-A-1-CANARY/"+model] != 1 || sends["Bearer rotated-A-2-CANARY/"+model] != 2 {
+			t.Fatalf("renewed A did not dispatch after recovery: %v", sends)
+		}
+		return
 	}
 	wrongVersion := q
 	wrongVersion.SourceVersion = strings.Repeat("f", 64)
