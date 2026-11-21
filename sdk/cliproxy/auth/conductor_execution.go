@@ -1728,6 +1728,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
 		if homeMode {
+			if selection != nil && RequestBudgetEnforced(ctx) && !m.scheduledFundingAllows(ctx, auth) {
+				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "funding_ineligible"); errEnd != nil {
+					return nil, errEnd
+				}
+				if _, repeated := tried[auth.ID]; repeated {
+					return nil, newNoAvailableRouteError(routeModel)
+				}
+				tried[auth.ID] = struct{}{}
+				homeExcludedAuthIDs[auth.ID] = struct{}{}
+				homeAuthCount++
+				continue
+			}
 			m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		}
 		if selection != nil && allowSameAuthRetry && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && auth.ID != lastHomeAuthID {

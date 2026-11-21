@@ -371,6 +371,9 @@ func (m *Manager) filterExecutionModelsForRequest(ctx context.Context, auth *Aut
 		return nil
 	}
 	now := time.Now()
+	if RequestBudgetEnforced(ctx) {
+		now = m.getContinuityClock().Now()
+	}
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {
 		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)

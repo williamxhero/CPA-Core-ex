@@ -147,11 +147,20 @@ func (b *requestBudget) nextRound(from int) bool {
 func (b *requestBudget) credentialSnapshot() map[string]struct{} {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	out := make(map[string]struct{}, len(b.credentials))
+	out := make(map[string]struct{}, len(b.credentials)+len(b.routes))
 	for id := range b.credentials {
 		out[id] = struct{}{}
 	}
+	for route := range b.routes {
+		out[route] = struct{}{}
+	}
 	return out
+}
+
+func (b *requestBudget) routeCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.routes)
 }
 
 // RecordRequestStreamOutput marks a payload offered for downstream delivery.
@@ -176,7 +185,7 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 		return ctx
 	}
 	routeIdentity := auth.ID
-	if RequestBudgetEnforced(ctx) {
+	if RequestBudgetEnforced(ctx) && !m.HomeEnabled() {
 		routeIdentity = m.scheduledRouteIdentity(auth, routeModel)
 	}
 	if routeIdentity == "" {
@@ -407,7 +416,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		attempted := b.credentialSnapshot()
 		ctxRound := seedScheduledRoundExclusions(ctx, attempted)
-		room := maxCredentials == 0 || len(attempted) < maxCredentials
+		room := maxCredentials == 0 || b.routeCount() < maxCredentials
 		if room && (first || m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready) {
 			result, err := execute(ctxRound, withAttemptedAuthTracker(opts, make(map[string]struct{})), s.Round, roundLimit, &homeLimit)
 			if err == nil {
@@ -426,7 +435,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				return zero, previous
 			}
 			attempted = b.credentialSnapshot()
-			room = maxCredentials == 0 || len(attempted) < maxCredentials
+			room = maxCredentials == 0 || b.routeCount() < maxCredentials
 		}
 		first = false
 		if room {

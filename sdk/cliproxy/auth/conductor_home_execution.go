@@ -75,6 +75,11 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	clearSchedulerSelectionID(opts.Metadata)
 	tried := make(map[string]struct{})
+	if RequestBudgetEnforced(ctx) {
+		for _, id := range streamReplayExcludedAuthIDsFromContext(ctx) {
+			tried[id] = struct{}{}
+		}
+	}
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
@@ -106,6 +111,16 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		if auth == nil || selection.Executor == nil {
 			selection.End("missing_execution_target")
 			return cliproxyexecutor.Response{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		if !countTokens && RequestBudgetEnforced(ctx) && !m.scheduledFundingAllows(ctx, auth) {
+			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "funding_ineligible"); errEnd != nil {
+				return cliproxyexecutor.Response{}, errEnd
+			}
+			if _, repeated := tried[auth.ID]; repeated {
+				return cliproxyexecutor.Response{}, newNoAvailableRouteError(routeModel)
+			}
+			tried[auth.ID] = struct{}{}
+			continue
 		}
 		m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		if _, seen := tried[auth.ID]; seen {
