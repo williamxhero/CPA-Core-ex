@@ -96,6 +96,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		pickOpts = withHomeExcludedAuthIDs(pickOpts, tried)
 		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
 		if errSelection != nil {
+			if !countTokens {
+				recordHomeRoutingPickFailure(ctx, errSelection)
+			}
 			preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
 			var homeCooldown *homeDispatchRetryAfterError
 			if lastErr != nil && errors.As(errSelection, &homeCooldown) && homeCooldown != nil {
@@ -113,6 +116,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			return cliproxyexecutor.Response{}, &Error{Code: "executor_not_found", Message: "executor not registered"}
 		}
 		if reason := m.scheduledHomeExclusion(ctx, auth, selection.Provider); !countTokens && reason != "" {
+			recordHomeRoutingStage(ctx, auth, reason)
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, reason); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
@@ -124,6 +128,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 		}
 		m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		if _, seen := tried[auth.ID]; seen {
+			if !countTokens {
+				recordHomeRoutingStage(ctx, auth, "request_excluded")
+			}
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_auth"); errEnd != nil {
 				return cliproxyexecutor.Response{}, errEnd
 			}
@@ -147,6 +154,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 			return cliproxyexecutor.Response{}, errBind
 		}
 		// Enrich before auth preparation so prepare-stage usage records observe the client request.
+		if !countTokens {
+			recordHomeRoutingStage(ctx, auth, "")
+		}
 		clearSchedulerSelectionID(opts.Metadata)
 		execCtx = contextWithRequestedModelAlias(execCtx, opts, routeModel)
 		execCtx = coreusage.WithSelectionID(execCtx, "")

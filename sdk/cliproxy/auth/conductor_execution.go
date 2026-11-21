@@ -1706,6 +1706,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		var errPick error
 		if homeMode {
 			selection, errPick = m.pickHomeDispatchSelection(ctx, routeModel, pickOpts)
+			if errPick != nil {
+				recordHomeRoutingPickFailure(ctx, errPick)
+			}
 			if selection != nil {
 				auth = selection.CloneAuthForRoute(routeModel)
 				executor = selection.Executor
@@ -1741,6 +1744,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		if homeMode {
 			if reason := m.scheduledHomeExclusion(ctx, auth, provider); selection != nil && reason != "" {
+				recordHomeRoutingStage(ctx, auth, reason)
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, reason); errEnd != nil {
 					return nil, errEnd
 				}
@@ -1773,6 +1777,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			// intentionally leaves the credential out of homeExcludedAuthIDs.
 			if _, alreadyTried := tried[auth.ID]; alreadyTried {
 				if _, excluded := homeExcludedAuthIDs[auth.ID]; excluded || (RequestBudgetEnforced(ctx) && requestSentToCredential(ctx, auth.ID)) {
+					recordHomeRoutingStage(ctx, auth, "request_excluded")
 					if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_excluded_auth"); errEnd != nil {
 						return nil, errEnd
 					}
@@ -1816,6 +1821,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				selection.End("attempt_bind_failed")
 				return nil, errBind
 			}
+			recordHomeRoutingStage(ctx, auth, "")
 		}
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)

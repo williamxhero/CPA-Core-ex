@@ -56,6 +56,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 		return nil, nil, errMsg
 	}
 	if routeDecision.ExecutorPluginID != "" {
+		h.startRoutingTrace(ctx, originalRequestedModel, modelName, execOptions.AuthSelectionModel, execOptions.InternalSource)
 		return h.executeWithPluginExecutor(ctx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
 	}
 	providers, normalizedModel, errMsg := h.providersForExecution(modelName, originalRequestedModel, allowImageModel, routeDecision, execOptions, ctx)
@@ -200,14 +201,15 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 
 func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryProtocol, responseProtocol, modelName, originalRequestedModel string, rawJSON []byte, alt, executorPluginID string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	if h.AuthManager != nil && h.AuthManager.HomeEnabled() {
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusServiceUnavailable, Error: fmt.Errorf("plugin executor routing is unavailable while Home is enabled")}
+		return nil, nil, externalExecutorSetupError(ctx, execOptions.InternalSource, coreauth.ExternalExecutorDisabledByHome(ctx, modelName))
 	}
 	if err := h.AuthManager.CheckProviderSchedulingUnboundExecution(ctx, modelName, pinnedAuthIDFromContext(ctx)); err != nil {
-		return nil, nil, executionErrorMessage(err)
+		return nil, nil, externalExecutorSetupError(ctx, execOptions.InternalSource, err)
 	}
 	host := h.pluginExecutorHost()
 	if host == nil {
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("plugin executor host is unavailable")}
+		coreauth.RecordExternalExecutorRouting(ctx, "executor_not_available")
+		return nil, nil, externalExecutorSetupError(ctx, execOptions.InternalSource, &coreauth.Error{HTTPStatus: http.StatusBadGateway, Message: "plugin executor host is unavailable"})
 	}
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, false))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
@@ -230,12 +232,13 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
 		reporter.StartResponseTTFT()
 	}
+	coreauth.RecordExternalExecutorRouting(execCtx, "")
 	resp, errExecute := host.ExecutePluginExecutor(execCtx, executorPluginID, req, opts)
 	if errExecute != nil {
 		if reporter != nil && !nestedTracker.hasNestedExecution() {
 			reporter.PublishFailure(execCtx, errExecute)
 		}
-		errMsg := executionErrorMessage(errExecute)
+		errMsg := executionErrorMessage(coreauth.ExternalExecutorRoutingError(execCtx, errExecute))
 		lifecycle.completeError(execCtx, errMsg)
 		return nil, nil, errMsg
 	}

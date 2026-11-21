@@ -122,7 +122,12 @@ func (m *Manager) CheckProviderSchedulingUnboundExecution(ctx context.Context, m
 	if m == nil || !m.ProviderSchedulingEnforced(ctx, model) {
 		return nil
 	}
-	if strings.TrimSpace(pinnedAuthID) != "" || !m.scheduledFundingAllows(ctx, nil) {
+	if strings.TrimSpace(pinnedAuthID) != "" {
+		RecordExternalExecutorRouting(ctx, "hard_binding")
+		return newNoAvailableRouteError(model)
+	}
+	if !m.scheduledFundingAllows(ctx, nil) {
+		RecordExternalExecutorRouting(ctx, "funding_ineligible")
 		return newNoAvailableRouteError(model)
 	}
 	return nil
