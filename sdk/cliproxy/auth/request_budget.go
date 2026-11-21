@@ -31,6 +31,7 @@ type requestBudget struct {
 	RequestBudgetSnapshot
 	enforced       bool
 	waiting        bool
+	deadline       time.Time
 	configuredWait time.Duration
 	credentials    map[string]struct{}
 	routes         map[string]struct{}
@@ -52,6 +53,34 @@ func WithRequestBudget(ctx context.Context) context.Context {
 		return ctx
 	}
 	return WithFreshRequestBudget(ctx)
+}
+
+// InheritRequestBudget shares host-only accounting with a derived execution
+// context. The inbound deadline constrains recovery waits, not inference.
+func InheritRequestBudget(ctx, requestCtx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b := requestBudgetFromContext(ctx)
+	if b == nil {
+		b = requestBudgetFromContext(requestCtx)
+		if b == nil {
+			ctx = WithFreshRequestBudget(ctx)
+			b = requestBudgetFromContext(ctx)
+		} else {
+			ctx = context.WithValue(ctx, requestBudgetKey{}, b)
+		}
+	}
+	if requestCtx != nil {
+		if deadline, ok := requestCtx.Deadline(); ok {
+			b.mu.Lock()
+			if b.deadline.IsZero() || deadline.Before(b.deadline) {
+				b.deadline = deadline
+			}
+			b.mu.Unlock()
+		}
+	}
+	return ctx
 }
 
 // WithFreshRequestBudget starts an independent downstream turn on a reused connection.
@@ -224,7 +253,7 @@ func scheduledUpstreamTransient(err error) bool {
 }
 
 func (m *Manager) canOpenScheduledRound(ctx context.Context, opts executor.Options, err error, round, defaultRetry, homeLimit int, providers []string, model string) bool {
-	if !budgetCanRepeat(ctx) || !scheduledUpstreamTransient(err) {
+	if defaultRetry == 0 || !budgetCanRepeat(ctx) || !scheduledUpstreamTransient(err) {
 		return false
 	}
 	if explicit := m.configuredUpstreamErrorRetryLimit(); explicit != -2 {
@@ -265,7 +294,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 		b.mu.Unlock()
 		return false, nil
 	}
-	if deadline, ok := ctx.Deadline(); ok && !opportunity.at.Before(deadline) {
+	if deadline, ok := ctx.Deadline(); (ok && !opportunity.at.Before(deadline)) || (!b.deadline.IsZero() && !opportunity.at.Before(b.deadline)) {
 		b.mu.Unlock()
 		return false, nil
 	}
@@ -276,7 +305,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	err := waitForRecoverySignal(ctx, clock, wait, opportunity.changed)
 	elapsed := clock.Now().Sub(start)
 	b.mu.Lock()
-	b.ActiveWait += min(max(0, elapsed), wait)
+	b.ActiveWait += max(0, elapsed)
 	b.waiting = false
 	b.mu.Unlock()
 	return err == nil, err

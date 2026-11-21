@@ -695,6 +695,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		parentCtx = httptransport.InheritDecorator(parentCtx, requestCtx)
 		parentCtx = logging.InheritDeferredCapture(parentCtx, requestCtx)
 	}
+	parentCtx = coreauth.InheritRequestBudget(parentCtx, requestCtx)
 	if c != nil && logging.DeferredAPICaptureFromContext(parentCtx) == nil && !logging.DeferredAPIRequestCaptureDisabled(parentCtx) {
 		if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
 			if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil {
