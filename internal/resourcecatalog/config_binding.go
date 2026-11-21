@@ -92,7 +92,7 @@ func (c *Catalog) configuredAuthsLocked() ([]*coreauth.Auth, error) {
 	}
 	legacy := make(map[string]legacyFundingConfig)
 	for _, p := range cfg.OpenAICompatibility {
-		if adapter := cfg.NativeFundingAdapter(&p); p.AutoHeld && adapter != "" {
+		if adapter := cfg.NativeFundingAdapter(&p); adapter != "" {
 			for _, entry := range p.APIKeyEntries {
 				if entry.ResourceID != "" {
 					legacy[entry.ResourceID] = legacyFundingConfig{provider: p, adapter: adapter}

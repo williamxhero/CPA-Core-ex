@@ -23,7 +23,7 @@ type legacyFundingGroup struct {
 }
 
 func (c *Catalog) nativeLegacyFundingGroup(p *config.OpenAICompatibility, adapter string) (legacyFundingGroup, bool) {
-	if adapter == "" || !p.AutoHeld {
+	if adapter == "" {
 		return legacyFundingGroup{}, false
 	}
 	b, err := c.providerGroupLocked(p.ResourceID)
@@ -37,6 +37,28 @@ func (c *Catalog) nativeLegacyFundingGroup(p *config.OpenAICompatibility, adapte
 	for _, target := range b.Targets[1:] {
 		row, ok := c.gateRowLocked(target.ResourceID)
 		if !ok || !expected[target.ResourceID] || len(row.SourceBindings) != 0 {
+			return legacyFundingGroup{}, false
+		}
+	}
+	// The raw flag elects the first migration. A current signed member also
+	// elects the whole roster after a predecessor rewrote the legacy flag.
+	if !p.AutoHeld {
+		elected := false
+		for _, gate := range c.state.Gates.Gates {
+			if gate.Owner != legacyFundingOwner || len(gate.Targets) != 1 {
+				continue
+			}
+			for _, target := range b.Targets[1:] {
+				if sameGateLifecycle(gate.Targets[0], target) {
+					elected = true
+					break
+				}
+			}
+			if elected {
+				break
+			}
+		}
+		if !elected {
 			return legacyFundingGroup{}, false
 		}
 	}
@@ -54,7 +76,15 @@ func (c *Catalog) materializeLegacyFundingGuards(state *diskState, snapshot reso
 		}
 	}
 	if !hasMarker {
-		return false, nil
+		for _, gate := range state.Gates.Gates {
+			if gate.Owner == legacyFundingOwner {
+				hasMarker = true
+				break
+			}
+		}
+		if !hasMarker {
+			return false, nil
+		}
 	}
 	var cfg *config.Config
 	for _, f := range files {
@@ -167,7 +197,7 @@ func (c *Catalog) legacyFundingReleasedLocked(group legacyFundingGroup) bool {
 	return true
 }
 
-func (c *Catalog) legacyFundingAdmissionLocked(b *resource.Binding) (required, released bool, error error) {
+func (c *Catalog) legacyFundingAdmissionLocked(b *resource.Binding) (required, released bool, err error) {
 	if _, err := c.configuredAuthsLocked(); err != nil {
 		return false, false, err
 	}
@@ -176,8 +206,11 @@ func (c *Catalog) legacyFundingAdmissionLocked(b *resource.Binding) (required, r
 		if !known {
 			continue
 		}
-		required = true
 		group, ok := c.nativeLegacyFundingGroup(&p.provider, p.adapter)
+		if !ok && !p.provider.AutoHeld {
+			continue
+		}
+		required = true
 		if !ok || !c.legacyFundingReleasedLocked(group) {
 			return true, false, nil
 		}
