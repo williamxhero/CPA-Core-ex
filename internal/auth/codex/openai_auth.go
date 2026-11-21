@@ -262,7 +262,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		if rejection := refreshGrantRejection(resp.StatusCode, body); rejection != nil {
+		if rejection := refreshGrantRejection(resp.StatusCode, body, resp.Header.Get("X-Request-ID")); rejection != nil {
 			return nil, rejection
 		}
 		return nil, &RefreshOutcomeUnknownError{Stage: "response-status"}
@@ -375,7 +375,7 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 
 // refreshGrantRejection recognizes explicit OAuth grant failure codes. HTTP status
 // or prose alone does not establish that a grant was rejected.
-func refreshGrantRejection(status int, body []byte) *OAuthError {
+func refreshGrantRejection(status int, body []byte, requestID string) *OAuthError {
 	if status < 400 || status >= 500 || !ojson.ValidBytes(body) {
 		return nil
 	}
@@ -383,13 +383,35 @@ func refreshGrantRejection(status int, body []byte) *OAuthError {
 	code := response.Get("error").String()
 	if response.Get("error").IsObject() {
 		code = response.Get("error.code").String()
+	} else if code == "invalid_grant" {
+		switch specificCode := response.Get("code").String(); specificCode {
+		case "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated", "token_revoked":
+			code = specificCode
+		}
 	}
 	switch code {
 	case "invalid_grant", "refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated", "token_revoked":
-		return NewOAuthError(code, "", status)
+		rejection := NewOAuthError(code, "", status)
+		rejection.requestID = safeOAuthRequestID(requestID)
+		return rejection
 	default:
 		return nil
 	}
+}
+
+// A provider request identifier is safe for correlation only in a recognized
+// opaque format; never retain arbitrary header or response text.
+func safeOAuthRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 4 || len(value) > 96 || !(strings.HasPrefix(value, "req_") || strings.HasPrefix(value, "req-")) {
+		return ""
+	}
+	for _, r := range value[4:] {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return ""
+		}
+	}
+	return value
 }
 
 func isNonRetryableRefreshErr(err error) bool {

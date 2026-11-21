@@ -16,12 +16,16 @@ type OAuthError struct {
 	URI string `json:"error_uri,omitempty"`
 	// StatusCode is the HTTP status code associated with the error.
 	StatusCode int `json:"-"`
+	requestID  string
 }
 
 // Error returns a string representation of the OAuth error.
 func (e *OAuthError) Error() string {
 	if e.Description != "" {
 		return fmt.Sprintf("OAuth error %s: %s", e.Code, e.Description)
+	}
+	if e.requestID != "" {
+		return fmt.Sprintf("OAuth error: %s (request_id=%s)", e.Code, e.requestID)
 	}
 	return fmt.Sprintf("OAuth error: %s", e.Code)
 }
