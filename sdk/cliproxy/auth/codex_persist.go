@@ -29,6 +29,14 @@ func IsCodexAuthRecord(auth *Auth) bool {
 	return false
 }
 
+type codexOAuthFileWriterKey struct{}
+
+// WithCodexOAuthFileWriter attaches the credential source owner to a verified,
+// targeted OAuth save. The writer runs under the Codex file lock.
+func WithCodexOAuthFileWriter(ctx context.Context, write func(string, map[string]any) error) context.Context {
+	return context.WithValue(ctx, codexOAuthFileWriterKey{}, write)
+}
+
 // PersistCodexAuthFile persists a Codex auth record to path using inter-process file locking,
 // read-before-write merging, and scoped refresh patches when present.
 // It returns handled=false when auth is not a Codex credential record.
@@ -86,7 +94,16 @@ func PersistCodexAuthFile(ctx context.Context, path string, auth *Auth) (bool, e
 		if storage, ok := auth.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
 			clonedStorage := *storage
 			clonedStorage.ReplaceCredentials = HasAuthCreationIntent(ctx)
-			clonedStorage.OwnedWrite = func(path string, data map[string]any) error { return writeOwnedCodexAuth(ctx, path, auth, data) }
+			clonedStorage.OwnedWrite = func(path string, data map[string]any) error {
+				if write, _ := ctx.Value(codexOAuthFileWriterKey{}).(func(string, map[string]any) error); write != nil && clonedStorage.ReplaceCredentials {
+					if err := write(path, data); err != nil {
+						return err
+					}
+					auth.Metadata = data
+					return nil
+				}
+				return writeOwnedCodexAuth(ctx, path, auth, data)
+			}
 			auth.Storage = &clonedStorage
 			defer func() { clonedStorage.OwnedWrite = nil }()
 		}

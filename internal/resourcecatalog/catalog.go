@@ -27,6 +27,7 @@ var (
 
 type Catalog struct {
 	ownedFileReplacements map[string]string
+	reauthenticatedCodex  string
 	configuredProjection  *configuredSourceProjection
 
 	mu                                  sync.Mutex
@@ -260,6 +261,19 @@ func (c *Catalog) reconcileLocked() error {
 		if record == nil {
 			record = &diskRecord{Kind: r.row.Kind, Family: r.row.Family, Target: resource.Target{ResourceID: r.row.ResourceID, Incarnation: uuid.NewString(), IdentityVersion: 1, CredentialVersion: 1, ConfigVersion: 1}}
 			state.Records[r.row.ResourceID] = record
+		}
+		if c.reauthenticatedCodex == r.row.ResourceID && counts[r.row.ResourceID] == 1 &&
+			!record.Deleted && record.Kind == r.row.Kind && record.Family == r.row.Family &&
+			c.ownedFileReplacements[r.row.ResourceID] == fileSeal {
+			// A fresh interactive grant is a new credential generation, not a
+			// certified silent refresh. Do not move old gates or quota evidence.
+			if record.Blocked {
+				record.Blocked = false
+				record.Target.Incarnation = uuid.NewString()
+				if !advance(&record.Target.IdentityVersion) {
+					return ErrUnavailable
+				}
+			}
 		}
 		if (record.Deleted || (record.FileSeal != "" && record.FileSeal != fileSeal && c.ownedFileReplacements[r.row.ResourceID] != fileSeal) || counts[r.row.ResourceID] > 1 || record.Kind != r.row.Kind || record.Family != r.row.Family) && !record.Blocked {
 			record.Blocked = true

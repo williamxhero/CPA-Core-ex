@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/resourcecatalog"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -553,6 +554,22 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 			return "", false
 		}
 		ctx = withTargetedOAuthSave(ctx)
+		if h.resourceCatalog != nil && sessionProvider == "codex" {
+			if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
+				verifiedAccountID := strings.TrimSpace(storage.AccountID)
+				expectedAccountID := strings.TrimSpace(target.AccountID)
+				if expectedAccountID == "" || expectedAccountID != verifiedAccountID {
+					SetOAuthSessionError(state, "Authenticated account does not match target credential")
+					return "", false
+				}
+				ctx = coreauth.WithCodexOAuthFileWriter(ctx, func(path string, data map[string]any) error {
+					if target.Path == "" || !sameOAuthTargetPath(path, target.Path) {
+						return resourcecatalog.ErrConflict
+					}
+					return h.resourceCatalog.SaveReauthenticatedCodex(path, verifiedAccountID, data)
+				})
+			}
+		}
 	}
 
 	var hadPrevAuth bool
@@ -618,6 +635,12 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 
 	CompleteOAuthSessionWithOutcome(state, record.ID, savedGrantHash, strings.TrimSpace(savedPath) != "", adopted, hadPrevAuth, prevVersion, prevEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr)
 	return savedPath, true
+}
+
+func sameOAuthTargetPath(actual, expected string) bool {
+	actualInfo, errActual := os.Stat(actual)
+	expectedInfo, errExpected := os.Stat(expected)
+	return errActual == nil && errExpected == nil && os.SameFile(actualInfo, expectedInfo)
 }
 
 func oauthGrantFingerprint(accessToken, refreshToken, email, accountID string) string {
