@@ -108,7 +108,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
-	httpClient := cliproxyexecutor.GateHTTPClient(ctx, newAntigravityHTTPClient(ctx, e.cfg, auth, 0))
+	httpClient := newAntigravityInferenceHTTPClient(ctx, e.cfg, auth)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	// Credential retry rounds are owned by the conductor. Perform one upstream
