@@ -113,6 +113,12 @@ func (c *Catalog) GateState() (resource.GateState, error) {
 		gates[i].Applicability = "current"
 		if !c.gateLifecyclesCurrentLocked([]resource.Gate{gates[i]}) {
 			gates[i].Applicability = "reconciliation_required"
+		} else if gates[i].Owner == legacyFundingOwner && len(gates[i].Targets) == 1 {
+			target := gates[i].Targets[0]
+			required, released, err := c.legacyFundingAdmissionLocked(&resource.Binding{Scope: c.versionLocked(), Targets: []resource.Target{target}})
+			if err == nil && required && released {
+				gates[i].Applicability = "rollback_guard"
+			}
 		}
 	}
 	return resource.GateState{Version: 1, Scope: c.versionLocked(), Revision: c.state.Gates.Revision, Ready: true, AllSourcesReady: c.gateLifecyclesCurrentLocked(gates), Gates: gates}, nil

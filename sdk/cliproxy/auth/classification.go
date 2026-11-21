@@ -15,6 +15,7 @@ const (
 
 	// Source catalog markers are unverified references, never routing eligibility.
 	AttributeLegacyFundingHold    = "legacy_funding_hold"
+	AttributeNativeFunding        = "native_funding"
 	AttributeResourceID           = "resource_id"
 	AttributeProviderResourceID   = "provider_resource_id"
 	AttributeAPIKey               = "api_key"

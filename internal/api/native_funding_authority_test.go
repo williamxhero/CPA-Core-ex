@@ -15,6 +15,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
@@ -132,6 +133,58 @@ func TestNativeFundingRestoresLegacyGroupOnlyWithAllCurrentMembersFunded(t *test
 	x.send(t, "provider-a-model", "SYNTHETIC-A1", false, true)
 	if sends != 1 {
 		t.Fatalf("eligible route forwarded %d requests", sends)
+	}
+	if err := json.Unmarshal(x.f.request("inference-gates", 200), &gate); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range gate.Gates {
+		if row.Reason == "legacy_funding_unverified" && row.Applicability != "rollback_guard" {
+			t.Fatalf("released rollback-only row shown as active: %+v", row)
+		}
+	}
+}
+
+func TestNativeFundingRollbackFenceDoesNotSpendOnlyCredentialAttempt(t *testing.T) {
+	x := newProviderKeyMatchFixture(t, "https://api.deepseek.com/v1", func(raw string) string {
+		return strings.Replace(raw, "- name: not-an-account-a", "- name: not-an-account-a\n      auto-held: true\n      priority: 99", 1)
+	})
+	var gate resource.GateState
+	if err := json.Unmarshal(x.f.request("inference-gates", 200), &gate); err != nil || len(gate.Gates) != 2 {
+		t.Fatalf("expected both historical members durably fenced before rollback: %+v, %v", gate.Gates, err)
+	}
+	dir, path := x.f.dir, x.f.path
+	x.f.close()
+	// This is the YAML change the predecessor accepts at its legacy v0 PATCH.
+	// Leave the durable catalog ledger intact and restart the current Core.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := bytes.Replace(raw, []byte("auto-held: true"), []byte("auto-held: false"), 1)
+	if bytes.Equal(raw, updated) {
+		t.Fatal("fixture missing legacy marker")
+	}
+	if err := os.WriteFile(path, updated, 0600); err != nil {
+		t.Fatal(err)
+	}
+	x.f = newInventoryHarness(t, dir)
+	x.startRuntime(t)
+	const alias = "shared-funded-model"
+	for _, a := range x.f.manager.List() {
+		registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: alias}})
+	}
+	x.f.manager.SetRetryConfig(0, 0, 1)
+	sends := make(chan string, 4)
+	x.f.manager.SetRoundTripperProvider(scopedQuotaTransport{nativeFundingTestTransport(func(r *http.Request) (*http.Response, error) {
+		sends <- r.Header.Get("Authorization")
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"test","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))}, nil
+	})})
+	x.send(t, alias, "SYNTHETIC-A1", false, true)
+	if len(sends) != 1 {
+		t.Fatalf("upstream sends = %d; want 1", len(sends))
+	}
+	if got := <-sends; !strings.HasPrefix(got, "Bearer SYNTHETIC-B") {
+		t.Fatalf("unexpected upstream for sole credential attempt: %q", got)
 	}
 }
 
