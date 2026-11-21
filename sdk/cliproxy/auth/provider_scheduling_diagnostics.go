@@ -56,7 +56,7 @@ func schedulingDiagnosticFamily(a *Auth) string {
 	}
 }
 
-func schedulingView(mode, model string, candidates []scheduledCandidate, selected *Auth) SchedulingDecision {
+func (m *Manager) schedulingView(mode, model string, candidates []scheduledCandidate, selected *Auth) SchedulingDecision {
 	d := SchedulingDecision{Mode: mode, Model: model, Candidates: make([]SchedulingCandidateDecision, 0, len(candidates))}
 	d.SelectedResourceID, _ = schedulingResource(selected)
 	for _, candidate := range candidates {
@@ -64,12 +64,13 @@ func schedulingView(mode, model string, candidates []scheduledCandidate, selecte
 		row := SchedulingCandidateDecision{ResourceID: id, Family: schedulingDiagnosticFamily(candidate.auth), Priority: authPriority(candidate.auth), Registered: !slices.Contains(candidate.reasons, "model_not_registered"), Eligible: true, Available: len(candidate.reasons) == 0, Reasons: slices.Clone(candidate.reasons)}
 		for _, reason := range candidate.reasons {
 			switch reason {
-			case "model_not_registered", "protocol_incompatible", "streaming_incompatible", "tools_incompatible", "image_incompatible", "reasoning_incompatible", "hard_binding", "caller_ineligible", "funding_ineligible":
+			case "model_not_registered", "provider_out_of_scope", "protocol_incompatible", "streaming_incompatible", "tools_incompatible", "image_incompatible", "reasoning_incompatible", "hard_binding", "caller_ineligible", "funding_ineligible":
 				row.Eligible = false
 			}
 		}
 		d.Candidates = append(d.Candidates, row)
 	}
+	m.appendSchedulingInventory(&d)
 	sort.SliceStable(d.Candidates, func(i, j int) bool {
 		left, right := d.Candidates[i], d.Candidates[j]
 		if left.Family != right.Family {
@@ -94,5 +95,5 @@ func (m *Manager) schedulingSnapshot(ctx context.Context, providers []string, mo
 	m.providerSchedulingUse.mu.Lock()
 	m.scheduledAvailable(candidates, model)
 	m.providerSchedulingUse.mu.Unlock()
-	return schedulingView(m.providerSchedulingMode(ctx, model), model, candidates, nil)
+	return m.schedulingView(m.providerSchedulingMode(ctx, model), model, candidates, nil)
 }

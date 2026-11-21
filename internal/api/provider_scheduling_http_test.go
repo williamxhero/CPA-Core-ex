@@ -280,3 +280,36 @@ func TestProviderSchedulingHTTPPreservesRequestedToolAndImageCapabilities(t *tes
 		t.Fatalf("outbound calls = %v, want only the capability-compatible route", f.calls)
 	}
 }
+
+func TestProviderSchedulingHTTPDistinguishesDisabledKnownModelFromUnknown(t *testing.T) {
+	f := newSchedulingHTTPFixture(t, nil)
+	cfg, err := config.LoadConfig(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routing.ProviderScheduling.Mode = "enforce"
+	for i := range cfg.OpenAICompatibility {
+		cfg.OpenAICompatibility[i].Disabled = true
+	}
+	f.manager.SetConfig(cfg)
+	for _, a := range f.auths {
+		registry.GetGlobalRegistry().UnregisterClient(a.ID)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	f.assertReply(t, ctx, "open", 503, `no_available_route`)
+	resp, err := f.requestModel(ctx, "open", strings.Replace(simpleSchedulingChat, "public-scheduling-model", "never-registered-unknown-model", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != 400 || !strings.Contains(string(body), `"code":"model_not_found"`) {
+		t.Fatalf("unknown: %d %s (%v), want protocol 400", resp.StatusCode, body, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) != 0 {
+		t.Fatalf("local outcomes contacted upstream: %v", f.calls)
+	}
+}

@@ -45,6 +45,7 @@ func (h *Handler) initializeResourceCatalog() {
 		return
 	}
 	h.resourceCatalog = catalog
+	h.authManager.SetSchedulingInventory(catalog.Snapshot)
 	h.authManager.SetQuotaExhaustionObserver(h.observeQuotaExhaustion)
 	h.authManager.SetCodexQuotaRejectionObserver(h.observeCodexQuotaRejection)
 	h.authManager.SetSourceIdentityOwnedSave(catalog)
@@ -73,6 +74,7 @@ func (h *Handler) CloseResourceCatalog() error {
 		return nil
 	}
 	h.resourceCatalogClosed = true
+	h.authManager.SetSchedulingInventory(nil)
 	if h.authManager != nil {
 		if store, ok := h.authManager.Storage().(*sdkAuth.FileTokenStore); ok {
 			store.SetSourceIdentityBinder(nil)

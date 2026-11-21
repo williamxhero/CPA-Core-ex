@@ -156,14 +156,24 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			excludedRoutes[m.scheduledRouteIdentity(c.auth, model)] = struct{}{}
 		}
 	}
+	claimed := make(map[string]string)
+	for _, claim := range configuredSchedulingClaims(m.runtimeConfigSnapshot(), model) {
+		if claim.id != "" && claim.reason != "" {
+			claimed[claim.id] = claim.reason
+		}
+	}
 	authority := m.inferenceAdmission.Load()
 	for i := range candidates {
 		c := &candidates[i]
 		a := c.auth
 		c.model = m.selectionModelForAuth(a, model)
 		c.limits = schedulingLimits(cfg, a)
-		if _, exists := allowed[c.owner]; !exists || !m.authSupportsRouteModel(reg, a, model) {
+		if !m.authSupportsRouteModel(reg, a, model) {
 			c.reasons = append(c.reasons, "model_not_registered")
+		}
+		_, providerAllowed := allowed[canonicalSchedulingProvider(c.owner)]
+		if !providerAllowed {
+			c.reasons = append(c.reasons, "provider_out_of_scope")
 		}
 		if c.exec == nil {
 			c.reasons = append(c.reasons, "protocol_incompatible")
@@ -187,11 +197,17 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		if excludeByAuth || excludeByIdentity || excludeByDuplicate {
 			c.reasons = append(c.reasons, "request_excluded")
 		}
+		id, parent := schedulingResource(a)
+		if configReason := claimed[id]; configReason != "" {
+			c.reasons = append(c.reasons, configReason)
+		} else if configReason = claimed[parent]; configReason != "" {
+			c.reasons = append(c.reasons, configReason)
+		}
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, a, c.model, now, opts.Headers)
 		if blocked {
 			switch {
 			case reason == blockReasonDisabled:
-				c.reasons = append(c.reasons, "manual_disabled")
+				c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
 			case reason == blockReasonCooldown || !next.IsZero():
 				c.reasons = append(c.reasons, "cooldown")
 				if eligible, nextEligible := retryRoundAvailabilityForAuthForRequest(ctx, a, c.model, now, opts.Headers); eligible {
@@ -205,7 +221,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			c.reasons = append(c.reasons, "zero_weight")
 		}
 		if authority != nil && authority.check(ctx, a, model) != nil || authority == nil && a.Attributes[AttributeLegacyFundingHold] == "true" {
-			c.reasons = append(c.reasons, "inference_admission_blocked")
+			c.reasons = appendSchedulingReason(c.reasons, "inference_admission_blocked")
 		}
 	}
 	return candidates, selector
@@ -223,7 +239,7 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		available, byID := m.scheduledAvailable(candidates, model)
 		report := func(selected *Auth) {
 			if sink := schedulingDecisionObserver(ctx); sink != nil {
-				sink(schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected))
+				sink(m.schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected))
 			}
 		}
 		if len(available) == 0 {
@@ -305,4 +321,11 @@ func (m *Manager) scheduledAvailable(candidates []scheduledCandidate, model stri
 		byID[candidate.auth.ID] = *candidate
 	}
 	return available, byID
+}
+
+func appendSchedulingReason(reasons []string, reason string) []string {
+	if !slices.Contains(reasons, reason) {
+		return append(reasons, reason)
+	}
+	return reasons
 }
