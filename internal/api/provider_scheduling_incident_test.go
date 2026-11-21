@@ -223,7 +223,11 @@ func TestProviderSchedulingTrueTerminalClasses(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer w.Body.Close()
+			defer func() {
+				if errClose := w.Body.Close(); errClose != nil {
+					t.Error(errClose)
+				}
+			}()
 			b, err := io.ReadAll(w.Body)
 			if err != nil {
 				t.Fatal(err)
@@ -361,7 +365,11 @@ func TestProviderSchedulingCommittedStreamKeepsOneSanitizedTerminal(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w.Body.Close()
+	defer func() {
+		if errClose := w.Body.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
 	b, err := io.ReadAll(w.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -393,7 +401,11 @@ func TestProviderSchedulingSuccessfulStreamTraceAtEOF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer res.Body.Close()
+	defer func() {
+		if errClose := res.Body.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
 	raw, err := io.ReadAll(res.Body)
 	if err != nil || res.StatusCode != 200 || !strings.Contains(string(raw), "stream-completed") || strings.Count(string(raw), "[DONE]") != 1 {
 		t.Fatalf("stream did not terminate normally: %d %s %v", res.StatusCode, raw, err)
@@ -458,14 +470,18 @@ func TestProviderSchedulingShadowComparesWithoutDispatchOrReservation(t *testing
 	}
 	call := func(caller, body string, wantStatus int, wantText string) string {
 		t.Helper()
-		res, err := f.requestModel(t.Context(), caller, body)
-		if err != nil {
-			t.Fatal(err)
+		res, errRequest := f.requestModel(t.Context(), caller, body)
+		if errRequest != nil {
+			t.Fatal(errRequest)
 		}
-		defer res.Body.Close()
-		raw, err := io.ReadAll(res.Body)
-		if err != nil {
-			t.Fatal(err)
+		defer func() {
+			if errClose := res.Body.Close(); errClose != nil {
+				t.Error(errClose)
+			}
+		}()
+		raw, errRead := io.ReadAll(res.Body)
+		if errRead != nil {
+			t.Fatal(errRead)
 		}
 		if res.StatusCode != wantStatus || (wantText != "" && !strings.Contains(string(raw), wantText)) {
 			t.Fatalf("caller=%s status=%d want=%d: %s", caller, res.StatusCode, wantStatus, raw)

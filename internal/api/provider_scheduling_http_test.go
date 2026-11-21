@@ -158,7 +158,11 @@ func (f *schedulingHTTPFixture) assertReply(t *testing.T, ctx context.Context, c
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +224,11 @@ func TestProviderSchedulingHTTPReservesLastSlotBeforeDispatch(t *testing.T) {
 	go func() {
 		resp, err := f.requestModel(ctx, "open", simpleSchedulingChat)
 		if err == nil {
-			defer resp.Body.Close()
+			defer func() {
+				if errClose := resp.Body.Close(); errClose != nil {
+					t.Error(errClose)
+				}
+			}()
 			body, readErr := io.ReadAll(resp.Body)
 			if readErr != nil || resp.StatusCode != 200 || !strings.Contains(string(body), `"content":"A"`) {
 				err = fmt.Errorf("held request: %d %s (%v)", resp.StatusCode, body, readErr)
@@ -269,7 +277,11 @@ func TestProviderSchedulingHTTPPreservesRequestedToolAndImageCapabilities(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != 200 || !strings.Contains(string(body), `"content":"C"`) {
 		t.Fatalf("tool/image request got %d %s (%v), want capability-compatible fallback", resp.StatusCode, body, err)
@@ -302,7 +314,11 @@ func TestProviderSchedulingHTTPDistinguishesDisabledKnownModelFromUnknown(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			t.Error(errClose)
+		}
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || resp.StatusCode != 400 || !strings.Contains(string(body), `"code":"model_not_found"`) {
 		t.Fatalf("unknown: %d %s (%v), want protocol 400", resp.StatusCode, body, err)
