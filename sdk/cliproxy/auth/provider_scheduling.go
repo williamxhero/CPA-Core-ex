@@ -259,7 +259,9 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			report(nil)
 			return nil, nil, "", newNoAvailableRouteError(model)
 		}
-		available = highestPriorityAuths(available)
+		if affinity, ok := selector.(*SessionAffinitySelector); !ok || !affinity.rebindOnNever {
+			available = highestPriorityAuths(available)
+		}
 		selectorCtx := selectorContextForAvailableAuths(ctx, selector, model)
 		opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = "mixed"
 		opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model

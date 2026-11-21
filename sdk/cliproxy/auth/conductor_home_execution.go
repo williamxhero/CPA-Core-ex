@@ -85,9 +85,9 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
 	for homeAuthCount := 1; ; homeAuthCount++ {
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if !countTokens && roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) || countTokens && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), true)
+				return cliproxyexecutor.Response{}, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), !RequestBudgetEnforced(ctx))
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}

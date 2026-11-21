@@ -1172,7 +1172,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	for {
 		routeReservation.release()
 		routeReservation = nil
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
+		if roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) {
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
 			}
@@ -1680,12 +1680,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	for {
 		routeReservation.release()
 		routeReservation = nil
-		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
-		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
+		allowSameAuthRetry := homeMode && !(RequestBudgetEnforced(ctx) && requestSentToCredential(ctx, lastHomeAuthID)) && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
+		if roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) && !allowSameAuthRetry {
 			if lastErr != nil {
 				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
 				if homeMode {
-					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), true)
+					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), !RequestBudgetEnforced(ctx))
 				}
 				return nil, preferredErr
 			}
@@ -1754,12 +1754,12 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			m.observeHomeRetryLimit(auth, selection, homeRetryLimit)
 		}
-		if selection != nil && allowSameAuthRetry && maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && auth.ID != lastHomeAuthID {
+		if selection != nil && allowSameAuthRetry && roundCredentialLimitReached(ctx, attempted, maxRetryCredentials) && auth.ID != lastHomeAuthID {
 			if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "max_retry_credentials"); errEnd != nil {
 				return nil, errEnd
 			}
 			if lastErr != nil {
-				return nil, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), true)
+				return nil, markHomeRetryRoundExhausted(preferredExecutionAttemptError(lastErr, upstreamErr), roundTiming.RetryAfter(), !RequestBudgetEnforced(ctx))
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1772,7 +1772,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			// round while retaining the explicit same-auth retry path, which
 			// intentionally leaves the credential out of homeExcludedAuthIDs.
 			if _, alreadyTried := tried[auth.ID]; alreadyTried {
-				if _, excluded := homeExcludedAuthIDs[auth.ID]; excluded {
+				if _, excluded := homeExcludedAuthIDs[auth.ID]; excluded || (RequestBudgetEnforced(ctx) && requestSentToCredential(ctx, auth.ID)) {
 					if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "repeated_excluded_auth"); errEnd != nil {
 						return nil, errEnd
 					}

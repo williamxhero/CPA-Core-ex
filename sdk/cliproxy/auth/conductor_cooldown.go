@@ -1609,6 +1609,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		if !useRequestClock {
 			now = time.Now()
 		}
+		var providerRetryAt time.Time
 		if !result.Success && result.Error != nil && result.RetryAfter != nil && *result.RetryAfter > 0 {
 			status := statusCodeFromResult(result.Error)
 			// Authorization, funding and unsupported-model failures have no
@@ -1618,8 +1619,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				if status == http.StatusTooManyRequests && (result.CredentialScope || !isTransientRateLimitResultError(result.Error)) {
 					hint = max(hint, minQuotaCooldownFloor)
 				}
-				result.Error = result.Error.Clone()
-				result.Error.providerRetryAt = now.Add(hint)
+				providerRetryAt = now.Add(hint)
 			}
 		}
 		responseHeaders := internallogging.GetResponseHeaders(ctx)
@@ -2257,6 +2257,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			scheduleUnauthorizedRefresh = true
 		}
 
+		if !result.Success && !shouldSkipCredentialCooldown(result.Error) && !auth.Disabled {
+			if result.CredentialScope || modelKey == "" {
+				auth.providerRetryAt = providerRetryAt
+			}
+			if modelState != nil {
+				modelState.providerRetryAt = providerRetryAt
+				if modelState.credentialQuotaShadow != nil && !result.CredentialScope {
+					modelState.credentialQuotaShadow.providerRetryAt = providerRetryAt
+				}
+			}
+		}
 		auth.Generation++
 		auth.UpdatedAt = now
 
@@ -2624,6 +2635,7 @@ func resetModelState(state *ModelState, now time.Time) {
 	state.StatusMessage = ""
 	state.NextRetryAfter = time.Time{}
 	state.LastError = nil
+	state.providerRetryAt = time.Time{}
 	applyCooldownFields(&state.Quota, QuotaState{})
 	state.cooldownRecordedSeq = 0
 	state.forceCooldownUntil = time.Time{}
@@ -2971,6 +2983,7 @@ func clearAuthStateOnSuccess(auth *Auth, now time.Time) {
 	auth.StatusMessage = ""
 	applyCooldownFields(&auth.Quota, QuotaState{})
 	auth.LastError = nil
+	auth.providerRetryAt = time.Time{}
 	auth.NextRetryAfter = time.Time{}
 	auth.cooldownRecordedSeq = 0
 	auth.forceCooldownUntil = time.Time{}

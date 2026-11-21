@@ -11,6 +11,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 )
 
 type schedulingLimit struct {
@@ -167,11 +168,15 @@ func (m *Manager) scheduledRouteIdentity(auth *Auth, routeModel string) string {
 // scheduledNextAvailability never picks, reserves, or updates selector state.
 func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) (bool, time.Time, <-chan struct{}) {
 	changed := m.providerSchedulingWake.watch()
-	candidates, _ := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
+	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
+	hardBinding := scheduledHardAffinity(selector, model, opts)
 	m.providerSchedulingUse.mu.Lock()
 	defer m.providerSchedulingUse.mu.Unlock()
 	var next time.Time
 	for _, c := range candidates {
+		if hardBinding != "" && c.auth.ID != hardBinding {
+			continue
+		}
 		if !m.providerSchedulingUse.available(c.limits) {
 			continue
 		}
@@ -183,4 +188,19 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 		}
 	}
 	return false, next, changed
+}
+
+func scheduledHardAffinity(selector Selector, model string, opts cliproxyexecutor.Options) string {
+	affinity, ok := selector.(*SessionAffinitySelector)
+	if !ok || !affinity.rebindOnNever {
+		return ""
+	}
+	primary, _ := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primary == "" {
+		primary, _ = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	}
+	if primary == "" {
+		return ""
+	}
+	return affinity.cache.peek("mixed::" + cliproxysession.BoundSessionIdentity(primary) + "::" + canonicalModelKey(selectionArgForSelector(selector, model)))
 }
