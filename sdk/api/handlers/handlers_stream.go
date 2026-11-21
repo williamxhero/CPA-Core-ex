@@ -214,7 +214,9 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		}()
 		defer close(dataChan)
 		defer close(errChan)
-		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
+		if !coreusage.StreamDeliveryTracked(ctx) {
+			defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
+		}
 		chunkIndex := 0
 		var historyChunks [][]byte
 		for {
@@ -676,7 +678,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 		}()
 		defer close(dataChan)
 		defer close(errChan)
-		defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
+		if !coreusage.StreamDeliveryTracked(ctx) {
+			defer func() { lifecycle.finishRoutingTrace(completionStatus, completionErr) }()
+		}
 		if streamCanceledBeforeRead {
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0
