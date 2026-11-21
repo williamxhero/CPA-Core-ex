@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,20 +38,26 @@ func TestCodexRenewalResultsThroughV8Management(t *testing.T) {
 		disabled       bool
 		quotaBlocked   bool
 		beforeSend     bool
+		overlapForce   bool
 	}{
-		{"unknown-after-send", 200, "{\"access_token\":", "credential_recovery_needed", "recover_credential", false, "refresh_outcome_unknown", false, false, false, false},
-		{"expired-unknown-after-send", 200, "{\"access_token\":", "credential_recovery_needed", "recover_credential", false, "refresh_outcome_unknown", true, false, false, false},
-		{"non-definitive-unauthorized", 401, "{\"error\":\"unauthorized\",\"error_description\":\"invalid_grant is not a confirmed code here\"}", "credential_recovery_needed", "recover_credential", false, "refresh_outcome_unknown", false, false, false, false},
-		{"definitive-invalid-grant", 400, "{\"error\":\"invalid_grant\",\"error_description\":\"not-for-diagnostics@example.invalid renewal-fixture.json\"}", "sign_in_required", "sign_in", true, "invalid_grant", false, false, false, false},
-		{"success", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, false, false, false},
-		{"disabled-success", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, true, false, false},
-		{"quota-blocked-success", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, false, true, false},
-		{"pre-send-backoff-warning", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "retry_scheduled", "retry", false, "refresh_transport_before_send", false, false, false, true},
+		{"unknown-after-send", 200, "{\"access_token\":", "credential_recovery_needed", "recover_credential", false, "refresh_outcome_unknown", false, false, false, false, false},
+		{"expired-unknown-after-send", 200, "{\"access_token\":", "credential_recovery_needed", "recover_credential", false, "refresh_outcome_unknown", true, false, false, false, false},
+		{"non-definitive-unauthorized", 401, "{\"error\":\"unauthorized\",\"error_description\":\"invalid_grant is not a confirmed code here\"}", "credential_recovery_needed", "recover_credential", false, "refresh_outcome_unknown", false, false, false, false, false},
+		{"definitive-invalid-grant", 400, "{\"error\":\"invalid_grant\",\"error_description\":\"not-for-diagnostics@example.invalid renewal-fixture.json\"}", "sign_in_required", "sign_in", true, "invalid_grant", false, false, false, false, false},
+		{"success", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, false, false, false, false},
+		{"disabled-success", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, true, false, false, false},
+		{"quota-blocked-success", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, false, true, false, false},
+		{"pre-send-backoff-warning", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "retry_scheduled", "retry", false, "refresh_transport_before_send", false, false, false, true, false},
+		{"overlap-force-and-proactive", 200, "{\"access_token\":\"replacement-access\",\"refresh_token\":\"replacement-grant\",\"expires_in\":86400}", "renewal_verified", "", false, "", false, false, false, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var requests, inferenceRequests atomic.Int32
 			var failDial atomic.Bool
 			failDial.Store(tc.beforeSend)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			finishExchange := func() { releaseOnce.Do(func() { close(release) }) }
 			oauth := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 				if req.URL.Path == "/backend-api/codex/responses" {
 					inferenceRequests.Add(1)
@@ -67,7 +74,10 @@ func TestCodexRenewalResultsThroughV8Management(t *testing.T) {
 					fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"object\":\"response\",\"model\":\"renewal-test-model\",\"status\":\"completed\",\"output\":[]}}\n\n")
 					return
 				}
-				requests.Add(1)
+				if requests.Add(1) == 1 && tc.overlapForce {
+					close(entered)
+					<-release
+				}
 				if err := req.ParseForm(); err != nil || req.Form.Get("refresh_token") != "synthetic-refresh-grant" {
 					t.Error("expected the real refresh-token exchange")
 					w.WriteHeader(http.StatusBadRequest)
@@ -77,6 +87,7 @@ func TestCodexRenewalResultsThroughV8Management(t *testing.T) {
 				_, _ = io.WriteString(w, tc.body)
 			}))
 			defer oauth.Close()
+			defer finishExchange()
 			address, err := url.Parse(oauth.URL)
 			if err != nil {
 				t.Fatal(err)
@@ -153,8 +164,47 @@ func TestCodexRenewalResultsThroughV8Management(t *testing.T) {
 					t.Fatalf("quota fixture did not reach its first denial: status=%d calls=%d", w.Code, inferenceRequests.Load())
 				}
 			}
+			forceRefresh := func() *httptest.ResponseRecorder {
+				t.Helper()
+				req := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/refresh", strings.NewReader("{\"name\":\""+name+"\"}"))
+				req.RemoteAddr = "127.0.0.1:1234"
+				req.Header.Set("Authorization", "Bearer test-password")
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				f.server.engine.ServeHTTP(w, req)
+				return w
+			}
 			f.manager.StartAutoRefresh(context.Background(), 10*time.Millisecond)
 			defer f.manager.StopAutoRefresh()
+			defer finishExchange()
+			if tc.overlapForce {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("proactive renewal did not reach the held OAuth exchange")
+				}
+				started := make(chan struct{})
+				joined := make(chan *httptest.ResponseRecorder, 1)
+				go func() {
+					close(started)
+					joined <- forceRefresh()
+				}()
+				<-started
+				select {
+				case got := <-joined:
+					t.Fatalf("concurrent force request returned before the held renewal: %d", got.Code)
+				case <-time.After(50 * time.Millisecond):
+				}
+				finishExchange()
+				select {
+				case w := <-joined:
+					if w.Code != http.StatusOK {
+						t.Fatalf("concurrent force request did not reuse the successful renewal: status=%d", w.Code)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("force refresh did not finish after the held renewal completed")
+				}
+			}
 
 			var entry map[string]any
 			deadline := time.After(10 * time.Second)
@@ -199,16 +249,7 @@ func TestCodexRenewalResultsThroughV8Management(t *testing.T) {
 			} else if entry["last_renewal_verified_at"] == nil {
 				t.Fatal("successful renewal did not publish its timestamp")
 			}
-			forceRefresh := func() *httptest.ResponseRecorder {
-				t.Helper()
-				req := httptest.NewRequest(http.MethodPost, "/v8/management/credentials/refresh", strings.NewReader("{\"name\":\""+name+"\"}"))
-				req.RemoteAddr = "127.0.0.1:1234"
-				req.Header.Set("Authorization", "Bearer test-password")
-				req.Header.Set("Content-Type", "application/json")
-				w := httptest.NewRecorder()
-				f.server.engine.ServeHTTP(w, req)
-				return w
-			}
+
 			if tc.wantState == "credential_recovery_needed" {
 				if w := forceRefresh(); w.Code < 400 {
 					t.Fatal("management must report that ambiguous refresh was not retried")

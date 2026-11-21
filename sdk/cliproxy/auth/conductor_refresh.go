@@ -1290,6 +1290,17 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		m.markRejectedAccessToken(id, failedAccessToken)
 	}
 
+	var requestedAt time.Time
+	var requestedCodexEpoch uint64
+	if forceRefresh {
+		m.mu.RLock()
+		if current := m.auths[id]; current != nil && strings.EqualFold(strings.TrimSpace(current.Provider), "codex") {
+			requestedAt = time.Now()
+			requestedCodexEpoch = current.RegistrationEpoch
+		}
+		m.mu.RUnlock()
+	}
+
 	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
 	lock, _ := lockValue.(*authRefreshLock)
 	if lock == nil {
@@ -1327,6 +1338,16 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 	if registrationEpoch != 0 && auth.RegistrationEpoch != registrationEpoch {
 		return nil, errors.New("auth registration changed before refresh")
+	}
+	if !requestedAt.IsZero() {
+		if auth.RegistrationEpoch != requestedCodexEpoch {
+			return nil, errors.New("auth registration changed before forced refresh")
+		}
+		// A proactive or explicit refresh already renewed this credential while
+		// the operator request was waiting. Do not rotate the new grant again.
+		if auth.RenewalVerified && auth.LastRenewalVerifiedAt.After(requestedAt) {
+			return auth, nil
+		}
 	}
 	if hasDisabledInvalidGrantFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is disabled with invalid grant")
