@@ -30,7 +30,7 @@ func codexStandardPaidFunding(data []byte) bool {
 			Kind string `json:"type"`
 		} `json:"rate_limit_reached_type"`
 	}
-	if !unambiguousQuotaReading(data) || json.Unmarshal(data, &root) != nil ||
+	if json.Unmarshal(data, &root) != nil ||
 		(root.Plan != "plus" && root.Plan != "pro" && root.Plan != "prolite" && root.Plan != "promax") ||
 		root.Additional == nil || len(*root.Additional) != 0 || root.Credits == nil ||
 		root.Credits.Has == nil || !*root.Credits.Has || root.Credits.Unlimited == nil {

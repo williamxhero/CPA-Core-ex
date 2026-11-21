@@ -90,6 +90,9 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 						balance, credits = "1.25", true
 					}
 					fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[],"credits":{"has_credits":%t,"unlimited":false,"balance":%q}}`, weeklyWindow(25, 18000), weeklyWindow(100, 604800), credits, balance)
+				case 13:
+					w.Header().Set("Date", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
+					fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"Rate_Limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[]}`, weeklyWindow(25, 18000), weeklyWindow(100, 604800), weeklyWindow(25, 18000), weeklyWindow(42, 604800))
 				case 9, 10, 11, 12:
 					w.Header().Set("Date", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
 					plan, amount, overage := "plus", "0.0001", false
@@ -385,7 +388,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 		gateWrite("test.manual", "pause", gate.Revision, "5e12bc2e-130c-416f-ac31-6a8defef8322", 200)
 	}
 	if whole {
-		for _, rejected := range []int32{9, 10, 11} {
+		for _, rejected := range []int32{9, 10, 11, 13} {
 			mode.Store(rejected)
 			queryQuota(t, f, q, 200)
 			raw := f.request("inference-gates", 200)

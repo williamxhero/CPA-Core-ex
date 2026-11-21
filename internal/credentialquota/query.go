@@ -128,7 +128,7 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 			RateLimit *codexLimit `json:"rate_limit"`
 		} `json:"additional_rate_limits"`
 	}
-	if json.Unmarshal(data, &root) != nil || root.RateLimit == nil {
+	if !unambiguousQuotaReading(data) || json.Unmarshal(data, &root) != nil || root.RateLimit == nil {
 		obs.QueryStatus = "parse_error"
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 		return obs
@@ -200,7 +200,7 @@ func codexStandardOnlyNoCredits(data []byte) bool {
 			Balance   json.RawMessage `json:"balance"`
 		} `json:"credits"`
 	}
-	if !unambiguousQuotaReading(data) || json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
+	if json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
 		root.Credits == nil || root.Credits.Has == nil || *root.Credits.Has ||
 		root.Credits.Unlimited == nil || *root.Credits.Unlimited {
 		return false
