@@ -430,3 +430,61 @@ func TestProviderSchedulingAntigravityGeneric429DoesNotWriteCooldownOrSwitchKeys
 		})
 	}
 }
+
+func TestProviderSchedulingAntigravityAlternateBeforeWaitAtRoundBoundary(t *testing.T) {
+	for _, homeRouting := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			for _, test := range []struct {
+				name, hint, wantCalls          string
+				retries, wantStatus, wantRound int
+				wantWait                       time.Duration
+				backup                         bool
+			}{
+				{name: "hint-with-backup", hint: "1", wantCalls: "A,B", retries: 1, wantStatus: 200, wantRound: 1, backup: true},
+				{name: "no-hint-with-backup", wantCalls: "A,B", retries: 1, wantStatus: 200, wantRound: 1, backup: true},
+				{name: "no-next-round", hint: "1", wantCalls: "A", wantStatus: 429, backup: true},
+				{name: "no-backup", hint: "1", wantCalls: "A,A", retries: 1, wantStatus: 429, wantRound: 1, wantWait: time.Second},
+				{name: "no-hint-or-backup", wantCalls: "A", retries: 1, wantStatus: 429},
+			} {
+				t.Run(fmt.Sprintf("home=%t/stream=%t/%s", homeRouting, stream, test.name), func(t *testing.T) {
+					providers := []string(nil)
+					if test.backup {
+						providers = []string{"codex"}
+					}
+					f := newScheduledAntigravityHTTP(t, func(id string, _ string, w http.ResponseWriter, _ *http.Request) {
+						if id == "B" {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = fmt.Fprintf(w, "data: %s\n\n", combinedCapacitySuccess)
+							return
+						}
+						if test.hint != "" {
+							w.Header().Set("Retry-After", test.hint)
+						}
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusTooManyRequests)
+						_, _ = io.WriteString(w, scheduledAntigravity429Body)
+					}, providers...)
+					f.manager.SetRetryConfig(test.retries, 3*time.Second, 1)
+					f.manager.SetUpstreamErrorRetryLimit(1)
+					if homeRouting {
+						cfg := *f.cfg
+						cfg.Home.Enabled = true
+						f.manager.SetConfig(&cfg)
+						d := &scheduledAntigravityHomeDispatch{targets: f.targets, candidates: []string{"A", "A2"}}
+						if test.backup {
+							d.candidates = append(d.candidates, "B")
+						}
+						f.manager.PublishHomeDispatch(d, executionregistry.New(), 1)
+					}
+					ctx := coreauth.WithRequestBudget(context.Background())
+					resp := f.request(ctx, stream)
+					snap, _ := coreauth.RequestBudgetSnapshotFromContext(ctx)
+					f.assertCalls(t, test.wantCalls)
+					if resp.Code != test.wantStatus || snap.Attempts != len(strings.Split(test.wantCalls, ",")) || snap.Round != test.wantRound || snap.ActiveWait != test.wantWait {
+						t.Fatalf("status=%d, body=%s, accounting=%+v", resp.Code, resp.Body, snap)
+					}
+				})
+			}
+		}
+	}
+}

@@ -15,6 +15,20 @@ import (
 
 type requestBudgetKey struct{}
 
+// scheduledAlternateRound lets selection explore the next round without
+// spending it until a new credential starts a business attempt.
+type scheduledAlternateRound struct {
+	from     int
+	excluded map[string]struct{}
+}
+
+type scheduledAlternateRoundKey struct{}
+
+func scheduledAlternateRoundFromContext(ctx context.Context) *scheduledAlternateRound {
+	round, _ := ctx.Value(scheduledAlternateRoundKey{}).(*scheduledAlternateRound)
+	return round
+}
+
 // RequestBudgetSnapshot contains request accounting, never route identities or payloads.
 // Round is zero-based. RoundAttempts counts business sends, not selected credentials.
 type RequestBudgetSnapshot struct {
@@ -146,11 +160,15 @@ func (b *requestBudget) nextRound(from int) bool {
 	if b.Round != from || b.OutputCommitted || b.ReplayUnsafe {
 		return false
 	}
+	b.advanceRoundLocked()
+	return true
+}
+
+func (b *requestBudget) advanceRoundLocked() {
 	b.Round++
 	b.RoundAttempts = 0
 	clear(b.credentials)
 	clear(b.routes)
-	return true
 }
 
 func (b *requestBudget) credentialSnapshot() map[string]struct{} {
@@ -179,7 +197,13 @@ func roundCredentialLimitReached(ctx context.Context, attempted map[string]struc
 		return false
 	}
 	if RequestBudgetEnforced(ctx) {
-		return requestBudgetFromContext(ctx).routeCount() >= limit
+		b := requestBudgetFromContext(ctx)
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if pending := scheduledAlternateRoundFromContext(ctx); pending != nil && b.Round == pending.from {
+			return false
+		}
+		return len(b.routes) >= limit
 	}
 	return len(attempted) >= limit
 }
@@ -236,6 +260,16 @@ func (m *Manager) withBusinessInferenceBudget(ctx context.Context, auth *Auth, r
 			}
 			if b.OutputCommitted || (b.ReplayUnsafe && b.Attempts > 0) {
 				return errBudgetReplayUnsafe
+			}
+			if pending := scheduledAlternateRoundFromContext(sendCtx); pending != nil {
+				_, triedID := pending.excluded[auth.ID]
+				_, triedRoute := pending.excluded[routeIdentity]
+				if triedID || triedRoute || (b.Round != pending.from && b.Round != pending.from+1) {
+					return errBudgetCredentialLimit
+				}
+				if b.Round == pending.from {
+					b.advanceRoundLocked()
+				}
 			}
 			if _, same := b.routes[routeIdentity]; !same && b.maxCredentials > 0 && len(b.routes) >= b.maxCredentials {
 				return errBudgetCredentialLimit
@@ -514,9 +548,34 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		first = false
 		if facts := scheduledAntigravity429(previous); facts != nil {
+			if !m.canOpenScheduledRound(ctx, opts, previous, s.Round, defaultRetry, homeLimit, providers, model) {
+				return zero, scheduledAntigravityTerminal(ctx, facts)
+			}
+			// A full credential round may have stopped before an eligible
+			// provider was reached. Try that provider without waiting. Home
+			// owns its selection, so only a real send opens the next round.
+			if !room && (m.HomeEnabled() || m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready) {
+				probe := &scheduledAlternateRound{from: s.Round, excluded: attempted}
+				alternateCtx := context.WithValue(seedScheduledRoundExclusions(ctx, attempted), scheduledAlternateRoundKey{}, probe)
+				alternateHomeLimit := homeLimit
+				result, alternateErr := execute(alternateCtx, withAttemptedAuthTracker(opts, make(map[string]struct{})), s.Round+1, roundLimit, &alternateHomeLimit)
+				if ctx.Err() != nil {
+					return zero, ctx.Err()
+				}
+				if alternateErr == nil {
+					return result, nil
+				}
+				if current, _ := RequestBudgetSnapshotFromContext(ctx); current.Round != s.Round {
+					if isRequestInvalidError(alternateErr) || isRequestTerminatedError(alternateErr) || isRequestStopError(alternateErr) || isSchedulerRejectError(alternateErr) {
+						return zero, alternateErr
+					}
+					homeLimit = alternateHomeLimit
+					previous, roundCause = alternateErr, alternateErr
+					continue
+				}
+			}
 			delay := facts.RetryAt.Sub(facts.ObservedAt)
-			if delay <= 0 || delay >= 3*time.Second ||
-				!m.canOpenScheduledRound(ctx, opts, previous, s.Round, defaultRetry, homeLimit, providers, model) {
+			if delay <= 0 || delay >= 3*time.Second {
 				return zero, scheduledAntigravityTerminal(ctx, facts)
 			}
 			// Immediately usable alternatives have already been exhausted.
