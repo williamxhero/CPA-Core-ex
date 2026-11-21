@@ -184,6 +184,12 @@ func (c *hostHTTPClient) doHTTP(ctx context.Context, req pluginapi.HTTPRequest) 
 		if cleanup != nil {
 			cleanup()
 		}
+		var denied hostInferenceDenied
+		if errors.As(errDo, &denied) {
+			// The request stopped before transport. Return the policy
+			// error without net/http's URL-bearing wrapper.
+			return nil, cfg, nil, denied.cause
+		}
 		helps.RecordAPIResponseError(ctx, cfg, errDo)
 		return nil, cfg, nil, fmt.Errorf("execute host http request: %w", errDo)
 	}
@@ -196,13 +202,17 @@ type hostInferenceTransport struct {
 	base http.RoundTripper
 }
 
+type hostInferenceDenied struct{ cause error }
+
+func (e hostInferenceDenied) Error() string { return e.cause.Error() }
+
 func (t hostInferenceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	ctx := r.Context()
 	if err := cliproxyexecutor.AdmitInference(ctx); err != nil {
-		return nil, err
+		return nil, hostInferenceDenied{cause: err}
 	}
 	if err := cliproxyexecutor.MarkBusinessUpstreamAttempt(ctx); err != nil {
-		return nil, err
+		return nil, hostInferenceDenied{cause: err}
 	}
 	cliproxyexecutor.MarkUpstreamAttempt(ctx)
 	return t.base.RoundTrip(r)
