@@ -134,7 +134,7 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 		return obs
 	}
 	obs.Complete = true
-	appendLimit := func(limit *codexLimit, model string) bool {
+	appendLimit := func(limit *codexLimit, model, limitName string) bool {
 		if limit == nil || limit.Allowed == nil || limit.Reached == nil {
 			return false
 		}
@@ -156,15 +156,19 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 				status = "rate-limited"
 				remaining = 0
 			}
-			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, UsedPercent: *w.Used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
+			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, LimitName: limitName, UsedPercent: *w.Used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
 		}
 		return true
 	}
-	if !appendLimit(root.RateLimit, "") {
+	if !appendLimit(root.RateLimit, "", "") {
 		obs.QueryStatus = "parse_error"
 	}
 	for _, a := range root.Additional {
-		if len(a.Model) > 128 || len(a.Name) > 128 || !appendLimit(a.RateLimit, a.Model) {
+		limitName := ""
+		if a.Model == resource.CodexSparkLimit && a.Name == resource.CodexSparkLimitName {
+			limitName = resource.CodexSparkLimitName
+		}
+		if len(a.Model) > 128 || len(a.Name) > 128 || !appendLimit(a.RateLimit, a.Model, limitName) {
 			obs.QueryStatus = "parse_error"
 		}
 	}
@@ -176,11 +180,32 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 		obs.Complete = false
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 	} else {
+		obs.StandardOnlyNoCredits = codexStandardOnlyNoCredits(data)
 		obs.Credits = codexCreditsFromUsage(data)
 		obs.ResetCredits = codexResetCreditsFromUsage(data)
 	}
 	freshWindows(&obs)
 	return obs
+}
+
+// Only explicit absence of any independent limits and an exact depleted
+// wallet may corroborate a standard plan rejection as account-wide.
+func codexStandardOnlyNoCredits(data []byte) bool {
+	var root struct {
+		Additional *[]json.RawMessage `json:"additional_rate_limits"`
+		Credits    *struct {
+			Has       *bool           `json:"has_credits"`
+			Unlimited *bool           `json:"unlimited"`
+			Balance   json.RawMessage `json:"balance"`
+		} `json:"credits"`
+	}
+	if json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
+		root.Credits == nil || root.Credits.Has == nil || *root.Credits.Has ||
+		root.Credits.Unlimited == nil || *root.Credits.Unlimited {
+		return false
+	}
+	whole, fraction, hasFraction := strings.Cut(creditBalanceText(root.Credits.Balance), ".")
+	return whole == "0" && (!hasFraction || fraction != "" && strings.Trim(fraction, "0") == "")
 }
 
 // codexResetCreditsFromUsage reads the one-time rate-limit reset allowance that

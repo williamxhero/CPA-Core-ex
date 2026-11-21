@@ -197,7 +197,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, errClearReplay
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErrWithHeadersAndCooling(httpResp.StatusCode, httpResp.Header, data, e.modelLevelCooling())
+		err = codexHTTPBusinessError(ctx, auth, httpResp, data, upstreamBody, baseModel, e.modelLevelCooling())
 		return nil, err
 	}
 

@@ -123,6 +123,9 @@ func (c *Catalog) GateState() (resource.GateState, error) {
 func (c *Catalog) ApplyGate(op resource.GateOperation) (resource.GateResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if IsCoreQuotaGateOwner(op.Owner) {
+		return resource.GateResult{}, ErrConflict
+	}
 	return c.applyGateLocked(op)
 }
 
@@ -248,10 +251,9 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		return ErrUnavailable
 	}
 	if !c.bindingLocked(b) {
-		// Unsupported/unbound sources retain legacy routing only when the verified
-		// durable owner set is EMPTY. This is never a positive protection capability.
-		// Once any restriction exists, unknown attribution cannot bypass it.
-		if len(c.state.Gates.Gates) == 0 {
+		// Preserve the original unknown-attribution fence for external owners.
+		// Native quota evidence covers a known subject and never expands that fence.
+		if !c.hasExternalGateLocked() {
 			return nil
 		}
 		return ErrConflict
@@ -262,6 +264,12 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 	}
 	for _, g := range c.state.Gates.Gates {
 		if g.Model != "" && g.Model != model {
+			continue
+		}
+		if IsCoreQuotaGateOwner(g.Owner) {
+			if matchingCodexGateTarget(g, *b) {
+				return ErrGateDenied
+			}
 			continue
 		}
 		if g.Subject == "provider" {

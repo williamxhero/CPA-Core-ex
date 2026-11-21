@@ -366,6 +366,7 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		c.JSON(409, gin.H{"error": "source_changed"})
 		return
 	}
+	queryStarted := time.Now()
 	obs := resource.QuotaObservation{Binding: q.Binding, Protocol: source.Protocol, QueryStatus: source.State, ErrorCode: source.Reason, ObservedAtMS: time.Now().UnixMilli(), AccountProvenance: source.AccountProvenance}
 	if source.State == "ready" {
 		if source.Protocol == "codex-oauth-wham" {
@@ -407,6 +408,12 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		obs.ProtocolVersion = 1
 		obs.ReceivedAtMS = time.Now().UnixMilli()
 		obs.TimestampProvenance = "core_attempt_time"
+	}
+	if cleared, err := h.resourceCatalog.RecheckCodexQuota(q.AuthIndex, queryStarted, obs); err != nil {
+		c.JSON(503, gin.H{"error": "quota_gate_unavailable"})
+		return
+	} else {
+		obs.ClearedQuotaWindows = cleared
 	}
 	c.JSON(200, obs)
 }

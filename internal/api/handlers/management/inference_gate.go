@@ -42,7 +42,7 @@ func (h *Handler) InferenceGates(c *gin.Context) {
 		c.JSON(503, gin.H{"error": "gate_unavailable"})
 		return
 	}
-	c.JSON(200, state)
+	c.JSON(200, quotaGateState(state))
 }
 func (h *Handler) InferenceGateOperation(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
@@ -76,6 +76,10 @@ func (h *Handler) ApplyInferenceGate(c *gin.Context) {
 		return
 	}
 	op := request.GateOperation
+	if resourcecatalog.IsCoreQuotaGateOwner(op.Owner) {
+		c.JSON(422, gin.H{"error": "core_quota_owner_reserved"})
+		return
+	}
 	if op.Model != "" {
 		c.JSON(422, gin.H{"error": "model_scope_unsupported"})
 		return
