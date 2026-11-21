@@ -1509,7 +1509,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			}
 		}
 	}
-	log.Debugf("credential refresh completed: provider=%s success=%t", auth.Provider, err == nil)
+	log.WithFields(log.Fields{"provider": auth.Provider, "success": err == nil}).Debug("credential refresh completed")
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
@@ -1686,7 +1686,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				}
 				if !current.Unavailable && current.RenewalWarnedRefreshToken != warnKey {
 					current.RenewalWarnedRefreshToken = warnKey
-					log.Warnf("credential refresh failed: provider=%s reason=%s; retaining unexpired access token", current.Provider, sanitizedRefreshErr.Code)
+					log.WithFields(log.Fields{"provider": current.Provider, "reason": sanitizedRefreshErr.Code}).Warn("credential refresh failed; retaining unexpired access token")
 				}
 			} else {
 				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
@@ -1704,7 +1704,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				shouldReschedule = true
 
 				if !current.Unavailable {
-					log.Warnf("credential refresh failed: provider=%s reason=%s; retaining unexpired access token", current.Provider, sanitizedRefreshErr.Code)
+					log.WithFields(log.Fields{"provider": current.Provider, "reason": sanitizedRefreshErr.Code}).Warn("credential refresh failed; retaining unexpired access token")
 				}
 			}
 			m.auths[id] = current

@@ -25,6 +25,67 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
+func TestV8ManagementReportsQueuedCodexRenewal(t *testing.T) {
+	dir := t.TempDir()
+	authDir := filepath.Join(dir, "auth")
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const name = "queued-renewal.json"
+	if err := os.WriteFile(filepath.Join(authDir, name), []byte(`{"type":"codex","access_token":"fixture-access","refresh_token":"fixture-refresh"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := newInventoryHarness(t, dir)
+	due := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	updated := false
+	for _, entry := range f.manager.List() {
+		if entry.FileName != name {
+			continue
+		}
+		entry.NextRefreshAfter = due
+		if _, err := f.manager.Update(coreauth.WithSkipPersist(context.Background()), entry); err != nil {
+			t.Fatal(err)
+		}
+		updated = true
+		break
+	}
+	if !updated {
+		t.Fatal("synthetic OAuth credential missing")
+	}
+	read := func(endpoint string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		req.Header.Set("Authorization", "Bearer test-password")
+		w := httptest.NewRecorder()
+		f.server.engine.ServeHTTP(w, req)
+		var response struct{ Files []map[string]any }
+		if err := json.Unmarshal(w.Body.Bytes(), &response); w.Code != http.StatusOK || err != nil {
+			t.Fatalf("credentials from %s: HTTP %d, files=%d, error=%v", endpoint, w.Code, len(response.Files), err)
+		}
+		for _, entry := range response.Files {
+			if entry["name"] == name {
+				return entry
+			}
+		}
+		t.Fatalf("synthetic OAuth credential missing from %s", endpoint)
+		return nil
+	}
+	const key = "next_renewal_check_at"
+	const v8 = "/v8/management/credentials?name=" + name
+	if got := read(v8)[key]; got != nil {
+		t.Fatalf("renewal during stopped scheduler: %v", got)
+	}
+	f.manager.StartAutoRefresh(context.Background(), time.Minute)
+	t.Cleanup(f.manager.StopAutoRefresh)
+	if got := read(v8)[key]; got != due.Format(time.RFC3339) {
+		t.Fatalf("queued renewal = %v, want %s", got, due)
+	}
+	if got := read("/v0/management/auth-files")[key]; got != nil {
+		t.Fatalf("deprecated route unexpectedly publishes renewal schedule: %v", got)
+	}
+}
+
 func TestCodexRenewalResultsThroughV8Management(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

@@ -399,6 +399,26 @@ func (l *authAutoRefreshLoop) remove(authID string) {
 	delete(l.index, authID)
 }
 
+// NextCredentialRenewalCheck reports the queued Codex renewal check, if any.
+// Explicit recovery or sign-in takes precedence over queued work.
+func (m *Manager) NextCredentialRenewalCheck(auth *Auth) (time.Time, bool) {
+	if m == nil || auth == nil || auth.refreshGrantBlocked() || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return time.Time{}, false
+	}
+	m.mu.RLock()
+	loop := m.refreshLoop
+	m.mu.RUnlock()
+	if loop == nil {
+		return time.Time{}, false
+	}
+	loop.mu.Lock()
+	defer loop.mu.Unlock()
+	if item := loop.index[auth.ID]; item != nil {
+		return item.next, true
+	}
+	return time.Time{}, false
+}
+
 // nextRefreshCheckAt excludes local Codex credentials that cannot renew before
 // evaluating generic expiry-based scheduling. Home can renew without a local RT.
 func (m *Manager) nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time.Time, bool) {

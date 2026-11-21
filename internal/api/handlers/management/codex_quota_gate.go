@@ -33,7 +33,9 @@ func (h *Handler) observeCodexQuotaRejection(ctx context.Context, dispatched *co
 	}
 	handled, err := h.resourceCatalog.ObserveCodexQuotaRejection(source.Binding, source.AuthIndex, source.SourceVersion, start, evidence)
 	if err != nil {
-		log.Warn("native scoped quota rejection could not publish")
+		log.WithFields(log.Fields{
+			"component": "credential_quota", "provider": "codex", "window": evidence.Window, "model": evidence.Model,
+		}).Warn("Native scoped quota rejection could not publish")
 	}
 	return handled
 }
@@ -54,6 +56,8 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 	default:
 		return false
 	}
+	// The original inference response has already been read. This budget
+	// applies only to the separate credential-authority acquisition GET.
 	queryCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 	obs := credentialquota.Codex(queryCtx, source.Binding, a.Metadata, network)
@@ -70,7 +74,7 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 			return false
 		}
 		seen[window.Name] = true
-		if window.Name == evidence.Window && window.LimitWindowSeconds == evidence.WindowSeconds && window.UsedPercent == 100 && reset.UnixMilli() == evidence.ResetAtMS {
+		if window.Name == evidence.Window && window.LimitWindowSeconds == evidence.WindowSeconds && window.CodexUsage == resource.CodexWindowUsageAtLimit && reset.UnixMilli() == evidence.ResetAtMS {
 			confirmed = true
 		}
 	}

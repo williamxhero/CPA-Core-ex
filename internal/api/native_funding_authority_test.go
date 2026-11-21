@@ -15,6 +15,7 @@ import (
 
 	"github.com/MoeForge/moego/json"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
@@ -50,7 +51,11 @@ func TestNativeFundingFencesStaleReorderedIndexAndRawConfig(t *testing.T) {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.RemoteAddr = "127.0.0.1:1234"
 		req.Header.Set("Authorization", "Bearer test-password")
-		req.Header.Set("Content-Type", "application/json")
+		if strings.HasSuffix(path, "/config.yaml") {
+			req.Header.Set("Content-Type", "application/yaml")
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+		}
 		w := httptest.NewRecorder()
 		x.f.server.engine.ServeHTTP(w, req)
 		return w
@@ -68,13 +73,15 @@ func TestNativeFundingFencesStaleReorderedIndexAndRawConfig(t *testing.T) {
 	if yaml == string(before) {
 		t.Fatal("fixture missing persisted marker")
 	}
+	const v0RawConfigPath = "/v0/management/config.yaml"
+	const retryEdit = "routing: {retry: {request-retry: 7}}\n"
 	for _, tc := range []struct {
 		method, path, body string
 		status             int
 	}{
 		{http.MethodPatch, "/v0/management/openai-compatibility", `{"index":0,"value":{"auto-held":true}}`, 409},
 		{http.MethodPatch, "/v0/management/openai-compatibility", `{"index":1,"value":{"auto-held":false}}`, 409},
-		{http.MethodPut, "/v0/management/config.yaml", yaml, 500},
+		{http.MethodPut, v0RawConfigPath, retryEdit + yaml, 500},
 		{http.MethodPut, "/v8/management/config.yaml", yaml, 409},
 	} {
 		got := request(tc.method, tc.path, tc.body)
@@ -85,6 +92,22 @@ func TestNativeFundingFencesStaleReorderedIndexAndRawConfig(t *testing.T) {
 		if err != nil || !bytes.Equal(before, after) {
 			t.Fatalf("rejected stale write reached disk: %v", err)
 		}
+	}
+
+	// The same v0 raw write may edit unrelated settings when it keeps the marker.
+	got := request(http.MethodPut, v0RawConfigPath, retryEdit+string(before))
+	if got.Code != http.StatusOK {
+		t.Fatalf("marker-preserving %s got %d %s", v0RawConfigPath, got.Code, got.Body.String())
+	}
+	saved, err := config.LoadConfig(x.f.path)
+	if err != nil {
+		t.Fatalf("reload config after allowed raw write: %v", err)
+	}
+	if saved.RequestRetry != 7 {
+		t.Fatalf("raw write did not persist request-retry: got %d, want 7", saved.RequestRetry)
+	}
+	if len(saved.OpenAICompatibility) != 2 || saved.OpenAICompatibility[1].Name != "not-an-account-a" || !saved.OpenAICompatibility[1].AutoHeld {
+		t.Fatal("raw write did not preserve the held marker on its original provider")
 	}
 }
 

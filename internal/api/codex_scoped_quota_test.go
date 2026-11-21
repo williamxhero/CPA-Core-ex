@@ -55,8 +55,11 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	// Model a cached response whose timestamp cannot become fresh across a slow restart.
 	staleWHAMAt := rejectionAt.Add(-time.Second)
 	reset := rejectionAt.Add(135 * time.Hour).Unix()
+	windowWithPercent := func(percent string, seconds int64) string {
+		return fmt.Sprintf(`{"used_percent":%s,"reset_at":%d,"limit_window_seconds":%d}`, percent, reset, seconds)
+	}
 	weeklyWindow := func(percent int, seconds int64) string {
-		return fmt.Sprintf(`{"used_percent":%d,"reset_at":%d,"limit_window_seconds":%d}`, percent, reset, seconds)
+		return windowWithPercent(fmt.Sprint(percent), seconds)
 	}
 	upstream, quotaNetwork := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Authorization")
@@ -87,12 +90,19 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 				case 5:
 					hangingReads.Add(1)
 					<-r.Context().Done()
-				case 0, 6:
+				case 0, 6, 14, 15:
 					balance, credits := "0", false
 					if mode.Load() == 6 {
 						balance, credits = "1.25", true
 					}
-					fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[],"credits":{"has_credits":%t,"unlimited":false,"balance":%q}}`, weeklyWindow(25, 18000), weeklyWindow(100, 604800), credits, balance)
+					used := "100"
+					switch mode.Load() {
+					case 14:
+						used = "99.9999999999999999"
+					case 15:
+						used = "100.0000000000000001"
+					}
+					fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[],"credits":{"has_credits":%t,"unlimited":false,"balance":%q}}`, weeklyWindow(25, 18000), windowWithPercent(used, 604800), credits, balance)
 				case 13:
 					w.Header().Set("Date", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
 					fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"Rate_Limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[]}`, weeklyWindow(25, 18000), weeklyWindow(100, 604800), weeklyWindow(25, 18000), weeklyWindow(42, 604800))
@@ -135,7 +145,20 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 				if mode.Load() == 3 {
 					seconds = 86400
 				}
-				additional = fmt.Sprintf(`,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s}}]`, weeklyWindow(18, 18000), weeklyWindow(25, seconds))
+				used := "25"
+				switch mode.Load() {
+				case 4:
+					used = "99.9999999999999999"
+					if renew {
+						// Recovery must still work if the display fraction rounds to zero.
+						used = "99." + strings.Repeat("9", 400)
+					}
+				case 14:
+					used = "100.0000000000000000"
+				case 15:
+					used = "100.0000000000000001"
+				}
+				additional = fmt.Sprintf(`,"additional_rate_limits":[{"limit_name":"GPT-5.3-Codex-Spark","metered_feature":"codex_bengalfox","rate_limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s}}]`, weeklyWindow(18, 18000), windowWithPercent(used, seconds))
 			}
 			fmt.Fprint(w, "{"+base+additional+"}")
 			return
@@ -438,6 +461,13 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 		}
 		mode.Store(12) // Paid credits can fund standard Codex while the identical windows stay exhausted.
 	} else {
+		for _, unproven := range []int32{14, 15} {
+			mode.Store(unproven)
+			if obs := queryQuota(t, f, q, 200); len(obs.ClearedQuotaWindows) != 0 {
+				t.Fatalf("a fresh WHAM window at or above 100 must not clear the pause: %+v", obs)
+			}
+			readGate(f, 1)
+		}
 		mode.Store(4)
 	}
 	obs := queryQuota(t, f, q, 200)
@@ -454,7 +484,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	infer(f, model)
 	if whole {
 		expect(2, 4, other)
-		for _, negative := range []int32{5, 6, 7} {
+		for _, negative := range []int32{5, 6, 7, 14, 15} {
 			f.close()
 			f = open()
 			mode.Store(negative)
@@ -466,7 +496,7 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 			readGate(f, 0)
 			infer(f, sibling)
 		}
-		expect(5, 7, 3)
+		expect(7, 9, 5)
 	} else {
 		expect(2, 3, other)
 	}

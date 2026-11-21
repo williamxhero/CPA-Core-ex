@@ -5,7 +5,6 @@ package credentialquota
 import (
 	"context"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -16,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -92,7 +92,11 @@ func freshWindows(obs *resource.QuotaObservation) {
 	obs.RecoveryEligible = obs.QueryStatus == "success" && obs.Complete && obs.AccountProvenance != "unverified"
 	for _, w := range obs.Windows {
 		reset, e := time.Parse(time.RFC3339Nano, w.ResetAt)
-		if e != nil || !reset.After(time.Now()) || w.RemainingFraction <= 0 || w.SourceStatus == "rate-limited" {
+		hasRemaining := w.RemainingFraction > 0
+		if obs.Protocol == "codex-oauth-wham" {
+			hasRemaining = w.CodexUsage == resource.CodexWindowUsageBelowLimit
+		}
+		if e != nil || !reset.After(time.Now()) || !hasRemaining || w.SourceStatus == "rate-limited" {
 			obs.RecoveryEligible = false
 		}
 	}
@@ -147,16 +151,16 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 				continue
 			}
 			w := v.window
-			if w.Used == nil || !finitePercent(*w.Used) || w.Reset == nil || *w.Reset <= 0 || *w.Reset > 253402300799 || w.Seconds == nil || *w.Seconds <= 0 {
+			usage, used, remaining := ParseCodexUsedPercent(string(w.Used))
+			if usage == resource.CodexWindowUsageUnknown || w.Reset == nil || *w.Reset <= 0 || *w.Reset > 253402300799 || w.Seconds == nil || *w.Seconds <= 0 {
 				return false
 			}
 			status := "allowed"
-			remaining := 1 - *w.Used/100
 			if !*limit.Allowed || *limit.Reached {
 				status = "rate-limited"
 				remaining = 0
 			}
-			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, LimitName: limitName, UsedPercent: *w.Used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
+			obs.Windows = append(obs.Windows, resource.QuotaWindow{Name: v.name, Model: model, LimitName: limitName, CodexUsage: usage, UsedPercent: used, RemainingFraction: remaining, ResetAt: time.Unix(*w.Reset, 0).UTC().Format(time.RFC3339), SourceStatus: status, LimitWindowSeconds: *w.Seconds})
 		}
 		return true
 	}
@@ -276,9 +280,9 @@ func creditBalanceText(raw json.RawMessage) string {
 }
 
 type codexWindow struct {
-	Used    *float64 `json:"used_percent"`
-	Reset   *int64   `json:"reset_at"`
-	Seconds *int64   `json:"limit_window_seconds"`
+	Used    json.RawMessage `json:"used_percent"`
+	Reset   *int64          `json:"reset_at"`
+	Seconds *int64          `json:"limit_window_seconds"`
 }
 type codexLimit struct {
 	Allowed   *bool        `json:"allowed"`

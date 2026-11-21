@@ -913,6 +913,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 		if !auth.NextRefreshAfter.IsZero() && auth.NextRefreshAfter.After(nowUTC) {
 			entry["next_refresh_after"] = auth.NextRefreshAfter.UTC().Format(time.RFC3339)
 		}
+		if next, ok := h.authManager.NextCredentialRenewalCheck(auth); ok {
+			entry["next_renewal_check_at"] = next.UTC().Format(time.RFC3339)
+		}
 		entry["requires_sign_in"] = auth.RequiresSignIn
 		if statusMessage != "" {
 			entry["status_message"] = coreauth.SanitizeRenewalMessage(statusMessage)

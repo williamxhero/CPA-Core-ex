@@ -167,7 +167,7 @@ func canClearCodexQuotaWindow(model string, paused resource.QuotaGateEvidence, w
 		}
 		seen[w.Name] = true
 		reset, err := time.Parse(time.RFC3339Nano, w.ResetAt)
-		if err != nil || !reset.After(now) || w.SourceStatus != "allowed" || w.RemainingFraction <= 0 {
+		if err != nil || !reset.After(now) || w.SourceStatus != "allowed" || w.CodexUsage != resource.CodexWindowUsageBelowLimit {
 			return false
 		}
 		if w.Name == paused.Window && w.LimitWindowSeconds == paused.WindowSeconds {

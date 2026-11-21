@@ -54,6 +54,7 @@ func codexStandardPaidFunding(data []byte) bool {
 // ambiguous keys before using an indication of credit funding for admission.
 func unambiguousQuotaReading(raw []byte) bool {
 	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
 	var value func(int) bool
 	value = func(depth int) bool {
 		if depth > 24 {

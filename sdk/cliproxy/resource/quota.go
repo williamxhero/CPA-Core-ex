@@ -23,6 +23,15 @@ type QuotaQuery struct {
 	TimeoutMS     int64  `json:"timeoutMs,omitempty"`
 }
 
+// CodexWindowUsage records the exact relationship to the native 100% limit.
+type CodexWindowUsage uint8
+
+const (
+	CodexWindowUsageUnknown CodexWindowUsage = iota
+	CodexWindowUsageBelowLimit
+	CodexWindowUsageAtLimit
+)
+
 type QuotaWindow struct {
 	Name               string  `json:"name"`
 	Model              string  `json:"model,omitempty"`
@@ -32,6 +41,10 @@ type QuotaWindow struct {
 	ResetAt            string  `json:"resetAt,omitempty"`
 	SourceStatus       string  `json:"sourceStatus,omitempty"`
 	LimitWindowSeconds int64   `json:"limitWindowSeconds,omitempty"`
+
+	// CodexUsage is set only by the host's official usage read. The public
+	// floats above are for display and may round across the exhaustion boundary.
+	CodexUsage CodexWindowUsage `json:"-"`
 }
 
 // QuotaCredits is the Codex wallet observed with the same usage read.
