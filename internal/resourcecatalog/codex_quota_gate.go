@@ -49,6 +49,15 @@ func matchingCodexGateTarget(g resource.Gate, b resource.Binding) bool {
 	return len(b.Targets) == 1 && len(g.Targets) == 1 && sameGateLifecycle(g.Targets[0], b.Targets[0])
 }
 
+// CodexQuotaRecheckCurrent joins a read-only gate snapshot and exact live
+// source binding. The lifecycle comparison uses the same scope as admission.
+func (c *Catalog) CodexQuotaRecheckCurrent(revision uint64, g resource.Gate, b resource.Binding) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.currentLocked() && c.gateCurrentLocked() && revision == c.state.Gates.Revision &&
+		IsCoreQuotaGateOwner(g.Owner) && c.bindingLocked(&b) && matchingCodexGateTarget(g, b)
+}
+
 func (c *Catalog) codexQuotaFenceLocked(op resource.GateOperation) (gateReceipt, *resource.QuotaGateEvidence, int64) {
 	var latest gateReceipt
 	var facts *resource.QuotaGateEvidence

@@ -2,7 +2,11 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"reflect"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialquota"
@@ -78,7 +82,93 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 		h.quotaSource(ctx, current).SourceVersion == source.SourceVersion
 }
 
-func quotaGateState(state resource.GateState) any {
+type codexQuotaRecheck struct {
+	resource.Binding
+	AuthIndex     string `json:"auth_index"`
+	SourceID      string `json:"sourceId"`
+	SubjectID     string `json:"subjectId"`
+	SourceVersion string `json:"sourceVersion"`
+	ObservedAtMS  int64  `json:"observedAtMs"`
+	PublishedAtMS int64  `json:"publishedAtMs"`
+	RecheckAtMS   int64  `json:"recheckAtMs"`
+	ResetID       string `json:"resetId"`
+}
+
+// This read projects only current query authority. It cannot clear an
+// existing pause or create a refresh; Manager still validates the live lease.
+func (h *Handler) codexQuotaRechecks(ctx context.Context, state resource.GateState) []codexQuotaRecheck {
+	if !state.Ready || h.authManager == nil {
+		return nil
+	}
+	type pending struct {
+		gate   resource.Gate
+		due    *resource.QuotaGateEvidence
+		intake int64
+	}
+	var due []pending
+	for _, gate := range state.Gates {
+		if gate.Applicability != "current" || len(gate.Targets) != 1 || gate.Subject == "provider" {
+			continue
+		}
+		details, intake := resourcecatalog.QuotaGateDetails(gate.Owner, gate.EvidenceID)
+		if details != nil && details.RecheckAtMS > 0 {
+			due = append(due, pending{gate, details, intake})
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	slices.SortFunc(due, func(a, b pending) int {
+		if a.due.RecheckAtMS < b.due.RecheckAtMS {
+			return -1
+		}
+		if a.due.RecheckAtMS > b.due.RecheckAtMS {
+			return 1
+		}
+		return strings.Compare(a.gate.EvidenceID, b.gate.EvidenceID)
+	})
+	candidates := make(map[string]*coreauth.Auth)
+	for _, a := range h.authManager.List() {
+		if a != nil && a.Provider == "codex" && a.SourcePluginID == "" && a.ResourceIdentity != nil && len(a.ResourceIdentity.Targets) == 1 {
+			id := a.ResourceIdentity.Targets[0].ResourceID
+			if _, exists := candidates[id]; exists {
+				candidates[id] = nil
+			} else {
+				candidates[id] = a
+			}
+		}
+	}
+	var out []codexQuotaRecheck
+	leases := make(map[string]resource.QuotaSource)
+	for _, item := range due {
+		if ctx.Err() != nil || len(out) == 256 {
+			break
+		}
+		id := item.gate.Targets[0].ResourceID
+		source, known := leases[id]
+		if !known {
+			if a := h.currentRuntimeSource(candidates[id]); a != nil && a.ResourceIdentity.Scope == state.Scope {
+				source = h.quotaSource(ctx, a)
+			}
+			leases[id] = source
+		}
+		if source.Protocol != "codex-oauth-wham" || source.State != "ready" ||
+			source.AccountProvenance != "selected_oauth_account" || source.SourceVersion != item.gate.SourceVersion ||
+			!h.resourceCatalog.CodexQuotaRecheckCurrent(state.Revision, item.gate, source.Binding) {
+			continue
+		}
+		digest := sha256.Sum256([]byte(item.gate.EvidenceID))
+		out = append(out, codexQuotaRecheck{
+			Binding: source.Binding, AuthIndex: source.AuthIndex, SourceID: source.SourceID,
+			SubjectID: source.SubjectID, SourceVersion: source.SourceVersion,
+			ObservedAtMS: item.due.ObservedAtMS, PublishedAtMS: (item.intake-1)/int64(time.Millisecond) + 1, RecheckAtMS: item.due.RecheckAtMS,
+			ResetID: hex.EncodeToString(digest[:]),
+		})
+	}
+	return out
+}
+
+func quotaGateState(state resource.GateState, rechecks []codexQuotaRecheck) any {
 	type gateView struct {
 		resource.Gate
 		Quota   *resource.QuotaGateEvidence   `json:"quota,omitempty"`
@@ -94,6 +184,7 @@ func quotaGateState(state resource.GateState) any {
 	}
 	return struct {
 		resource.GateState
-		Gates []gateView `json:"gates"`
-	}{state, gates}
+		Gates         []gateView          `json:"gates"`
+		QuotaRechecks []codexQuotaRecheck `json:"quotaRechecks,omitempty"`
+	}{state, gates, rechecks}
 }
