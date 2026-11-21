@@ -90,6 +90,18 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 						balance, credits = "1.25", true
 					}
 					fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[],"credits":{"has_credits":%t,"unlimited":false,"balance":%q}}`, weeklyWindow(25, 18000), weeklyWindow(100, 604800), credits, balance)
+				case 9, 10, 11, 12:
+					w.Header().Set("Date", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
+					plan, amount, overage := "plus", "0.0001", false
+					switch mode.Load() {
+					case 9:
+						amount = "0.0000"
+					case 10:
+						overage = true
+					case 11:
+						plan = "business"
+					}
+					fmt.Fprintf(w, `{"plan_type":%q,"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[],"credits":{"has_credits":true,"unlimited":false,"overage_limit_reached":%t,"balance":%q}}`, plan, weeklyWindow(25, 18000), weeklyWindow(100, 604800), overage, amount)
 				case 1:
 					w.Header().Set("Date", time.Now().Add(-2*time.Second).UTC().Format(http.TimeFormat))
 					fmt.Fprintf(w, `{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":%s,"secondary_window":%s},"additional_rate_limits":[]}`, weeklyWindow(25, 18000), weeklyWindow(42, 604800))
@@ -372,8 +384,21 @@ func testNativeQuotaInferenceAndRecovery(t *testing.T, whole, renew bool) {
 	if whole {
 		gateWrite("test.manual", "pause", gate.Revision, "5e12bc2e-130c-416f-ac31-6a8defef8322", 200)
 	}
-	mode.Store(4)
+	if whole {
+		for _, rejected := range []int32{9, 10, 11} {
+			mode.Store(rejected)
+			queryQuota(t, f, q, 200)
+			raw := f.request("inference-gates", 200)
+			if !strings.Contains(string(raw), "quota_windows_exhausted") {
+				t.Fatalf("credits with zero, a spend limit, or unsupported payer cleared the native pause: %s", raw)
+			}
+		}
+		mode.Store(12) // Paid credits can fund standard Codex while the identical windows stay exhausted.
+	} else {
+		mode.Store(4)
+	}
 	obs := queryQuota(t, f, q, 200)
+	mode.Store(4)
 	if len(obs.ClearedQuotaWindows) != 1 {
 		t.Fatalf("missing fresh recovery acknowledgement: %+v", obs)
 	}

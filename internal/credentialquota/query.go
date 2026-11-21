@@ -181,6 +181,7 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 	} else {
 		obs.StandardOnlyNoCredits = codexStandardOnlyNoCredits(data)
+		obs.StandardPaidFunding = codexStandardPaidFunding(data)
 		obs.Credits = codexCreditsFromUsage(data)
 		obs.ResetCredits = codexResetCreditsFromUsage(data)
 	}
@@ -199,7 +200,7 @@ func codexStandardOnlyNoCredits(data []byte) bool {
 			Balance   json.RawMessage `json:"balance"`
 		} `json:"credits"`
 	}
-	if json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
+	if !unambiguousQuotaReading(data) || json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
 		root.Credits == nil || root.Credits.Has == nil || *root.Credits.Has ||
 		root.Credits.Unlimited == nil || *root.Credits.Unlimited {
 		return false

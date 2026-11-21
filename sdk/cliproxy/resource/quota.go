@@ -58,6 +58,7 @@ type QuotaObservation struct {
 	// StandardOnlyNoCredits requires explicit upstream shape and exact zero.
 	// It is host-internal and omitted from the observation response.
 	StandardOnlyNoCredits bool          `json:"-"`
+	StandardPaidFunding   bool          `json:"-"`
 	SourceVersion         string        `json:"sourceVersion"`
 	ProtocolVersion       int           `json:"protocolVersion"`
 	TimestampProvenance   string        `json:"timestampProvenance"`

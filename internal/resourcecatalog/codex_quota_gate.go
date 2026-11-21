@@ -117,7 +117,7 @@ func (c *Catalog) RecheckCodexQuota(index string, start time.Time, obs resource.
 		// certified rotation. Historical operation receipts remain unchanged.
 		facts, intake := QuotaGateDetails(g.Owner, g.EvidenceID)
 		if facts == nil || start.UnixNano() <= intake || obs.ObservedAtMS <= facts.ObservedAtMS ||
-			!canClearCodexQuotaWindow(g.Model, *facts, obs.Windows, time.Now()) {
+			!canClearCodexQuotaWindow(g.Model, *facts, obs.Windows, time.Now()) && !canClearCodexQuotaWithPaidFunding(g.Model, *facts, obs, time.Now()) {
 			continue
 		}
 		w := resource.QuotaGateEvidence{Window: facts.Window, WindowSeconds: facts.WindowSeconds, ObservedAtMS: obs.ObservedAtMS}
@@ -177,4 +177,22 @@ func (c *Catalog) hasExternalGateLocked() bool {
 		}
 	}
 	return false
+}
+
+func canClearCodexQuotaWithPaidFunding(model string, paused resource.QuotaGateEvidence, obs resource.QuotaObservation, now time.Time) bool {
+	if model != "" || !obs.Complete || !obs.StandardPaidFunding || len(obs.Windows) != 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	matches := false
+	for _, w := range obs.Windows {
+		reset, err := time.Parse(time.RFC3339, w.ResetAt)
+		if err != nil || !reset.After(now) || w.Model != "" || w.LimitName != "" || seen[w.Name] ||
+			(w.SourceStatus != "rate-limited" && w.SourceStatus != "allowed") {
+			return false
+		}
+		seen[w.Name] = true
+		matches = matches || w.Name == paused.Window && w.LimitWindowSeconds == paused.WindowSeconds
+	}
+	return matches && seen["primary"] && seen["secondary"]
 }
