@@ -141,7 +141,7 @@ func (h *Handler) codexQuotaRechecks(ctx context.Context, state resource.GateSta
 	var out []codexQuotaRecheck
 	leases := make(map[string]resource.QuotaSource)
 	for _, item := range due {
-		if ctx.Err() != nil || len(out) == 256 {
+		if ctx.Err() != nil {
 			break
 		}
 		id := item.gate.Targets[0].ResourceID

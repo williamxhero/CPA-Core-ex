@@ -205,6 +205,10 @@ func (h *Handler) ConfigV8(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
+	if changesNativeFundingMarker(h.cfg, next) {
+		nativeFundingConflict(c)
+		return
+	}
 	// Save the validated canonical tree directly: projecting runtime defaults
 	// back onto it loses explicit nulls, empty maps, and opaque plugin settings.
 	// WriteConfig retains the inode of a mounted configuration file.

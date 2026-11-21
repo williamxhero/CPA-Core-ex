@@ -1854,7 +1854,7 @@ func (m *Manager) shouldRetryAfterErrorWithAttempted(ctx context.Context, opts c
 	if status == http.StatusOK && !hiddenRetry {
 		return 0, false
 	}
-	if isRequestInvalidError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
+	if isRequestInvalidError(err) || isRequestStopError(err) || isSchedulerRejectError(err) || cliproxyexecutor.IsInferenceAdmissionError(err) {
 		return 0, false
 	}
 	if configuredUpstreamLimit != -2 && transientUpstream && configuredUpstreamLimit >= 0 && attempt >= configuredUpstreamLimit {

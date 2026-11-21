@@ -48,6 +48,8 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 }
 
 type openAICompatibilityWithAuthIndex struct {
+	NativeFunding         bool                                     `json:"native-funding,omitempty"`
+	AutoHeld              bool                                     `json:"auto-held,omitempty"`
 	Name                  string                                   `json:"name"`
 	Priority              int                                      `json:"priority,omitempty"`
 	Disabled              bool                                     `json:"disabled"`
@@ -143,6 +145,7 @@ func deleteMapKey(mapping *yaml.Node, key string) bool {
 }
 
 func stripAPIKeysAuthIndexesFromGroup(group *yaml.Node) {
+	deleteMapKey(group, "native-funding")
 	if group == nil || group.Kind != yaml.MappingNode {
 		return
 	}
@@ -460,6 +463,16 @@ func (h *Handler) injectV8APIKeyAuthIndexesLocked(root *yaml.Node, data []byte) 
 				groupBase := strings.TrimSpace(yamlMapScalar(group, "base-url"))
 				if groupBase == "" {
 					continue
+				}
+				deleteMapKey(group, "native-funding")
+				if validGroupIdx < len(cfg.OpenAICompatibility) && cfg.NativeFundingAdapter(&cfg.OpenAICompatibility[validGroupIdx]) != "" {
+					setMapScalar(group, "native-funding", "true")
+					for i := 0; i+1 < len(group.Content); i += 2 {
+						if group.Content[i].Value == "native-funding" {
+							group.Content[i+1].Tag = "!!bool"
+							break
+						}
+					}
 				}
 				targetGroupIdxStr := strconv.Itoa(validGroupIdx)
 				validGroupIdx++
@@ -910,6 +923,8 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 		idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
 
 		response := openAICompatibilityWithAuthIndex{
+			NativeFunding:         h.cfg.NativeFundingAdapter(&entry) != "",
+			AutoHeld:              entry.AutoHeld,
 			Name:                  entry.Name,
 			Priority:              entry.Priority,
 			Disabled:              entry.Disabled,

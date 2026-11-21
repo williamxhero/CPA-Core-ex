@@ -281,12 +281,22 @@ func (c *Catalog) AdmitInference(b *resource.Binding, model string) error {
 		}
 		return ErrConflict
 	}
+	required, released, err := c.legacyFundingAdmissionLocked(b)
+	if err != nil {
+		return err
+	}
+	if required && !released {
+		return ErrGateDenied
+	}
 	parents, err := c.providerParentsLocked(b)
 	if err != nil {
 		return err
 	}
 	for _, g := range c.state.Gates.Gates {
 		if g.Model != "" && g.Model != model {
+			continue
+		}
+		if g.Owner == legacyFundingOwner && released {
 			continue
 		}
 		if IsCoreQuotaGateOwner(g.Owner) {

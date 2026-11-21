@@ -159,13 +159,17 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	defer func() {
 		_ = os.Remove(tempFile)
 	}()
-	_, err = config.LoadConfigOptional(tempFile, false)
+	candidate, err := config.LoadConfigOptional(tempFile, false)
 	if err != nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": err.Error()})
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if changesNativeFundingMarker(h.cfg, candidate) {
+		nativeFundingConflict(c)
+		return
+	}
 	if WriteConfig(h.configFilePath, body) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return

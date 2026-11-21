@@ -23,7 +23,10 @@ func (h *Handler) initializeResourceCatalog() {
 				return resourcecatalog.ErrUnavailable
 			}
 			current := h.currentRuntimeSource(a)
-			if current == nil {
+			if current == nil || current.ResourceIdentity == nil {
+				if a.Attributes[coreauth.AttributeLegacyFundingHold] == "true" {
+					return resourcecatalog.ErrGateDenied
+				}
 				return h.resourceCatalog.AdmitInference(nil, model)
 			}
 			return h.resourceCatalog.AdmitInference(current.ResourceIdentity, model)
