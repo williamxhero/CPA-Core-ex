@@ -39,7 +39,7 @@ func ExtractCodexQuotaRejection(a *cliproxyauth.Auth, res *http.Response, body, 
 			return resource.CodexQuotaRejection{}, false
 		}
 		scopedModel, header = resource.CodexSparkModel, "X-Codex-Bengalfox-"
-	case "codex":
+	case "premium", "codex":
 		if model == resource.CodexSparkModel {
 			return resource.CodexQuotaRejection{}, false
 		}

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resourcecatalog"
@@ -64,4 +66,20 @@ func (h *Handler) observeQuotaExhaustion(ctx context.Context, a *coreauth.Auth, 
 	if err := h.resourceCatalog.ObserveQuotaExhaustion(*current.ResourceIdentity, current.Index, src.SourceVersion); err != nil {
 		log.Warn("automatic quota stop could not publish; inference admission remains guarded")
 	}
+}
+
+func (h *Handler) observePluginQuotaRejection(ctx context.Context, a *coreauth.Auth) bool {
+	current := h.currentRuntimeSource(a)
+	if current == nil || a.ResourceIdentity == nil || !reflect.DeepEqual(a.ResourceIdentity.Targets, current.ResourceIdentity.Targets) {
+		return false
+	}
+	src := h.quotaSource(ctx, current)
+	if src.State != "ready" || (src.Protocol != "opencode-go-usage" && src.Protocol != "qwen-coding-plan-cli") {
+		return false
+	}
+	if err := h.resourceCatalog.PluginQuotaRejected(src, time.Now()); err != nil {
+		log.Warn("Could not persist subscription quota rejection")
+		return false
+	}
+	return true
 }

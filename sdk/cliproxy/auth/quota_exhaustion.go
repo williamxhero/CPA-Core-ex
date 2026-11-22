@@ -2,6 +2,18 @@ package auth
 
 import "context"
 
+type pluginRejectionObserver struct {
+	publish func(context.Context, *Auth) bool
+}
+
+func (m *Manager) SetPluginQuotaRejectionObserver(f func(context.Context, *Auth) bool) {
+	if f == nil {
+		m.pluginQuotaRejection.Store(nil)
+		return
+	}
+	m.pluginQuotaRejection.Store(&pluginRejectionObserver{f})
+}
+
 type quotaExhaustionHolder struct {
 	observe func(context.Context, *Auth, Result)
 }

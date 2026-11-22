@@ -55,6 +55,7 @@ func (h *Handler) initializeResourceCatalog() {
 	}
 	h.resourceCatalog = catalog
 	h.authManager.SetSchedulingInventory(catalog.Snapshot)
+	h.authManager.SetPluginQuotaRejectionObserver(h.observePluginQuotaRejection)
 	h.authManager.SetQuotaExhaustionObserver(h.observeQuotaExhaustion)
 	h.authManager.SetCodexQuotaRejectionObserver(h.observeCodexQuotaRejection)
 	h.authManager.SetSourceIdentityOwnedSave(catalog)

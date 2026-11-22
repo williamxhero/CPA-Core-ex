@@ -60,7 +60,7 @@ func deepSeekFundingState(reading resource.FundingReading) string {
 }
 
 func IsCoreAdmissionGateOwner(owner string) bool {
-	return owner == legacyFundingOwner || owner == fundingGateOwner || owner == deepInfraGateOwner || IsCoreQuotaGateOwner(owner)
+	return owner == pluginQuotaOwner || owner == legacyFundingOwner || owner == fundingGateOwner || owner == deepInfraGateOwner || IsCoreQuotaGateOwner(owner)
 }
 
 func FundingGateDetails(owner, evidence string) *resource.FundingGateEvidence {

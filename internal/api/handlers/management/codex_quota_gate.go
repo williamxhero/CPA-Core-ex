@@ -63,7 +63,7 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 	obs := credentialquota.Codex(queryCtx, source.Binding, a.Metadata, network)
 	if obs.QueryStatus != "success" || !obs.Complete || !obs.StandardOnlyNoCredits ||
 		obs.TimestampProvenance != "upstream_http_date" || obs.AccountProvenance != source.AccountProvenance ||
-		obs.ObservedAtMS < evidence.ObservedAtMS || len(obs.Windows) != 2 {
+		obs.ObservedAtMS < evidence.ObservedAtMS || (len(obs.Windows) != 2 && len(obs.Windows) != 1) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -74,11 +74,11 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 			return false
 		}
 		seen[window.Name] = true
-		if window.Name == evidence.Window && window.LimitWindowSeconds == evidence.WindowSeconds && window.CodexUsage == resource.CodexWindowUsageAtLimit && reset.UnixMilli() == evidence.ResetAtMS {
+		if window.Name == evidence.Window && window.LimitWindowSeconds == evidence.WindowSeconds && window.CodexUsage == resource.CodexWindowUsageAtLimit && reset.Sub(time.UnixMilli(evidence.ResetAtMS)).Abs() <= time.Minute {
 			confirmed = true
 		}
 	}
-	if !confirmed || !seen["primary"] || !seen["secondary"] {
+	if !confirmed || !seen["primary"] || (!seen["secondary"] && evidence.WindowSeconds != 604800) {
 		return false
 	}
 	current := h.currentRuntimeSource(a)
@@ -111,7 +111,7 @@ func (h *Handler) codexQuotaRechecks(ctx context.Context, state resource.GateSta
 	}
 	var due []pending
 	for _, gate := range state.Gates {
-		if gate.Applicability != "current" || len(gate.Targets) != 1 || gate.Subject == "provider" {
+		if gate.Applicability != "current" || len(gate.Targets) == 0 || gate.Subject == "provider" {
 			continue
 		}
 		details, intake := resourcecatalog.QuotaGateDetails(gate.Owner, gate.EvidenceID)
@@ -133,7 +133,7 @@ func (h *Handler) codexQuotaRechecks(ctx context.Context, state resource.GateSta
 	})
 	candidates := make(map[string]*coreauth.Auth)
 	for _, a := range h.authManager.List() {
-		if a != nil && a.Provider == "codex" && a.SourcePluginID == "" && a.ResourceIdentity != nil && len(a.ResourceIdentity.Targets) == 1 {
+		if a != nil && ((a.Provider == "codex" && a.SourcePluginID == "") || a.SourcePluginID == "cpa-credential-opencode" || a.SourcePluginID == "cpa-credential-qwen") && a.ResourceIdentity != nil && len(a.ResourceIdentity.Targets) > 0 {
 			id := a.ResourceIdentity.Targets[0].ResourceID
 			if _, exists := candidates[id]; exists {
 				candidates[id] = nil
@@ -156,8 +156,7 @@ func (h *Handler) codexQuotaRechecks(ctx context.Context, state resource.GateSta
 			}
 			leases[id] = source
 		}
-		if source.Protocol != "codex-oauth-wham" || source.State != "ready" ||
-			source.AccountProvenance != "selected_oauth_account" || source.SourceVersion != item.gate.SourceVersion ||
+		if (source.Protocol != "codex-oauth-wham" && source.Protocol != "opencode-go-usage" && source.Protocol != "qwen-coding-plan-cli") || source.State != "ready" || source.SourceVersion != item.gate.SourceVersion ||
 			!h.resourceCatalog.CodexQuotaRecheckCurrent(state.Revision, item.gate, source.Binding) {
 			continue
 		}

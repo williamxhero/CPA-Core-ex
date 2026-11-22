@@ -409,6 +409,10 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		obs.ReceivedAtMS = time.Now().UnixMilli()
 		obs.TimestampProvenance = "core_attempt_time"
 	}
+	if err := h.resourceCatalog.RecheckPluginQuota(q.AuthIndex, queryStarted, obs); err != nil {
+		c.JSON(503, gin.H{"error": "quota_gate_unavailable"})
+		return
+	}
 	if cleared, err := h.resourceCatalog.RecheckCodexQuota(q.AuthIndex, queryStarted, obs); err != nil {
 		c.JSON(503, gin.H{"error": "quota_gate_unavailable"})
 		return

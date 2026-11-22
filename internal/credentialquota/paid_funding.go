@@ -13,7 +13,7 @@ var codexPaidDecimal = regexp.MustCompile(`^(0|[1-9][0-9]{0,59})(\.[0-9]{1,30})?
 
 // Personal Codex supports credits as an alternative to included usage. WHAM
 // ties credits to the standard bucket, not to additional model-specific limits.
-func codexStandardPaidFunding(data []byte) bool {
+func codexStandardPaidFunding(data []byte, single bool) bool {
 	var root struct {
 		Plan       string             `json:"plan_type"`
 		Additional *[]json.RawMessage `json:"additional_rate_limits"`
@@ -32,7 +32,7 @@ func codexStandardPaidFunding(data []byte) bool {
 	}
 	if json.Unmarshal(data, &root) != nil ||
 		(root.Plan != "plus" && root.Plan != "pro" && root.Plan != "prolite" && root.Plan != "promax") ||
-		root.Additional == nil || len(*root.Additional) != 0 || root.Credits == nil ||
+		(root.Additional == nil && !single) || (root.Additional != nil && len(*root.Additional) != 0) || root.Credits == nil ||
 		root.Credits.Has == nil || !*root.Credits.Has || root.Credits.Unlimited == nil {
 		return false
 	}

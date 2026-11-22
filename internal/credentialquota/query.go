@@ -184,8 +184,21 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 		obs.Complete = false
 		obs.ErrorCode = "INVALID_QUOTA_WINDOWS"
 	} else {
-		obs.StandardOnlyNoCredits = codexStandardOnlyNoCredits(data)
-		obs.StandardPaidFunding = codexStandardPaidFunding(data)
+		// Prolite can explicitly report one weekly window and no other limits.
+		var shape struct {
+			Plan       string          `json:"plan_type"`
+			Additional json.RawMessage `json:"additional_rate_limits"`
+			Rate       struct {
+				Secondary json.RawMessage `json:"secondary_window"`
+			} `json:"rate_limit"`
+		}
+		_ = json.Unmarshal(data, &shape)
+		single := shape.Plan == "prolite" && string(shape.Rate.Secondary) == "null" && (string(shape.Additional) == "null" || string(shape.Additional) == "[]") && len(obs.Windows) == 1 && obs.Windows[0].Name == "primary" && obs.Windows[0].LimitWindowSeconds == 604800
+		if single {
+			obs.Complete = true
+		}
+		obs.StandardOnlyNoCredits = codexStandardOnlyNoCredits(data, single)
+		obs.StandardPaidFunding = codexStandardPaidFunding(data, single)
 		obs.Credits = codexCreditsFromUsage(data)
 		obs.ResetCredits = codexResetCreditsFromUsage(data)
 	}
@@ -195,7 +208,7 @@ func codexUsageWindows(obs resource.QuotaObservation, data []byte) resource.Quot
 
 // Only explicit absence of any independent limits and an exact depleted
 // wallet may corroborate a standard plan rejection as account-wide.
-func codexStandardOnlyNoCredits(data []byte) bool {
+func codexStandardOnlyNoCredits(data []byte, single bool) bool {
 	var root struct {
 		Additional *[]json.RawMessage `json:"additional_rate_limits"`
 		Credits    *struct {
@@ -204,7 +217,7 @@ func codexStandardOnlyNoCredits(data []byte) bool {
 			Balance   json.RawMessage `json:"balance"`
 		} `json:"credits"`
 	}
-	if json.Unmarshal(data, &root) != nil || root.Additional == nil || len(*root.Additional) != 0 ||
+	if json.Unmarshal(data, &root) != nil || (root.Additional == nil && !single) || (root.Additional != nil && len(*root.Additional) != 0) ||
 		root.Credits == nil || root.Credits.Has == nil || *root.Credits.Has ||
 		root.Credits.Unlimited == nil || *root.Credits.Unlimited {
 		return false

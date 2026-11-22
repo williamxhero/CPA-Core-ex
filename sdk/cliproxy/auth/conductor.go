@@ -206,6 +206,7 @@ type Manager struct {
 	resultPolicy              atomic.Pointer[resultPolicyHolder]
 	inferenceAdmission        atomic.Pointer[inferenceAdmissionHolder]
 	codexQuotaRejection       atomic.Pointer[codexQuotaRejectionHolder]
+	pluginQuotaRejection      atomic.Pointer[pluginRejectionObserver]
 	quotaExhaustion           atomic.Pointer[quotaExhaustionHolder]
 	ownedAuthSave             atomic.Pointer[ownedAuthSaveHolder]
 	mu                        sync.RWMutex

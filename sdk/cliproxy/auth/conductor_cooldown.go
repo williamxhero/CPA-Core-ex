@@ -1559,6 +1559,17 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if m != nil && result.CredentialScope && !result.Success && result.Error != nil && result.Error.HTTPStatus == 429 {
+		if o := m.pluginQuotaRejection.Load(); o != nil {
+			if a, ok := m.GetByID(result.AuthID); ok && (a.SourcePluginID == "cpa-credential-opencode" || a.SourcePluginID == "cpa-credential-qwen") && !isStaleExecutionResult(result, a) && o.publish(ctx, a) {
+				e := *result.Error
+				e.Code = ErrorCodePersistentQuotaGate
+				result.Error = &e
+				result.CredentialScope = false
+				result.RetryAfter = nil
+			}
+		}
+	}
 	if m != nil {
 		if policy := m.ResultPolicy(); policy != nil {
 			result = policy.ApplyResultPolicy(ctx, result)

@@ -53,7 +53,7 @@ func (m *Manager) SetCodexQuotaRejectionObserver(observe func(context.Context, *
 }
 
 func (m *Manager) withInferenceAdmission(ctx context.Context, a *Auth, model string) context.Context {
-	if m.inferenceAdmission.Load() == nil {
+	if m.inferenceAdmission.Load() == nil && a == nil {
 		return ctx
 	}
 	if p := m.codexQuotaRejection.Load(); p != nil && a != nil && a.Provider == "codex" && a.SourcePluginID == "" && a.ResourceIdentity != nil {
@@ -65,6 +65,16 @@ func (m *Manager) withInferenceAdmission(ctx context.Context, a *Auth, model str
 	// Read the currently installed authority on EVERY transport attempt. Retaining
 	// a selected credential does not retain an earlier permission.
 	return cliproxyexecutor.WithInferenceAdmission(ctx, func(ctx context.Context) error {
+		// A retained selection cannot authorize a resend after manual disable.
+		if a != nil {
+			m.mu.RLock()
+			latest := m.auths[a.ID]
+			disabled := a.Disabled || a.Status == StatusDisabled || latest != nil && (latest.Disabled || latest.Status == StatusDisabled)
+			m.mu.RUnlock()
+			if disabled {
+				return &cliproxyexecutor.InferenceAdmissionError{}
+			}
+		}
 		p := m.inferenceAdmission.Load()
 		if p == nil {
 			return nil
@@ -100,6 +110,9 @@ func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []str
 			publishSchedulingDecision(ctx, view)
 		}
 	}
+	if tried == nil {
+		tried = make(map[string]struct{})
+	}
 	var held bool
 	for {
 		a, executor, provider, err := m.pickNextMixed(ctx, providers, model, opts, tried)
@@ -116,7 +129,8 @@ func (m *Manager) pickNextMixedForInference(ctx context.Context, providers []str
 		}
 		historical := a.Attributes[AttributeLegacyFundingHold] == "true"
 		boundNative := a.ResourceIdentity != nil && a.Attributes[AttributeNativeFunding] == "true"
-		if !historical && !boundNative {
+		boundSubscription := a.ResourceIdentity != nil && (a.Provider == "codex" || a.SourcePluginID == "cpa-credential-opencode" || a.SourcePluginID == "cpa-credential-qwen")
+		if !historical && !boundNative && !boundSubscription {
 			report(a)
 			return a, executor, provider, nil
 		}

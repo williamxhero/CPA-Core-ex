@@ -312,6 +312,13 @@ func (c *Catalog) inspectInference(b *resource.Binding, model string, inspect bo
 		if g.Owner == legacyFundingOwner && released {
 			continue
 		}
+		if g.Owner == pluginQuotaOwner {
+			if sameGateSubjects(g.Targets, b.Targets) {
+				facts, _ := pluginQuotaEvidence(g.EvidenceID)
+				return facts, ErrGateDenied
+			}
+			continue
+		}
 		if IsCoreQuotaGateOwner(g.Owner) {
 			if matchingCodexGateTarget(g, *b) {
 				if inspect {

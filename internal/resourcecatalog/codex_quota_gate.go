@@ -24,6 +24,9 @@ func codexQuotaGateOwner(w resource.QuotaGateEvidence) string {
 // QuotaGateDetails projects typed diagnostics out of existing sealed fields.
 // Older binaries can still validate the ledger and honor a durable restriction.
 func QuotaGateDetails(owner, evidence string) (*resource.QuotaGateEvidence, int64) {
+	if owner == pluginQuotaOwner {
+		return pluginQuotaEvidence(evidence)
+	}
 	if !IsCoreQuotaGateOwner(owner) || !strings.HasPrefix(evidence, codexQuotaEvidencePrefix) {
 		return nil, 0
 	}
@@ -55,7 +58,7 @@ func (c *Catalog) CodexQuotaRecheckCurrent(revision uint64, g resource.Gate, b r
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.currentLocked() && c.gateCurrentLocked() && revision == c.state.Gates.Revision &&
-		IsCoreQuotaGateOwner(g.Owner) && c.bindingLocked(&b) && matchingCodexGateTarget(g, b)
+		c.bindingLocked(&b) && ((IsCoreQuotaGateOwner(g.Owner) && matchingCodexGateTarget(g, b)) || (g.Owner == pluginQuotaOwner && sameGateSubjects(g.Targets, b.Targets)))
 }
 
 func (c *Catalog) codexQuotaFenceLocked(op resource.GateOperation) (gateReceipt, *resource.QuotaGateEvidence, int64) {
@@ -116,6 +119,24 @@ func (c *Catalog) RecheckCodexQuota(index string, start time.Time, obs resource.
 	if len(obs.Targets) != 1 || !c.bindingLocked(&obs.Binding) {
 		return nil, ErrConflict
 	}
+	now := time.Now()
+	if obs.Complete && obs.StandardOnlyNoCredits && obs.ObservedAtMS >= now.Add(-5*time.Minute).UnixMilli() && obs.ObservedAtMS <= now.Add(time.Minute).UnixMilli() {
+		for _, w := range obs.Windows {
+			reset, err := time.Parse(time.RFC3339, w.ResetAt)
+			if err != nil || !reset.After(now) || w.Model != "" || w.LimitName != "" || w.SourceStatus != "rate-limited" || w.CodexUsage != resource.CodexWindowUsageAtLimit || w.LimitWindowSeconds <= 0 {
+				continue
+			}
+			evidence := resource.QuotaGateEvidence{Window: w.Name, WindowSeconds: w.LimitWindowSeconds, ObservedAtMS: obs.ObservedAtMS, RecheckAtMS: reset.UnixMilli()}
+			op := c.codexQuotaOperationLocked(obs.Binding, index, obs.SourceVersion, "", "pause", evidence, now)
+			prior, facts, intake := c.codexQuotaFenceLocked(op)
+			if facts != nil && (facts.ObservedAtMS >= obs.ObservedAtMS || start.UnixNano() <= intake || (prior.Operation.Action == "pause" && facts.RecheckAtMS == reset.UnixMilli() && c.hasCurrentCodexGateLocked(op))) {
+				continue
+			}
+			if _, err := c.applyGateLocked(op); err != nil {
+				return nil, err
+			}
+		}
+	}
 	var recovered []resource.QuotaGateEvidence
 	for _, g := range c.state.Gates.Gates {
 		if !IsCoreQuotaGateOwner(g.Owner) || (g.Model != resource.CodexSparkModel && g.Model != "") ||
@@ -126,7 +147,7 @@ func (c *Catalog) RecheckCodexQuota(index string, start time.Time, obs resource.
 		// certified rotation. Historical operation receipts remain unchanged.
 		facts, intake := QuotaGateDetails(g.Owner, g.EvidenceID)
 		if facts == nil || start.UnixNano() <= intake || obs.ObservedAtMS <= facts.ObservedAtMS ||
-			!canClearCodexQuotaWindow(g.Model, *facts, obs.Windows, time.Now()) && !canClearCodexQuotaWithPaidFunding(g.Model, *facts, obs, time.Now()) {
+			!canClearCodexQuotaWindow(g.Model, *facts, obs.Windows, time.Now(), obs.Complete) && !canClearCodexQuotaWithPaidFunding(g.Model, *facts, obs, time.Now()) {
 			continue
 		}
 		w := resource.QuotaGateEvidence{Window: facts.Window, WindowSeconds: facts.WindowSeconds, ObservedAtMS: obs.ObservedAtMS}
@@ -139,6 +160,15 @@ func (c *Catalog) RecheckCodexQuota(index string, start time.Time, obs resource.
 	return recovered, nil
 }
 
+func (c *Catalog) hasCurrentCodexGateLocked(op resource.GateOperation) bool {
+	for _, g := range c.state.Gates.Gates {
+		if g.Owner == op.Owner && g.Model == op.Model && g.SourceVersion == op.SourceVersion && matchingCodexGateTarget(g, op.Binding) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Catalog) codexQuotaOperationLocked(b resource.Binding, index, sourceVersion, model, action string, evidence resource.QuotaGateEvidence, at time.Time) resource.GateOperation {
 	id := uuid.NewString()
 	return resource.GateOperation{
@@ -148,7 +178,7 @@ func (c *Catalog) codexQuotaOperationLocked(b resource.Binding, index, sourceVer
 	}
 }
 
-func canClearCodexQuotaWindow(model string, paused resource.QuotaGateEvidence, windows []resource.QuotaWindow, now time.Time) bool {
+func canClearCodexQuotaWindow(model string, paused resource.QuotaGateEvidence, windows []resource.QuotaWindow, now time.Time, complete bool) bool {
 	feature, name := "", ""
 	if model == resource.CodexSparkModel {
 		feature, name = resource.CodexSparkLimit, resource.CodexSparkLimitName
@@ -174,7 +204,7 @@ func canClearCodexQuotaWindow(model string, paused resource.QuotaGateEvidence, w
 			matches = true
 		}
 	}
-	return matches && seen["primary"] && seen["secondary"]
+	return matches && seen["primary"] && (seen["secondary"] || model == "" && len(windows) == 1 && complete && paused.WindowSeconds == 604800)
 }
 
 // hasExternalGateLocked preserves the legacy unbound protective boundary for
@@ -189,7 +219,7 @@ func (c *Catalog) hasExternalGateLocked() bool {
 }
 
 func canClearCodexQuotaWithPaidFunding(model string, paused resource.QuotaGateEvidence, obs resource.QuotaObservation, now time.Time) bool {
-	if model != "" || !obs.Complete || !obs.StandardPaidFunding || len(obs.Windows) != 2 {
+	if model != "" || !obs.Complete || !obs.StandardPaidFunding || (len(obs.Windows) != 2 && !(len(obs.Windows) == 1 && paused.WindowSeconds == 604800)) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -203,5 +233,5 @@ func canClearCodexQuotaWithPaidFunding(model string, paused resource.QuotaGateEv
 		seen[w.Name] = true
 		matches = matches || w.Name == paused.Window && w.LimitWindowSeconds == paused.WindowSeconds
 	}
-	return matches && seen["primary"] && seen["secondary"]
+	return matches && seen["primary"] && (seen["secondary"] || len(obs.Windows) == 1)
 }
