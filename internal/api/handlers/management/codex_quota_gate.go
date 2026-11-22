@@ -58,32 +58,54 @@ func (h *Handler) confirmWholeCodexQuota(ctx context.Context, a *coreauth.Auth, 
 	}
 	// The original inference response has already been read. This budget
 	// applies only to the separate credential-authority acquisition GET.
-	queryCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	// A real WHAM read takes roughly one to two seconds on this host; the old
+	// 200ms ceiling made every confirmation fail, so the first structured 429
+	// never acquired its durable pause. Keep the read inside the request's
+	// documented three-second active-wait budget.
+	queryCtx, cancel := context.WithTimeout(ctx, codexWholeQuotaConfirmTimeout)
 	defer cancel()
 	obs := credentialquota.Codex(queryCtx, source.Binding, a.Metadata, network)
+	if obs.AccountProvenance != source.AccountProvenance || !codexQuotaConfirmsWholeAccount(obs, evidence, time.Now()) {
+		return false
+	}
+	current := h.currentRuntimeSource(a)
+	return current != nil && reflect.DeepEqual(*current.ResourceIdentity, source.Binding) &&
+		h.quotaSource(ctx, current).SourceVersion == source.SourceVersion
+}
+
+const codexWholeQuotaConfirmTimeout = 3 * time.Second
+
+// codexQuotaConfirmsWholeAccount accepts the same exhausted standard window as
+// the upstream rejection. Another standard window may still be below its own
+// limit: the weekly cap still blocks the account until it resets, so requiring
+// every window to be rate-limited kept plus/prolite weekly exhaustion from ever
+// becoming a durable pause. Independent model limits and usable credits still
+// forbid a whole-account decision.
+func codexQuotaConfirmsWholeAccount(obs resource.QuotaObservation, evidence resource.CodexQuotaRejection, now time.Time) bool {
 	if obs.QueryStatus != "success" || !obs.Complete || !obs.StandardOnlyNoCredits ||
-		obs.TimestampProvenance != "upstream_http_date" || obs.AccountProvenance != source.AccountProvenance ||
-		obs.ObservedAtMS < evidence.ObservedAtMS || (len(obs.Windows) != 2 && len(obs.Windows) != 1) {
+		obs.TimestampProvenance != "upstream_http_date" || obs.ObservedAtMS < evidence.ObservedAtMS ||
+		(len(obs.Windows) != 2 && len(obs.Windows) != 1) {
 		return false
 	}
 	seen := map[string]bool{}
 	confirmed := false
 	for _, window := range obs.Windows {
 		reset, err := time.Parse(time.RFC3339, window.ResetAt)
-		if window.Model != "" || window.SourceStatus != "rate-limited" || seen[window.Name] || err != nil || !reset.After(time.Now()) {
+		if window.Model != "" || window.LimitName != "" || seen[window.Name] || err != nil || !reset.After(now) ||
+			(window.SourceStatus != "rate-limited" && window.SourceStatus != "allowed") {
 			return false
 		}
 		seen[window.Name] = true
-		if window.Name == evidence.Window && window.LimitWindowSeconds == evidence.WindowSeconds && window.CodexUsage == resource.CodexWindowUsageAtLimit && reset.Sub(time.UnixMilli(evidence.ResetAtMS)).Abs() <= time.Minute {
+		if window.Name == evidence.Window && window.LimitWindowSeconds == evidence.WindowSeconds &&
+			window.CodexUsage == resource.CodexWindowUsageAtLimit &&
+			reset.Sub(time.UnixMilli(evidence.ResetAtMS)).Abs() <= time.Minute {
 			confirmed = true
 		}
 	}
 	if !confirmed || !seen["primary"] || (!seen["secondary"] && evidence.WindowSeconds != 604800) {
 		return false
 	}
-	current := h.currentRuntimeSource(a)
-	return current != nil && reflect.DeepEqual(*current.ResourceIdentity, source.Binding) &&
-		h.quotaSource(ctx, current).SourceVersion == source.SourceVersion
+	return true
 }
 
 type codexQuotaRecheck struct {

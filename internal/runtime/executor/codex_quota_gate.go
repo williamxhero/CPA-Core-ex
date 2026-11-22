@@ -19,12 +19,17 @@ func (e *CodexExecutor) codexHTTPBusinessError(ctx context.Context, a *cliproxya
 	installed, handled := cliproxyexecutor.ObserveCodexQuotaRejection(ctx, evidence)
 	if installed {
 		result.persistentQuotaGate = handled
-		result.credentialScoped = false
-		if !handled {
-			// The rejection is real but account-wide exhaustion is not proven.
-			// The reset hint is a quota window, not a transient retry delay.
-			result.transientRateLimit = true
-			result.retryAfter = nil
+		if handled {
+			// The durable gate owns the stop; a second cooldown for the same
+			// event would only duplicate the restriction.
+			result.credentialScoped = false
+		} else {
+			// The upstream rejection is still real even when the account-wide
+			// confirmation could not be published. Keep the credential scope
+			// and the body's reset deadline so the first 429 stops this
+			// credential instead of becoming a transient retry loop that keeps
+			// selecting the exhausted account.
+			result.credentialScoped = true
 		}
 	}
 	return result
