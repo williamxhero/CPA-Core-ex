@@ -338,6 +338,107 @@ func TestProviderSchedulingPersistentPilotTerminalRateLimitBudget(t *testing.T) 
 	}
 }
 
+func TestProviderSchedulingPersistentPilotMatchedRuleRateLimitPacesRetry(t *testing.T) {
+	clock := newProviderBudgetClock(time.Now(), true)
+	var attempts atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			persistentPilotStart(w, "resp-failed-matched-rule")
+			fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp-failed-matched-rule\",\"status\":\"failed\",\"status_code\":429,\"error\":{\"message\":\"MATCHED-LIMIT-CANARY\"}}}\n\n")
+			return
+		}
+		persistentPilotStart(w, "resp-success")
+		persistentPilotSucceed(w, "recovered-matched-rule")
+	})
+	authID := t.Name() + "/primary"
+	for _, a := range f.manager.List() {
+		if a.ID != authID {
+			continue
+		}
+		a.Metadata = map[string]any{"request_scoped_errors": []config.RequestScopedErrorRule{{
+			Status: http.StatusTooManyRequests,
+			Match:  []string{"MATCHED-LIMIT-CANARY"},
+			Action: coreauth.RequestScopedActionContinue,
+		}}}
+		if _, err := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
+	raw := w.Body.String()
+	if w.Code != http.StatusOK || attempts.Load() != 2 || len(clock.waits) != 1 || strings.Contains(raw, "MATCHED-LIMIT-CANARY") || !strings.Contains(raw, "recovered-matched-rule") {
+		t.Fatalf("matched-rule 429 was not paced and retried into success: status=%d sends=%d waits=%d body=%s", w.Code, attempts.Load(), len(clock.waits), raw)
+	}
+	select {
+	case wait := <-clock.waits:
+		assertPersistentPilotStepWait(t, wait, time.Second)
+	default:
+		t.Fatal("missing matched-rule rate-limit wait")
+	}
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if ojson.Get(trace, "send_count").Int() != 2 || ojson.Get(trace, "upstream_category").String() != "transient_rate_limit" {
+		t.Fatalf("incorrect matched-rule recovery trace: %s", trace)
+	}
+}
+
+func assertPersistentPilotStepWait(t *testing.T, wait, base time.Duration) {
+	t.Helper()
+	if wait < base || wait > base+base/4 {
+		t.Fatalf("wait = %v, want the %v step with up to 25%% jitter", wait, base)
+	}
+}
+
+func TestProviderSchedulingPersistentPilotQuotaEvidenceControlsRetry(t *testing.T) {
+	const quotaBody = `{"error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":3600}}`
+	for _, tc := range []struct {
+		name         string
+		body         string
+		recover      bool
+		wantStatus   int
+		wantSends    int32
+		wantWaits    int
+		wantCategory string
+		wantStop     string
+		wantSource   string
+	}{
+		{name: "bare 429", body: `{"error":{"message":"temporary upstream rejection"}}`, recover: true, wantStatus: http.StatusOK, wantSends: 2, wantWaits: 1, wantCategory: "transient_rate_limit", wantSource: "local_backoff"},
+		{name: "authoritative quota 429", body: quotaBody, wantStatus: http.StatusTooManyRequests, wantSends: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newProviderBudgetClock(time.Now(), true)
+			var attempts atomic.Int32
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+				n := attempts.Add(1)
+				if tc.recover && n > 1 {
+					persistentPilotStart(w, "resp-success")
+					persistentPilotSucceed(w, "recovered-bare-429")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprint(w, tc.body)
+			})
+			ctx, cancel := context.WithTimeout(coreauth.WithRequestBudget(t.Context()), 10*time.Second)
+			defer cancel()
+			w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
+			trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+			if w.Code != tc.wantStatus || attempts.Load() != tc.wantSends || len(clock.waits) != tc.wantWaits || ojson.Get(trace, "send_count").Int() != int64(tc.wantSends) {
+				t.Fatalf("unexpected retry pacing: status=%d sends=%d waits=%d body=%s trace=%s", w.Code, attempts.Load(), len(clock.waits), w.Body, trace)
+			}
+			if category := ojson.Get(trace, "upstream_category").String(); category != tc.wantCategory {
+				t.Fatalf("upstream category = %q, want %q: %s", category, tc.wantCategory, trace)
+			}
+			if stop := ojson.Get(trace, "retry_stop_reason").String(); stop != tc.wantStop {
+				t.Fatalf("retry stop reason = %q, want %q: %s", stop, tc.wantStop, trace)
+			}
+			if source := ojson.Get(trace, "upstream_retry_source").String(); source != tc.wantSource {
+				t.Fatalf("upstream retry source = %q, want %q: %s", source, tc.wantSource, trace)
+			}
+		})
+	}
+}
+
 func TestProviderSchedulingPersistentPilotResponseStatusRateLimitRecovery(t *testing.T) {
 	clock := newProviderBudgetClock(time.Now(), true)
 	var attempts atomic.Int32

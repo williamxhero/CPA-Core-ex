@@ -28,11 +28,16 @@ func persistentTestFailure() error {
 	return &Error{HTTPStatus: http.StatusBadGateway, Message: "temporary upstream rejection"}
 }
 
+func assertPersistentStepWait(t *testing.T, wait, base time.Duration) {
+	t.Helper()
+	if wait < base || wait > base+base/4 {
+		t.Fatalf("wait = %v, want the %v step with up to 25%% jitter", wait, base)
+	}
+}
+
 func assertPersistentBaseWait(t *testing.T, wait time.Duration) {
 	t.Helper()
-	if wait < time.Second || wait > time.Second+time.Second/4 {
-		t.Fatalf("wait = %v, want the 1s base step with up to 25%% jitter", wait)
-	}
+	assertPersistentStepWait(t, wait, time.Second)
 }
 
 func attachPersistentTestProbe(m *Manager, r *routeReservation) {
@@ -51,15 +56,27 @@ func persistentBackoffEntry(m *Manager, routeID string) bool {
 	return ok
 }
 
-func TestPersistentRouteBackoffRestartsAfterElapsedWait(t *testing.T) {
+func TestPersistentRouteBackoffEscalatesForLiveRoute(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
-	_, clock, r, ctx, snapshot := newPersistentBackoffTest(t, start)
+	m, clock, r, ctx, snapshot := newPersistentBackoffTest(t, start)
+	live := map[string]struct{}{r.persistentRoute: {}}
+
 	r.notePersistentFailure(ctx, persistentTestFailure())
 	assertPersistentBaseWait(t, snapshot().UpstreamRetryAt.Sub(start))
 
 	clock.Advance(2 * time.Second)
+	m.providerSchedulingUse.mu.Lock()
+	m.providerSchedulingUse.pruneStalePersistentBackoffLocked(live, clock.Now())
+	m.providerSchedulingUse.mu.Unlock()
 	r.notePersistentFailure(ctx, persistentTestFailure())
-	assertPersistentBaseWait(t, snapshot().UpstreamRetryAt.Sub(clock.Now()))
+	assertPersistentStepWait(t, snapshot().UpstreamRetryAt.Sub(clock.Now()), 2*time.Second)
+
+	clock.Advance(3 * time.Second)
+	m.providerSchedulingUse.mu.Lock()
+	m.providerSchedulingUse.pruneStalePersistentBackoffLocked(live, clock.Now())
+	m.providerSchedulingUse.mu.Unlock()
+	r.notePersistentFailure(ctx, persistentTestFailure())
+	assertPersistentStepWait(t, snapshot().UpstreamRetryAt.Sub(clock.Now()), 4*time.Second)
 }
 
 func TestPersistentRouteBackoffDropsStaleRouteEntry(t *testing.T) {
@@ -68,7 +85,7 @@ func TestPersistentRouteBackoffDropsStaleRouteEntry(t *testing.T) {
 	r.notePersistentFailure(ctx, persistentTestFailure())
 	clock.Advance(2 * time.Second)
 	m.providerSchedulingUse.mu.Lock()
-	m.providerSchedulingUse.pruneStalePersistentBackoffLocked(nil, clock.Now())
+	m.providerSchedulingUse.pruneStalePersistentBackoffLocked(map[string]struct{}{}, clock.Now())
 	m.providerSchedulingUse.mu.Unlock()
 	if persistentBackoffEntry(m, r.persistentRoute) {
 		t.Fatal("elapsed entry for a route outside the candidate pool was kept")
@@ -95,7 +112,7 @@ func TestPersistentRouteBackoffKeepsPendingProbeEntry(t *testing.T) {
 	attachPersistentTestProbe(m, r)
 	clock.Advance(2 * time.Second)
 	m.providerSchedulingUse.mu.Lock()
-	m.providerSchedulingUse.pruneStalePersistentBackoffLocked(nil, clock.Now())
+	m.providerSchedulingUse.pruneStalePersistentBackoffLocked(map[string]struct{}{}, clock.Now())
 	m.providerSchedulingUse.mu.Unlock()
 	if !persistentBackoffEntry(m, r.persistentRoute) {
 		t.Fatal("pending probe entry was pruned")

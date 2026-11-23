@@ -111,9 +111,8 @@ func (r *routeReservation) notePersistentFailure(ctx context.Context, err error)
 	if u.backoff == nil {
 		u.backoff = make(map[string]persistentRouteBackoff)
 	}
-	// A failure restarts the failing route's step and drops elapsed idle
-	// windows; a live route recreates its entry on its next failure.
-	u.pruneStalePersistentBackoffLocked(nil, now)
+	// Scheduler pruning owns removal of routes that leave the candidate pool;
+	// a live route keeps its escalation step across elapsed waits.
 	state := u.backoff[r.persistentRoute]
 	state.failures = min(state.failures+1, 6)
 	base := time.Second << (state.failures - 1)
@@ -153,9 +152,9 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 		return
 	}
 	if reservation != nil && persistentTransient(err) && (!matchedRule || statusCodeFromError(err) == http.StatusTooManyRequests) {
-		if !matchedRule {
-			reservation.notePersistentFailure(ctx, err)
-		}
+		// A matched request-scoped rule still paces the pilot in memory; the
+		// neutral result below keeps persistent cooldown/quota state untouched.
+		reservation.notePersistentFailure(ctx, err)
 		if result.Error != nil {
 			result.Error = &Error{HTTPStatus: statusCodeFromError(err), Code: errorCodeTransientUpstream, Message: "temporary upstream rejection"}
 			if result.Error.HTTPStatus == http.StatusTooManyRequests {
