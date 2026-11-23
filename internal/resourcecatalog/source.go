@@ -266,12 +266,31 @@ func sources(configPath, authDir string) ([]*sourceFile, []*sourceRow, error) {
 	if err != nil {
 		return nil, nil, ErrUnavailable
 	}
+	authFiles := make([]*sourceFile, 0, len(paths))
+	identified := map[string]bool{}
 	for _, path := range paths {
 		f, errFile := readSource(path, true)
 		if errFile != nil {
 			return nil, nil, errFile
 		}
+		authFiles = append(authFiles, f)
+		if scalar(f.root, "resource_id") != "" {
+			if id := strings.TrimSpace(scalar(f.root, "id")); id != "" {
+				identified[id] = true
+			}
+		}
+	}
+	for _, f := range authFiles {
 		files = append(files, f)
+		// The runtime keeps exactly one record per declared id, so a markerless
+		// leftover reusing an identified id is not a second credential. Minting a
+		// second identity for it would only block the real source as an ambiguous
+		// projection. Never promote a copy that no runtime can ever register.
+		if scalar(f.root, "resource_id") == "" {
+			if id := strings.TrimSpace(scalar(f.root, "id")); id != "" && identified[id] {
+				continue
+			}
+		}
 		_, errRow := appendRow(f, f.root, "credential", safeFamily(scalar(f.root, "type")), "resource_id", nil)
 		if errRow != nil {
 			return nil, nil, errRow
