@@ -542,9 +542,9 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		defer func() {
 			switch {
 			case errors.Is(finalErr, context.Canceled):
-				b.setRetryStop("canceled")
+				b.setRetryStop(retryStopCanceled)
 			case errors.Is(finalErr, context.DeadlineExceeded):
-				b.setRetryStop("deadline_exceeded")
+				b.setRetryStop(retryStopDeadlineExceeded)
 			}
 		}()
 	}
@@ -576,7 +576,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		s, _ := RequestBudgetSnapshotFromContext(ctx)
 		if !budgetCanRepeat(ctx) {
-			b.setRetryStop("replay_unsafe")
+			b.setRetryStop(retryStopReplayUnsafe)
 			if previous != nil {
 				return zero, previous
 			}
@@ -594,7 +594,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				return zero, ctx.Err()
 			}
 			if isRequestInvalidError(err) || isRequestTerminatedError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
-				b.setRetryStop("non_transient_failure")
+				b.setRetryStop(retryStopNonTransientFailure)
 				return zero, err
 			}
 			// Keep the best actual upstream result for the public
@@ -610,12 +610,12 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				persistentRoundPending = false
 				after, _ := RequestBudgetSnapshotFromContext(ctx)
 				if after.Attempts == s.Attempts && m.scheduledOpportunity(ctx, providers, model, opts, nil, roundCause).ready {
-					b.setRetryStop("no_recovery_route")
+					b.setRetryStop(retryStopNoRecoveryRoute)
 					break
 				}
 			}
 			if !budgetCanRepeat(ctx) {
-				b.setRetryStop("replay_unsafe")
+				b.setRetryStop(retryStopReplayUnsafe)
 				return zero, previous
 			}
 			attempted = b.credentialSnapshot()
@@ -681,16 +681,16 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		current, _ := RequestBudgetSnapshotFromContext(ctx)
 		if b.persistentRetry && current.Attempts == 0 {
-			b.setRetryStop("no_available_route")
+			b.setRetryStop(retryStopNoAvailableRoute)
 			break
 		}
-		if b.persistentRetry && (current.UpstreamCategory == "transient_upstream" || current.UpstreamCategory == "transient_rate_limit") {
+		if b.persistentRetry && (current.UpstreamCategory == string(upstreamCategoryTransient) || current.UpstreamCategory == string(upstreamCategoryTransientRateLimit)) {
 			if b.persistentLimit >= 0 && current.Attempts > b.persistentLimit {
-				b.setRetryStop("retry_limit")
+				b.setRetryStop(retryStopRetryLimit)
 				break
 			}
 			if !persistentTransient(roundCause) {
-				b.setRetryStop("non_transient_failure")
+				b.setRetryStop(retryStopNonTransientFailure)
 				break
 			}
 			// A full per-round route cap must not make a previously tried
@@ -706,7 +706,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 					return zero, ctx.Err()
 				}
 				if isRequestInvalidError(alternateErr) || isRequestTerminatedError(alternateErr) || isRequestStopError(alternateErr) || isSchedulerRejectError(alternateErr) {
-					b.setRetryStop("non_transient_failure")
+					b.setRetryStop(retryStopNonTransientFailure)
 					return zero, alternateErr
 				}
 				if after, _ := RequestBudgetSnapshotFromContext(ctx); after.Attempts > current.Attempts {
@@ -723,14 +723,12 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			}
 			if !proceed {
 				if !opportunity.at.IsZero() {
-					b.setRetryStop("deadline_before_recovery")
+					b.setRetryStop(retryStopDeadlineBeforeRecovery)
 				} else {
-					b.setRetryStop("no_recovery_route")
+					b.setRetryStop(retryStopNoRecoveryRoute)
 				}
 				break
 			}
-			// Recheck availability after a wake without discarding the failure
-			// that authorizes the wait. A competing request may have the probe.
 			if !opportunity.ready {
 				continue
 			}

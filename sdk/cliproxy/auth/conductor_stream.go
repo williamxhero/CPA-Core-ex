@@ -490,7 +490,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 			recordFailure(err)
 			if pilotCodex(ctx, provider) && deliveredAny {
-				requestBudgetFromContext(ctx).setRetryStop("output_committed")
+				requestBudgetFromContext(ctx).setRetryStop(retryStopOutputCommitted)
 			}
 			activeReplay := streamReplayCoordinatorFromContext(ctx)
 			if activeReplay == nil {

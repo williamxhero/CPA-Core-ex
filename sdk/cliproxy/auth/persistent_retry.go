@@ -29,9 +29,12 @@ func (m *Manager) persistentRetryLimit(ctx context.Context, req executor.Request
 		!slices.Contains(cfg.PersistentRetryModels, persistentRetryPilotModel) {
 		return 0, false
 	}
-	limit := m.configuredUpstreamErrorRetryLimit()
-	if limit == -2 {
-		limit, _, _ = m.retrySettings()
+	// Match runScheduledExecution's round authorization: an explicit upstream
+	// limit governs, while the legacy unset sentinel keeps the request-retry
+	// default.
+	limit, _, _ := m.retrySettings()
+	if upstream := m.configuredUpstreamErrorRetryLimit(); upstream != -2 {
+		limit = upstream
 	}
 	return limit, true
 }
@@ -51,11 +54,37 @@ func pilotCodex(ctx context.Context, provider string) bool {
 	return provider == "codex" && PersistentRetryPilot(ctx)
 }
 
-func (b *requestBudget) setRetryStop(reason string) {
+// upstreamCategory classifies the last transient failure for routing traces.
+type upstreamCategory string
+
+const errorCodeTransientUpstream = "transient_upstream"
+
+const (
+	upstreamCategoryTransient          upstreamCategory = errorCodeTransientUpstream
+	upstreamCategoryTransientRateLimit upstreamCategory = ErrorCodeTransientRateLimit
+)
+
+// retryStopReason explains why the pilot scheduler stopped repeating a request.
+type retryStopReason string
+
+const (
+	retryStopCanceled               retryStopReason = "canceled"
+	retryStopDeadlineExceeded       retryStopReason = "deadline_exceeded"
+	retryStopDeadlineBeforeRecovery retryStopReason = "deadline_before_recovery"
+	retryStopNoAvailableRoute       retryStopReason = "no_available_route"
+	retryStopNoRecoveryRoute        retryStopReason = "no_recovery_route"
+	retryStopNonTransientFailure    retryStopReason = "non_transient_failure"
+	retryStopOutputCommitted        retryStopReason = "output_committed"
+	retryStopReplayUnsafe           retryStopReason = "replay_unsafe"
+	retryStopRetryLimit             retryStopReason = "retry_limit"
+	retryStopStreamRecoveryLimit    retryStopReason = "stream_recovery_buffer_limit"
+)
+
+func (b *requestBudget) setRetryStop(reason retryStopReason) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.persistentRetry && b.RetryStopReason == "" {
-		b.RetryStopReason = reason
+		b.RetryStopReason = string(reason)
 		updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 	}
 }
@@ -69,8 +98,6 @@ func persistentTransient(err error) bool {
 		(isTransientRateLimitError(err) || clienterror.Classify(statusCodeFromError(err), err.Error()) != clienterror.FailureQuotaExhausted)
 }
 
-// This transient state sits under the same lock as reservations. It has no
-// effect on legacy availability or durable quota evidence.
 type persistentRouteBackoff struct {
 	failures int
 	at       time.Time
@@ -84,7 +111,13 @@ func (r *routeReservation) notePersistentFailure(ctx context.Context, err error)
 	if u.backoff == nil {
 		u.backoff = make(map[string]persistentRouteBackoff)
 	}
+	// A failure restarts the failing route's step and drops elapsed idle
+	// windows; a live route recreates its entry on its next failure.
+	u.pruneStalePersistentBackoffLocked(nil, now)
 	state := u.backoff[r.persistentRoute]
+	if state.probe == nil && !state.at.After(now) {
+		state = persistentRouteBackoff{}
+	}
 	state.failures = min(state.failures+1, 6)
 	base := time.Second << (state.failures - 1)
 	wait := min(30*time.Second, base+rand.N(base/4+1))
@@ -103,10 +136,11 @@ func (r *routeReservation) notePersistentFailure(ctx context.Context, err error)
 	b := requestBudgetFromContext(ctx)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.UpstreamCategory = "transient_upstream"
+	category := upstreamCategoryTransient
 	if statusCodeFromError(err) == http.StatusTooManyRequests {
-		b.UpstreamCategory = "transient_rate_limit"
+		category = upstreamCategoryTransientRateLimit
 	}
+	b.UpstreamCategory = string(category)
 	b.UpstreamRetryAt = state.at
 	b.UpstreamRetrySource = source
 	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
@@ -118,7 +152,7 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 	reservation, _ := ctx.Value(persistentReservationKey{}).(*routeReservation)
 	if reservation != nil && errorCodeFromError(err) == "stream_recovery_buffer_limit" {
 		markPilotReplayUnsafe(ctx)
-		requestBudgetFromContext(ctx).setRetryStop("stream_recovery_buffer_limit")
+		requestBudgetFromContext(ctx).setRetryStop(retryStopStreamRecoveryLimit)
 		return
 	}
 	if reservation != nil && persistentTransient(err) && (!matchedRule || statusCodeFromError(err) == http.StatusTooManyRequests) {
@@ -126,7 +160,7 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 			reservation.notePersistentFailure(ctx, err)
 		}
 		if result.Error != nil {
-			result.Error = &Error{HTTPStatus: statusCodeFromError(err), Code: "transient_upstream", Message: "temporary upstream rejection"}
+			result.Error = &Error{HTTPStatus: statusCodeFromError(err), Code: errorCodeTransientUpstream, Message: "temporary upstream rejection"}
 			if result.Error.HTTPStatus == http.StatusTooManyRequests {
 				result.Error.Code = ErrorCodeTransientRateLimit
 			}
@@ -166,6 +200,9 @@ func markPilotReplayUnsafe(ctx context.Context) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.ReplayUnsafe {
+		return
+	}
 	b.ReplayUnsafe = true
 	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
 }

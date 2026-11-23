@@ -142,7 +142,7 @@ func cooldownErrorReason(err *Error) string {
 	case isCreditBalanceTooLowResultError(err):
 		return "payment_required"
 	case isTransientRateLimitResultError(err):
-		return "transient_rate_limit"
+		return ErrorCodeTransientRateLimit
 	}
 	switch statusCodeFromResult(err) {
 	case 401:
@@ -177,7 +177,7 @@ func cooldownStatusReason(message string) string {
 	case "transient upstream error":
 		return "transient_error"
 	case transientRateLimitErrorCode:
-		return "transient_rate_limit"
+		return ErrorCodeTransientRateLimit
 	default:
 		return "unknown"
 	}

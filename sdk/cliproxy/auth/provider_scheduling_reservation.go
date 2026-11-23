@@ -71,6 +71,21 @@ func (u *providerSchedulingUse) available(limits []schedulingLimit) bool {
 	return true
 }
 
+// pruneStalePersistentBackoffLocked drops elapsed idle entries whose route is
+// no longer part of the candidate pool, so credentials or models that
+// disappeared cannot accumulate state. Callers hold u.mu.
+func (u *providerSchedulingUse) pruneStalePersistentBackoffLocked(live map[string]struct{}, now time.Time) {
+	for routeID, state := range u.backoff {
+		if state.probe != nil || state.at.After(now) {
+			continue
+		}
+		if _, ok := live[routeID]; ok {
+			continue
+		}
+		delete(u.backoff, routeID)
+	}
+}
+
 type routeReservation struct {
 	once            sync.Once
 	manager         *Manager
@@ -191,6 +206,9 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 	persistent := PersistentRetryPilot(ctx)
 	m.providerSchedulingUse.mu.Lock()
 	defer m.providerSchedulingUse.mu.Unlock()
+	if persistent {
+		m.providerSchedulingUse.pruneStalePersistentBackoffLocked(scheduledLiveRoutes(candidates), now)
+	}
 	var next time.Time
 	var probePending bool
 	for _, c := range candidates {
@@ -221,6 +239,14 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 		}
 	}
 	return false, next, changed, probePending
+}
+
+func scheduledLiveRoutes(candidates []scheduledCandidate) map[string]struct{} {
+	live := make(map[string]struct{}, len(candidates))
+	for i := range candidates {
+		live[candidates[i].routeID] = struct{}{}
+	}
+	return live
 }
 
 func scheduledHardAffinity(selector Selector, model string, opts cliproxyexecutor.Options) string {

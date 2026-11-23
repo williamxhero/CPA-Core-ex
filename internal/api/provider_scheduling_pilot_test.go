@@ -239,8 +239,6 @@ func TestProviderSchedulingPersistentPilotHalfOpenRelease(t *testing.T) {
 				return
 			}
 		case 3:
-			// Keep an ordinary post-recovery request active while another
-			// request proves the route has returned to normal concurrency.
 			close(probe)
 			select {
 			case <-unblock:
@@ -409,5 +407,24 @@ func TestProviderSchedulingPersistentPilotChatIncident(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProviderSchedulingPersistentPilotEmptyAllowlist(t *testing.T) {
+	clock := newProviderBudgetClock(time.Now(), true)
+	var attempts atomic.Int32
+	f := newPersistentPilotHTTP(t, "[]", 1, clock, func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			persistentPilotStart(w, "resp-unlisted-failed")
+			persistentPilotFail(w, "resp-unlisted-failed")
+			return
+		}
+		persistentPilotStart(w, "resp-unlisted-success")
+		persistentPilotSucceed(w, "must-not-replay")
+	})
+	w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if w.Code != http.StatusBadGateway || attempts.Load() != 1 || len(clock.waits) != 0 || ojson.Get(trace, "retry_stop_reason").String() != "" {
+		t.Fatalf("empty allowlist started the pilot: status=%d sends=%d waits=%d body=%s trace=%s", w.Code, attempts.Load(), len(clock.waits), w.Body, trace)
 	}
 }

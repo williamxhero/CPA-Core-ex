@@ -591,6 +591,11 @@ func TestCodexTerminalFailureErrClassifiesStatus(t *testing.T) {
 			event:      `{"type":"response.failed","response":{"error":{"type":"upstream_error","code":"unknown","message":"Upstream failed."}}}`,
 			wantStatus: http.StatusBadGateway,
 		},
+		{
+			name:       "response envelope status code keeps the shared failure mapping",
+			event:      `{"type":"response.failed","response":{"id":"resp_status","status":"failed","status_code":429,"error":{"code":"upstream_unavailable","message":"Temporary upstream rejection."}}}`,
+			wantStatus: http.StatusBadGateway,
+		},
 		// Overload rejections keep falling through to 502 here. The 503 restoration is scoped to
 		// the opt-in bootstrap buffering path so this shared mapping stays unchanged.
 		{

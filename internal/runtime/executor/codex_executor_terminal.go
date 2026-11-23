@@ -192,6 +192,11 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 	if !cliproxyauth.PersistentRetryPilot(ctx) || err.credentialScoped || err.persistentQuotaGate || isCodexUsageLimitError(body) {
 		return err
 	}
+	// Only the pilot reads the response-level status preserved by
+	// codexTerminalFailureBody; the shared mapping ignores it.
+	if status := codexPilotResponseStatus(body); status != 0 {
+		err.code = status
+	}
 	// An HTTP 429 alone is not evidence that a funding source is exhausted.
 	// Keep the structured quota cases on their existing paths.
 	code := ojson.GetBytesNoCopy(body, "error.code").String()
@@ -199,8 +204,24 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 	if err.code == http.StatusTooManyRequests && clienterror.Classify(err.code, code+" "+kind) != clienterror.FailureQuotaExhausted {
 		err.transientRateLimit = true
 	}
-	err.retryAfter = codexPilotRetryAfter(ctx, headers, eventHeaders)
+	err.retryAfter = laterRetryAfter(err.retryAfter, codexPilotRetryAfter(ctx, headers, eventHeaders))
 	return err
+}
+
+// codexPilotResponseStatus reads the preserved response-level status only when
+// no error-level status already governed the terminal mapping.
+func codexPilotResponseStatus(body []byte) int {
+	for _, path := range []string{"error.status_code", "error.status", "status"} {
+		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
+			return 0
+		}
+	}
+	for _, path := range []string{"response.status_code", "response.status"} {
+		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
+			return status
+		}
+	}
+	return 0
 }
 
 func codexPilotRetryAfter(ctx context.Context, headers, eventHeaders http.Header) *time.Duration {
@@ -210,6 +231,15 @@ func codexPilotRetryAfter(ctx context.Context, headers, eventHeaders http.Header
 		return nil
 	}
 	return &wait
+}
+
+// laterRetryAfter keeps the later delay, so a header hint can extend but never
+// shorten the delay already resolved from the status body.
+func laterRetryAfter(current, hint *time.Duration) *time.Duration {
+	if hint == nil || (current != nil && *hint <= *current) {
+		return current
+	}
+	return hint
 }
 
 func codexTerminalFailureStatus(body []byte) int {
@@ -274,11 +304,20 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	if doc == nil {
 		doc = ojson.NewDocString(`{"error":{"message":"upstream stream failed without error details"}}`)
 	}
+	// The flattened status drives the shared terminal classification. A
+	// response-level status stays under its own key because only the opt-in
+	// pilot treats it as retry evidence.
 	for _, statusPath := range []string{"status_code", "status", "response.status_code", "response.status", "body.status_code", "body.status"} {
-		if status := int(ojson.GetBytesNoCopy(eventData, statusPath).Int()); status >= 400 && status <= 599 {
-			_ = doc.Set("status", status)
-			break
+		status := int(ojson.GetBytesNoCopy(eventData, statusPath).Int())
+		if status < 400 || status > 599 {
+			continue
 		}
+		key := "status"
+		if strings.HasPrefix(statusPath, "response.") {
+			key = statusPath
+		}
+		_ = doc.Set(key, status)
+		break
 	}
 	if seq := ojson.GetBytesNoCopy(eventData, "sequence_number"); seq.Exists() {
 		_ = doc.Set("sequence_number", seq.Int())

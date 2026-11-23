@@ -282,12 +282,13 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			return nil, nil, "", err
 		}
 		cfg := m.runtimeConfigSnapshot()
-		candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, m.getContinuityClock().Now())
-		persistent := PersistentRetryPilot(ctx)
 		now := m.getContinuityClock().Now()
+		candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
+		persistent := PersistentRetryPilot(ctx)
 		u := &m.providerSchedulingUse
 		u.mu.Lock()
 		if persistent {
+			u.pruneStalePersistentBackoffLocked(scheduledLiveRoutes(candidates), now)
 			for i := range candidates {
 				c := &candidates[i]
 				if c.owner != "codex" || len(c.reasons) != 0 {
