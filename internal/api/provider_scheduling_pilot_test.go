@@ -338,6 +338,36 @@ func TestProviderSchedulingPersistentPilotTerminalRateLimitBudget(t *testing.T) 
 	}
 }
 
+func TestProviderSchedulingPersistentPilotResponseStatusRateLimitRecovery(t *testing.T) {
+	clock := newProviderBudgetClock(time.Now(), true)
+	var attempts atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+		if attempts.Add(1) == 1 {
+			persistentPilotStart(w, "resp-failed-envelope-429")
+			fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp-failed-envelope-429\",\"status\":\"failed\",\"status_code\":429,\"error\":{\"message\":\"RAW-FAILURE-CANARY\"}}}\n\n")
+			return
+		}
+		persistentPilotStart(w, "resp-success")
+		persistentPilotSucceed(w, "recovered-envelope-429")
+	})
+	ctx := coreauth.WithRequestBudget(t.Context())
+	w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
+	raw := w.Body.String()
+	if w.Code != http.StatusOK || attempts.Load() != 2 || len(clock.waits) != 1 || strings.Contains(raw, "resp-failed-envelope-429") ||
+		strings.Contains(raw, "CANARY") || !strings.Contains(raw, "recovered-envelope-429") {
+		t.Fatalf("response-level 429 was not retried into success: status=%d sends=%d waits=%d body=%s", w.Code, attempts.Load(), len(clock.waits), raw)
+	}
+	budget, ok := coreauth.RequestBudgetSnapshotFromContext(ctx)
+	if !ok || budget.Attempts != 2 || budget.UpstreamCategory != "transient_rate_limit" || budget.UpstreamRetryAt.IsZero() {
+		t.Fatalf("reflected 429 was not classified as a transient rate limit: %+v", budget)
+	}
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if ojson.Get(trace, "send_count").Int() != 2 || ojson.Get(trace, "upstream_category").String() != "transient_rate_limit" ||
+		ojson.Get(trace, "terminal.code").String() != "succeeded" || ojson.Get(trace, "terminal.status").Int() != http.StatusOK {
+		t.Fatalf("incorrect recovery trace: %s", trace)
+	}
+}
+
 func TestProviderSchedulingPersistentPilotResponsesRetryAfter(t *testing.T) {
 	clock := newProviderBudgetClock(time.Now(), true)
 	var attempts atomic.Int32

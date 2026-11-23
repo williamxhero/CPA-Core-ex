@@ -115,9 +115,6 @@ func (r *routeReservation) notePersistentFailure(ctx context.Context, err error)
 	// windows; a live route recreates its entry on its next failure.
 	u.pruneStalePersistentBackoffLocked(nil, now)
 	state := u.backoff[r.persistentRoute]
-	if state.probe == nil && !state.at.After(now) {
-		state = persistentRouteBackoff{}
-	}
 	state.failures = min(state.failures+1, 6)
 	base := time.Second << (state.failures - 1)
 	wait := min(30*time.Second, base+rand.N(base/4+1))
