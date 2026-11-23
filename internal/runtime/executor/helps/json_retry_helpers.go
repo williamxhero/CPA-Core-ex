@@ -54,21 +54,10 @@ func ParseGoogleRetryAfter(statusCode int, headers http.Header, errorBody []byte
 // ParseAntigravityRecovery trusts only one HTTP Retry-After field or typed
 // RetryInfo. The later valid time wins.
 func ParseAntigravityRecovery(headers http.Header, body []byte, now time.Time) (time.Time, string) {
-	var at time.Time
+	at := ParseStrictRetryAfter(headers, now)
 	source := ""
-	if values := headers.Values("Retry-After"); len(values) == 1 {
-		raw := strings.TrimSpace(values[0])
-		if decimalRetryDigits(raw) {
-			n, err := strconv.ParseUint(raw, 10, 64)
-			if err == nil && n <= uint64(math.MaxInt64/int64(time.Second)) {
-				at = now.Add(time.Duration(n) * time.Second)
-			}
-		} else if date, err := http.ParseTime(raw); err == nil && !date.Before(now) {
-			at = date
-		}
-		if !at.IsZero() {
-			source = "retry_after"
-		}
+	if !at.IsZero() {
+		source = "retry_after"
 	}
 	for _, detail := range ojson.GetBytesNoCopy(body, "error.details").Array() {
 		if detail.Get("@type").String() != "type.googleapis.com/google.rpc.RetryInfo" {
@@ -97,6 +86,24 @@ func ParseAntigravityRecovery(headers http.Header, body []byte, now time.Time) (
 		}
 	}
 	return at, source
+}
+
+// ParseStrictRetryAfter accepts a single unsigned delta or HTTP date.
+func ParseStrictRetryAfter(headers http.Header, now time.Time) time.Time {
+	values := headers.Values("Retry-After")
+	if len(values) != 1 {
+		return time.Time{}
+	}
+	raw := strings.TrimSpace(values[0])
+	if decimalRetryDigits(raw) {
+		n, err := strconv.ParseUint(raw, 10, 64)
+		if err == nil && n <= uint64(math.MaxInt64/int64(time.Second)) {
+			return now.Add(time.Duration(n) * time.Second)
+		}
+	} else if date, err := http.ParseTime(raw); err == nil && !date.Before(now) {
+		return date
+	}
+	return time.Time{}
 }
 
 func decimalRetryDigits(s string) bool {

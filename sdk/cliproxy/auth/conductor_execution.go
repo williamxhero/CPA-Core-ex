@@ -1952,6 +1952,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			models = models[:1]
 			pooled = false
 		}
+		if routeReservation != nil && routeReservation.persistentRoute != "" {
+			execCtx = context.WithValue(execCtx, persistentReservationKey{}, routeReservation)
+		}
 		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, execOpts, routeModel, streamExecutionModel, models, pooled, aliasResult, routing, !homeMode || selection != nil, selection != nil)
 		if errStream != nil {
 			noteStreamReplayExcludedAuth(ctx, auth.ID)

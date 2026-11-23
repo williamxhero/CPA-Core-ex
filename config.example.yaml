@@ -191,7 +191,11 @@ routing:
   #   mode: off               # off (default), shadow, enforce
   #   models: ["example-model"]
   #   callers: ["example-caller"]
-  #   max-active-wait: "3s"   # 0s disables waiting; this is not a generation timeout.
+  #   max-active-wait: "3s"   # 0s disables ordinary scheduler waits.
+  #   persistent-retry-models: ["gpt-6.2-sol"]  # Optional pilot, default empty.
+  # The pilot requires enforce mode and an exact model match on Chat Completions or
+  # Responses SSE through Codex HTTP. Safe transient recovery follows the client's
+  # lifetime and retry.upstream-error-retry-limit. Remove the list to roll back.
   strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.

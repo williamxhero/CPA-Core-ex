@@ -10,6 +10,7 @@ Core 负责请求路由、协议转换、接入调度与推理门禁。配合 CP
 - 已确认的额度或余额耗尽由 Core 自动暂停：只阻断证据覆盖的接入、模型或钱包成员；后台拿到同一范围的最新有效证据才恢复。普通限流和运营低余额保护仍分别处理。
 - 同一模型有多个接入时，可在配置的 `routing.provider-scheduling` 按模型或调用方启用统一调度。可先设 `shadow` 对照决策，再设 `enforce` 启用；默认关闭。
 - 流已交付文本或工具调用，或无法确认可以安全重放时，不再透明切换接入。
+- `routing.provider-scheduling.persistent-retry-models: [gpt-6.2-sol]` 是默认关闭的本机试点。它只在 `mode: enforce` 且请求符合调度范围时生效，覆盖通过 Codex HTTP SSE 执行的 `/v1/chat/completions` 和 `/v1/responses` 流式请求。移除该列表即可恢复原策略。请求如携带或被注入可能在上游执行的工具，失败后不会透明重放。
 
 需要 Go 1.26 或更高。在仓库根目录执行：
 
@@ -20,6 +21,12 @@ go build -o cli-proxy-api.exe ./cmd/server
 ```
 
 本项目运行在本机 Windows。正式替换使用父项目的 `ops/deploy-local-cpa-core.ps1`，由脚本备份、重启、检查就绪状态，并在失败时自动回退。
+
+## gpt-6.2-sol 持续重试试点
+
+`routing.retry.upstream-error-retry-limit` 控制一笔试点请求真实发出的追加请求数。`0` 不追加，正数为上限，`-1` 允许安全重放的暂时失败持续恢复。调度先试合格且可用的备用路线。需要等待暂时失败的 Codex 路线恢复时，遵守可信 `Retry-After` 和调用方取消或期限；原交互等待上限仍适用于其他路径。没有合格路线且尚未实发时返回 `503/no_available_route`。
+
+用响应的 `X-Request-ID` 在受保护的路由诊断中查看实发数、累计等待、上游类别及停止原因。配置示例见 [config.example.yaml](config.example.yaml)。
 
 ## Fork 功能记录
 

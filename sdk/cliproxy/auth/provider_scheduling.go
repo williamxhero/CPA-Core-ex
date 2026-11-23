@@ -79,6 +79,7 @@ type scheduledCandidate struct {
 	auth              *Auth
 	owner             string
 	model             string
+	routeID           string
 	exec              ProviderExecutor
 	limits            []schedulingLimit
 	reasons           []string
@@ -211,10 +212,10 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		if !allowsRouteFunding(cfg, caller, schedulingPolicy(cfg, a).Funding) {
 			c.reasons = append(c.reasons, "funding_ineligible")
 		}
-		routeID := m.scheduledRouteIdentity(a, model)
+		c.routeID = m.scheduledRouteIdentity(a, model)
 		_, excludeByAuth := tried[a.ID]
-		_, excludeByIdentity := tried[routeID]
-		_, excludeByDuplicate := excludedRoutes[routeID]
+		_, excludeByIdentity := tried[c.routeID]
+		_, excludeByDuplicate := excludedRoutes[c.routeID]
 		if excludeByAuth || excludeByIdentity || excludeByDuplicate || scheduledAntigravityExcludes(ctx, a.ID, c.owner) {
 			c.reasons = append(c.reasons, "request_excluded")
 		}
@@ -282,9 +283,22 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		}
 		cfg := m.runtimeConfigSnapshot()
 		candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, m.getContinuityClock().Now())
+		persistent := PersistentRetryPilot(ctx)
+		now := m.getContinuityClock().Now()
 		u := &m.providerSchedulingUse
 		u.mu.Lock()
-		available, byID := m.scheduledAvailable(candidates, model)
+		if persistent {
+			for i := range candidates {
+				c := &candidates[i]
+				if c.owner != "codex" || len(c.reasons) != 0 {
+					continue
+				}
+				if state := u.backoff[c.routeID]; state.probe != nil || state.at.After(now) {
+					c.reasons = append(c.reasons, "cooldown")
+				}
+			}
+		}
+		available, byID := m.scheduledAvailable(candidates)
 		report := func(selected *Auth) {
 			if wantsSchedulingDecision(ctx) {
 				decision := m.schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected, scheduledHardAffinity(selector, model, opts))
@@ -326,14 +340,24 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			u.mu.Unlock()
 			return nil, nil, "", errCtx
 		}
-		if len(c.limits) > 0 {
+		persistentCodex := persistent && c.owner == "codex"
+		if len(c.limits) > 0 || persistentCodex {
 			if u.counts == nil {
 				u.counts = make(map[string]int)
 			}
 			for _, limit := range c.limits {
 				u.counts[limit.id]++
 			}
-			opts.Metadata[routeReservationMetadata] = &routeReservation{manager: m, limits: c.limits}
+			r := &routeReservation{manager: m, limits: c.limits}
+			if persistentCodex {
+				r.persistentRoute = c.routeID
+				if state, exists := u.backoff[c.routeID]; exists {
+					state.probe = r
+					u.backoff[c.routeID] = state
+					r.probeAt = state.at
+				}
+			}
+			opts.Metadata[routeReservationMetadata] = r
 		}
 		m.mu.RUnlock()
 		u.mu.Unlock()
@@ -344,7 +368,7 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 
 // Caller holds the reservation lock. Mark capacity and deduplication reasons
 // on the same exact pool the selector receives.
-func (m *Manager) scheduledAvailable(candidates []scheduledCandidate, model string) ([]*Auth, map[string]scheduledCandidate) {
+func (m *Manager) scheduledAvailable(candidates []scheduledCandidate) ([]*Auth, map[string]scheduledCandidate) {
 	available := make([]*Auth, 0, len(candidates))
 	byID := make(map[string]scheduledCandidate, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
@@ -362,7 +386,7 @@ func (m *Manager) scheduledAvailable(candidates []scheduledCandidate, model stri
 		if len(candidate.reasons) > 0 {
 			continue
 		}
-		key := m.scheduledRouteIdentity(candidate.auth, model)
+		key := candidate.routeID
 		if _, duplicate := seen[key]; duplicate {
 			candidate.reasons = append(candidate.reasons, "duplicate_route")
 			continue

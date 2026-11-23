@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"sort"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
@@ -186,6 +188,30 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 	return newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling), body, true
 }
 
+func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHeaders http.Header, body []byte) statusErr {
+	if !cliproxyauth.PersistentRetryPilot(ctx) || err.credentialScoped || err.persistentQuotaGate || isCodexUsageLimitError(body) {
+		return err
+	}
+	// An HTTP 429 alone is not evidence that a funding source is exhausted.
+	// Keep the structured quota cases on their existing paths.
+	code := ojson.GetBytesNoCopy(body, "error.code").String()
+	kind := ojson.GetBytesNoCopy(body, "error.type").String()
+	if err.code == http.StatusTooManyRequests && clienterror.Classify(err.code, code+" "+kind) != clienterror.FailureQuotaExhausted {
+		err.transientRateLimit = true
+	}
+	err.retryAfter = codexPilotRetryAfter(ctx, headers, eventHeaders)
+	return err
+}
+
+func codexPilotRetryAfter(ctx context.Context, headers, eventHeaders http.Header) *time.Duration {
+	now := cliproxyauth.RequestBudgetNow(ctx)
+	wait := max(helps.ParseStrictRetryAfter(headers, now).Sub(now), helps.ParseStrictRetryAfter(eventHeaders, now).Sub(now))
+	if wait <= 0 {
+		return nil
+	}
+	return &wait
+}
+
 func codexTerminalFailureStatus(body []byte) int {
 	for _, path := range []string{"error.status_code", "error.status", "status_code", "status"} {
 		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
@@ -248,7 +274,7 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	if doc == nil {
 		doc = ojson.NewDocString(`{"error":{"message":"upstream stream failed without error details"}}`)
 	}
-	for _, statusPath := range []string{"status_code", "status", "body.status_code", "body.status"} {
+	for _, statusPath := range []string{"status_code", "status", "response.status_code", "response.status", "body.status_code", "body.status"} {
 		if status := int(ojson.GetBytesNoCopy(eventData, statusPath).Int()); status >= 400 && status <= 599 {
 			_ = doc.Set("status", status)
 			break

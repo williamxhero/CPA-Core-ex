@@ -105,14 +105,15 @@ func validateStreamResult(result *cliproxyexecutor.StreamResult, err error) (*cl
 }
 
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
-	return readStreamBootstrapWithTimeout(ctx, ch, 0)
+	return readStreamBootstrapWithTimeout(ctx, ch, 0, false)
 }
 
-func readStreamBootstrapWithTimeout(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, timeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
+func readStreamBootstrapWithTimeout(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, timeout time.Duration, holdPreamble bool) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
+	var bufferedBytes int
 	var timer *time.Timer
 	var timeoutCh <-chan time.Time
 	if timeout > 0 {
@@ -151,10 +152,21 @@ func readStreamBootstrapWithTimeout(ctx context.Context, ch <-chan cliproxyexecu
 			}
 		}
 		if !ok {
+			if holdPreamble {
+				return nil, true, nil
+			}
 			return buffered, true, nil
 		}
 		if chunk.Err != nil {
 			return nil, false, chunk.Err
+		}
+		if holdPreamble && !streamPayloadCommitsOutput(chunk.Payload) {
+			bufferedBytes += len(chunk.Payload)
+			if bufferedBytes >= defaultStreamRecoveryBufferLimit || len(buffered) >= 256 {
+				return nil, false, &Error{Code: "stream_recovery_buffer_limit", Message: "stream startup exceeded buffering limit", HTTPStatus: http.StatusInsufficientStorage}
+			}
+			buffered = append(buffered, chunk)
+			continue
 		}
 		buffered = append(buffered, chunk)
 		if len(chunk.Payload) > 0 {
@@ -179,7 +191,7 @@ func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth
 	result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(err), Options: opts, RetryAfter: retryAfter, AccessToken: authAccessTokenForRequest(ctx, auth, opts.Headers), CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 	result.CredentialScope = isCredentialScopedError(err)
 	applyRequestScopedActionToResult(action, okAction, &result)
-	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
+	m.recordPilotStreamResult(context.WithoutCancel(ctx), result, auth, ephemeral, err, okAction)
 }
 
 func (m *Manager) streamBootstrapTimeout() time.Duration {
@@ -376,7 +388,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			result.RetryAfter = retryAfterFromError(err)
 			result.CredentialScope = isCredentialScopedError(err)
 			applyRequestScopedActionToResult(action, okAction, &result)
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, err, okAction)
 		}
 		retryable := func(err error) bool {
 			activeReplay := streamReplayCoordinatorFromContext(ctx)
@@ -387,7 +399,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				return false
 			}
 			if RequestBudgetEnforced(ctx) {
-				return scheduledUpstreamTransient(err)
+				// Pilot startup is already resolved by the scheduler before this
+				// wrapper is created. A later error terminates this stream.
+				return !pilotCodex(ctx, provider) && scheduledUpstreamTransient(err)
 			}
 			if statusCodeFromError(err) == http.StatusInsufficientStorage {
 				var authErr *Error
@@ -475,6 +489,9 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 				err = markUpstreamExecutionAttemptFromContext(ctx, err)
 			}
 			recordFailure(err)
+			if pilotCodex(ctx, provider) && deliveredAny {
+				requestBudgetFromContext(ctx).setRetryStop("output_committed")
+			}
 			activeReplay := streamReplayCoordinatorFromContext(ctx)
 			if activeReplay == nil {
 				activeReplay = replay
@@ -595,7 +612,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 			}
 			failed = true
 			logRecovery("stream_recovery_stop", "terminal_error", err)
-			if holdUntilComplete {
+			if holdUntilComplete || pilotCodex(ctx, provider) {
 				discardPending()
 			} else if len(pending) > 0 {
 				if shouldDeferUnbufferedBootstrapFlush(activeReplay, m) {
@@ -848,6 +865,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		if !failed && !replayed && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true, CompletedResponse: sawCompleted && !sawIncomplete, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}, auth, ephemeralResult)
+			if sawCompleted && !sawIncomplete {
+				reservation, _ := ctx.Value(persistentReservationKey{}).(*routeReservation)
+				reservation.completePersistentProbe()
+			}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}
@@ -1106,7 +1127,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	didRefreshOnUnauthorized := false
 	readBootstrap := func(attemptCtx context.Context, cancelAttempt context.CancelFunc, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
 		timeout := m.streamBootstrapTimeout()
-		buffered, closed, errBootstrap := readStreamBootstrapWithTimeout(attemptCtx, ch, timeout)
+		buffered, closed, errBootstrap := readStreamBootstrapWithTimeout(attemptCtx, ch, timeout, pilotCodex(ctx, provider))
 		var timeoutErr *Error
 		if errors.As(errBootstrap, &timeoutErr) && timeoutErr != nil && timeoutErr.Code == "stream_bootstrap_timeout" {
 			cancelAttempt()
@@ -1205,7 +1226,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				result.CredentialScope = true
 			}
 			applyRequestScopedActionToResult(action, okAction, &result)
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, errStream, okAction)
 			errStream = annotateTrustedRetryAfterByHint(errStream)
 			syncPreferredUpstreamError(&upstreamErr, errStream)
 			if okAction {
@@ -1308,7 +1329,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					result.CredentialScope = true
 				}
 				applyRequestScopedActionToResult(action, okAction, &result)
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, bootstrapErr, true)
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
@@ -1361,7 +1382,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if isCredentialScopedError(bootstrapErr) {
 				result.CredentialScope = true
 			}
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, bootstrapErr, false)
 			bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 			bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			syncPreferredUpstreamError(&upstreamErr, bootstrapErr)

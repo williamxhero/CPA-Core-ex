@@ -27,19 +27,22 @@ type RoutingTerminal struct {
 }
 
 type RoutingTrace struct {
-	RequestID       string               `json:"request_id"`
-	Model           string               `json:"model"`
-	Mode            string               `json:"mode"`
-	StartedAt       time.Time            `json:"started_at"`
-	Stages          []SchedulingDecision `json:"stages"`
-	OmittedStages   int                  `json:"omitted_stages,omitempty"`
-	SendCount       int                  `json:"send_count"`
-	Round           int                  `json:"round"`
-	RoundSends      int                  `json:"round_sends"`
-	WaitMS          int64                `json:"wait_ms"`
-	OutputCommitted bool                 `json:"output_committed"`
-	ReplayUnsafe    bool                 `json:"replay_unsafe"`
-	Terminal        *RoutingTerminal     `json:"terminal,omitempty"`
+	RequestID           string               `json:"request_id"`
+	Model               string               `json:"model"`
+	Mode                string               `json:"mode"`
+	StartedAt           time.Time            `json:"started_at"`
+	Stages              []SchedulingDecision `json:"stages"`
+	OmittedStages       int                  `json:"omitted_stages,omitempty"`
+	SendCount           int                  `json:"send_count"`
+	Round               int                  `json:"round"`
+	RoundSends          int                  `json:"round_sends"`
+	WaitMS              int64                `json:"wait_ms"`
+	OutputCommitted     bool                 `json:"output_committed"`
+	ReplayUnsafe        bool                 `json:"replay_unsafe"`
+	UpstreamCategory    string               `json:"upstream_category,omitempty"`
+	UpstreamRetrySource string               `json:"upstream_retry_source,omitempty"`
+	RetryStopReason     string               `json:"retry_stop_reason,omitempty"`
+	Terminal            *RoutingTerminal     `json:"terminal,omitempty"`
 }
 
 type routingTraceStore struct {
@@ -212,6 +215,9 @@ func updateRoutingAccounting(t *routingTrace, accounting RequestBudgetSnapshot) 
 	t.data.SendCount, t.data.Round, t.data.RoundSends = accounting.Attempts, accounting.Round, accounting.RoundAttempts
 	t.data.WaitMS = accounting.ActiveWait.Milliseconds()
 	t.data.OutputCommitted, t.data.ReplayUnsafe = accounting.OutputCommitted, accounting.ReplayUnsafe
+	t.data.UpstreamCategory = accounting.UpstreamCategory
+	t.data.UpstreamRetrySource = accounting.UpstreamRetrySource
+	t.data.RetryStopReason = accounting.RetryStopReason
 }
 
 func FinishRoutingTrace(ctx context.Context, status int, err error) {

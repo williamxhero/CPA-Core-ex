@@ -204,7 +204,7 @@ func (m *Manager) schedulingSnapshot(ctx context.Context, providers []string, mo
 	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, m.getContinuityClock().Now())
 	bound := scheduledHardAffinity(selector, model, opts)
 	m.providerSchedulingUse.mu.Lock()
-	available, _ := m.scheduledAvailable(candidates, model)
+	available, _ := m.scheduledAvailable(candidates)
 	m.providerSchedulingUse.mu.Unlock()
 	view := m.schedulingView(m.providerSchedulingMode(ctx, model), model, candidates, nil, bound)
 	if bound != "" {

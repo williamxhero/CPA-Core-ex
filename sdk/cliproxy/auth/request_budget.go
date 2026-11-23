@@ -45,6 +45,7 @@ type RequestBudgetSnapshot struct {
 	UpstreamRetrySource string
 	ServedModel         string
 	UpstreamDecision    string
+	RetryStopReason     string
 }
 
 type requestBudget struct {
@@ -52,6 +53,8 @@ type requestBudget struct {
 	mu    sync.Mutex
 	RequestBudgetSnapshot
 	enforced            bool
+	persistentRetry     bool
+	persistentLimit     int
 	waiting             bool
 	deadline            time.Time
 	configuredWait      time.Duration
@@ -153,6 +156,7 @@ func (m *Manager) setupRequestBudget(ctx context.Context, req executor.Request, 
 		_, b.maxCredentials, _ = m.retrySettings()
 		b.configuredWait = m.runtimeConfigSnapshot().ProviderSchedulingWait()
 		b.now = m.getContinuityClock().Now
+		b.persistentLimit, b.persistentRetry = m.persistentRetryLimit(ctx, req, opts)
 	}
 	return ctx, opts
 }
@@ -271,7 +275,13 @@ func bindBusinessInferenceBudget(ctx context.Context, auth *Auth, routeIdentity 
 		if err := sendCtx.Err(); err != nil {
 			return err
 		}
+		if b.persistentRetry && b.Attempts > 0 && !b.deadline.IsZero() && !b.now().Before(b.deadline) {
+			return context.DeadlineExceeded
+		}
 		if b.enforced {
+			if b.persistentRetry && b.persistentLimit >= 0 && b.Attempts > b.persistentLimit {
+				return errBudgetCredentialLimit
+			}
 			if auth == nil {
 				// An unbound plugin cannot prove it is a different upstream
 				// platform after the protected Antigravity rejection.
@@ -405,6 +415,8 @@ type scheduledRetryOpportunity struct {
 	at                   time.Time
 	changed              <-chan struct{}
 	antigravityShortWait bool
+	persistentWait       bool
+	probePending         bool
 }
 
 func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity scheduledRetryOpportunity, singleLimit time.Duration) (bool, error) {
@@ -415,17 +427,18 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	if opportunity.ready {
 		return true, nil
 	}
-	if opportunity.at.IsZero() || !budgetCanRepeat(ctx) {
+	if (opportunity.at.IsZero() && !(opportunity.persistentWait && opportunity.probePending)) || !budgetCanRepeat(ctx) {
 		return false, nil
 	}
 	clock := m.getContinuityClock()
 	start := clock.Now()
 	wait := opportunity.at.Sub(start)
-	if wait <= 0 {
+	if !opportunity.at.IsZero() && wait <= 0 {
 		return !opportunity.antigravityShortWait, nil
 	}
 	b.mu.Lock()
-	if b.waiting || (opportunity.antigravityShortWait && b.antigravityWaitUsed) || wait > singleLimit || wait > b.configuredWait-b.ActiveWait {
+	if b.waiting || (opportunity.antigravityShortWait && b.antigravityWaitUsed) ||
+		(!opportunity.persistentWait && (wait > singleLimit || wait > b.configuredWait-b.ActiveWait)) {
 		b.mu.Unlock()
 		return false, nil
 	}
@@ -441,7 +454,17 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	b.mu.Unlock()
 	executor.NotifyContinuityWaitStart(ctx)
 	defer executor.NotifyContinuityWaitEnd(ctx)
-	err := waitForRecoverySignal(ctx, clock, wait, opportunity.changed)
+	var err error
+	if opportunity.at.IsZero() {
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-opportunity.changed:
+			err = ctx.Err()
+		}
+	} else {
+		err = waitForRecoverySignal(ctx, clock, wait, opportunity.changed)
+	}
 	elapsed := clock.Now().Sub(start)
 	b.mu.Lock()
 	b.ActiveWait += max(0, elapsed)
@@ -506,15 +529,25 @@ func (m *Manager) scheduledOpportunity(ctx context.Context, providers []string, 
 		}
 		return scheduledRetryOpportunity{}
 	}
-	ready, next, changed := m.scheduledNextAvailability(ctx, providers, model, opts, excluded, now)
-	return scheduledRetryOpportunity{ready: ready, at: next, changed: changed}
+	ready, next, changed, probePending := m.scheduledNextAvailability(ctx, providers, model, opts, excluded, now)
+	return scheduledRetryOpportunity{ready: ready, at: next, changed: changed, probePending: probePending}
 }
 
 type scheduledExecution[T any] func(context.Context, executor.Options, int, int, *int) (T, error)
 
-func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []string, req executor.Request, opts executor.Options, prior error, execute scheduledExecution[T]) (T, error) {
+func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []string, req executor.Request, opts executor.Options, prior error, execute scheduledExecution[T]) (_ T, finalErr error) {
 	var zero T
 	b := requestBudgetFromContext(ctx)
+	if b.persistentRetry {
+		defer func() {
+			switch {
+			case errors.Is(finalErr, context.Canceled):
+				b.setRetryStop("canceled")
+			case errors.Is(finalErr, context.DeadlineExceeded):
+				b.setRetryStop("deadline_exceeded")
+			}
+		}()
+	}
 	defaultRetry, maxCredentials, maxWait := m.retrySettings()
 	roundLimit := defaultRetry
 	if upstream := m.configuredUpstreamErrorRetryLimit(); upstream == -1 {
@@ -534,6 +567,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 	}
 	first := true
+	persistentRoundPending := false
 	homeWaitedAfter := -1
 	roundCause := prior
 	for {
@@ -542,6 +576,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		s, _ := RequestBudgetSnapshotFromContext(ctx)
 		if !budgetCanRepeat(ctx) {
+			b.setRetryStop("replay_unsafe")
 			if previous != nil {
 				return zero, previous
 			}
@@ -559,6 +594,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				return zero, ctx.Err()
 			}
 			if isRequestInvalidError(err) || isRequestTerminatedError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
+				b.setRetryStop("non_transient_failure")
 				return zero, err
 			}
 			// Keep the best actual upstream result for the public
@@ -570,7 +606,16 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			if hasUpstreamExecutionAttempt(err) || roundCause == nil {
 				roundCause = err
 			}
+			if persistentRoundPending {
+				persistentRoundPending = false
+				after, _ := RequestBudgetSnapshotFromContext(ctx)
+				if after.Attempts == s.Attempts && m.scheduledOpportunity(ctx, providers, model, opts, nil, roundCause).ready {
+					b.setRetryStop("no_recovery_route")
+					break
+				}
+			}
 			if !budgetCanRepeat(ctx) {
+				b.setRetryStop("replay_unsafe")
 				return zero, previous
 			}
 			attempted = b.credentialSnapshot()
@@ -633,6 +678,69 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				return zero, retryErr
 			}
 			return zero, scheduledAntigravityTerminal(ctx, facts)
+		}
+		current, _ := RequestBudgetSnapshotFromContext(ctx)
+		if b.persistentRetry && current.Attempts == 0 {
+			b.setRetryStop("no_available_route")
+			break
+		}
+		if b.persistentRetry && (current.UpstreamCategory == "transient_upstream" || current.UpstreamCategory == "transient_rate_limit") {
+			if b.persistentLimit >= 0 && current.Attempts > b.persistentLimit {
+				b.setRetryStop("retry_limit")
+				break
+			}
+			if !persistentTransient(roundCause) {
+				b.setRetryStop("non_transient_failure")
+				break
+			}
+			// A full per-round route cap must not make a previously tried
+			// route beat an available untried route. Charge the new round at send.
+			if !room && m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
+				alternate := &scheduledAlternateRound{from: s.Round, excluded: attempted}
+				alternateCtx := context.WithValue(ctxRound, scheduledAlternateRoundKey{}, alternate)
+				result, alternateErr := execute(alternateCtx, withAttemptedAuthTracker(opts, make(map[string]struct{})), s.Round+1, roundLimit, &homeLimit)
+				if alternateErr == nil {
+					return result, nil
+				}
+				if ctx.Err() != nil {
+					return zero, ctx.Err()
+				}
+				if isRequestInvalidError(alternateErr) || isRequestTerminatedError(alternateErr) || isRequestStopError(alternateErr) || isSchedulerRejectError(alternateErr) {
+					b.setRetryStop("non_transient_failure")
+					return zero, alternateErr
+				}
+				if after, _ := RequestBudgetSnapshotFromContext(ctx); after.Attempts > current.Attempts {
+					previous, roundCause = alternateErr, alternateErr
+					first = false
+					continue
+				}
+			}
+			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, nil, roundCause)
+			opportunity.persistentWait = true
+			proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
+			if err != nil {
+				return zero, err
+			}
+			if !proceed {
+				if !opportunity.at.IsZero() {
+					b.setRetryStop("deadline_before_recovery")
+				} else {
+					b.setRetryStop("no_recovery_route")
+				}
+				break
+			}
+			// Recheck availability after a wake without discarding the failure
+			// that authorizes the wait. A competing request may have the probe.
+			if !opportunity.ready {
+				continue
+			}
+			if !b.nextRound(s.Round) {
+				break
+			}
+			// Keep the real error if another request wins the reservation.
+			persistentRoundPending = true
+			first = true
+			continue
 		}
 		if room {
 			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, attempted, roundCause)

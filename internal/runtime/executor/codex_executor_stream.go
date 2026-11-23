@@ -130,6 +130,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	body = upstreamBody
+	cliproxyauth.ObservePilotReplayPayload(ctx, upstreamBody)
 	upstreamModel := strings.TrimSpace(doc.Get("model").String())
 	if upstreamModel != "" && upstreamModel != baseModel {
 		reporter.SetUpstreamModel(upstreamModel)
@@ -165,7 +166,14 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
+	pilot := cliproxyauth.PersistentRetryPilot(ctx)
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
+	// Count raw startup lines even when the translator emits nothing for them.
+	pilotStartup := pilot
+	pilotLines, pilotBytes := 0, 0
+	startupLimit := func() error {
+		return &cliproxyauth.Error{Code: "stream_recovery_buffer_limit", Message: "stream startup exceeded buffering limit", HTTPStatus: http.StatusInsufficientStorage}
+	}
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
 	if buffering {
@@ -197,8 +205,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			return nil, errClearReplay
 		}
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = e.codexHTTPBusinessError(ctx, auth, httpResp, data, upstreamBody, baseModel)
-		return nil, err
+		businessErr := e.codexHTTPBusinessError(ctx, auth, httpResp, data, upstreamBody, baseModel)
+		return nil, codexPilotFailureFacts(ctx, businessErr, httpResp.Header, nil, data)
 	}
 
 	bufferedFrames := 0
@@ -209,9 +217,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	scanner := helps.NewCodexSSEScanner(ctx, httpResp.Body, 52_428_800) // 50MB
 	scanner.SetOnLine(func(rawLine []byte) {
 		helps.AppendAPIResponseChunk(ctx, e.cfg, rawLine)
+		if pilotStartup {
+			pilotLines++
+			pilotBytes += len(rawLine)
+		}
 	})
-	if buffering {
+	pilotCapReached := func() bool {
+		return pilotStartup && (pilotLines > codexBootstrapMaxBufferedFrames || pilotBytes > codexBootstrapMaxBufferedBytes)
+	}
+	if buffering || pilot {
 		scanner.SetBudgetChecker(func(line []byte, heldLines, heldBytes int) bool {
+			if pilotCapReached() {
+				return true
+			}
+			if !buffering {
+				return false
+			}
 			timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 			if bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout {
 				budgetExhausted = true
@@ -270,6 +291,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	sawOutputDelta := false
 	if buffering {
 		for scanner.Scan() {
+			if pilotCapReached() {
+				closeBootstrapBody()
+				return nil, startupLimit()
+			}
 			if bootstrapTimedOut.Load() {
 				closeBootstrapBody()
 				errTimeout := newCodexBootstrapTimeoutError()
@@ -286,6 +311,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				return nil, errTimeout
 			}
 			if budgetExhausted {
+				if pilot {
+					closeBootstrapBody()
+					return nil, startupLimit()
+				}
 				helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap %s exhausted after %d lines / %d bytes / %v, releasing stream without overload probing", exhaustedReason, bufferedFrames, bufferedBytes, nowCodexBootstrap().Sub(bootstrapStart))
 				initialChunks = nil
 				streamStarted = true
@@ -305,6 +334,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				translatedLine = append([]byte("data: "), data...)
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+					if pilot {
+						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody)
+					}
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -313,6 +345,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
+					if pilot {
+						return nil, streamErr
+					}
 					if isCodexOverloadBootstrapFailure(terminalBody) {
 						timeSinceStart := nowCodexBootstrap().Sub(bootstrapStart)
 						timeoutReached := bootstrapTimeout > 0 && timeSinceStart >= bootstrapTimeout
@@ -351,6 +386,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				}
 				if isCodexBootstrapBufferableEvent(eventType, data) {
 					isHandshake = true
+				} else if pilotStartup {
+					cliproxyauth.ObservePilotCodexOutput(ctx, eventType, data)
 				}
 				switch eventType {
 				case "response.output_item.done":
@@ -408,9 +445,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				} else {
 					exhausted = "byte budget"
 				}
+				if pilot {
+					closeBootstrapBody()
+					return nil, startupLimit()
+				}
 				helps.LogWithRequestID(ctx).Debugf("codex executor: bootstrap %s exhausted after %d lines / %d bytes / %v, releasing stream without overload probing", exhausted, bufferedFrames, bufferedBytes, timeSinceStart)
 			}
 
+			if !isHandshake || terminalSuccess {
+				pilotStartup = false
+			}
 			initialChunks = chunks
 			streamStarted = true
 			if terminalSuccess {
@@ -418,7 +462,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			break
 		}
-		scanner.SetBudgetChecker(nil)
+		if !pilotStartup {
+			scanner.SetBudgetChecker(nil)
+		}
 
 		if !streamStarted && bootstrapTerminalErr == nil {
 			closeBootstrapBody()
@@ -502,6 +548,15 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}()
 		for scanner.Scan() {
+			if pilotCapReached() {
+				errLimit := startupLimit()
+				reporter.PublishFailure(ctx, errLimit)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errLimit}:
+				case <-ctx.Done():
+				}
+				return
+			}
 			line := scanner.Bytes()
 			var translatedLine []byte
 			terminalSuccess := false
@@ -516,6 +571,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				translatedLine = append([]byte("data: "), data...)
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
+					if pilot {
+						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody)
+					}
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
@@ -532,6 +590,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					case <-ctx.Done():
 					}
 					return
+				}
+				if pilotStartup && !isCodexBootstrapBufferableEvent(eventType, data) {
+					pilotStartup = false
+					scanner.SetBudgetChecker(nil)
+					// The Chat translator can drop events for upstream tool execution.
+					cliproxyauth.ObservePilotCodexOutput(ctx, eventType, data)
 				}
 				if helps.HasMeaningfulCodexOutputDelta(data) {
 					sawOutputDelta = true

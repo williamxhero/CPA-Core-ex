@@ -19,8 +19,9 @@ type schedulingLimit struct {
 }
 
 type providerSchedulingUse struct {
-	mu     sync.Mutex
-	counts map[string]int
+	mu      sync.Mutex
+	counts  map[string]int
+	backoff map[string]persistentRouteBackoff
 }
 
 type providerSchedulingWake struct {
@@ -71,9 +72,23 @@ func (u *providerSchedulingUse) available(limits []schedulingLimit) bool {
 }
 
 type routeReservation struct {
-	once    sync.Once
-	manager *Manager
-	limits  []schedulingLimit
+	once            sync.Once
+	manager         *Manager
+	limits          []schedulingLimit
+	persistentRoute string
+	probeAt         time.Time
+}
+
+func (r *routeReservation) completePersistentProbe() {
+	if r == nil || r.probeAt.IsZero() {
+		return
+	}
+	u := &r.manager.providerSchedulingUse
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if state := u.backoff[r.persistentRoute]; state.probe == r && state.at.Equal(r.probeAt) {
+		delete(u.backoff, r.persistentRoute)
+	}
 }
 
 const routeReservationMetadata = "_cpa_route_reservation"
@@ -96,6 +111,10 @@ func (r *routeReservation) release() {
 			if u.counts[limit.id] == 0 {
 				delete(u.counts, limit.id)
 			}
+		}
+		if state := u.backoff[r.persistentRoute]; state.probe == r {
+			state.probe = nil
+			u.backoff[r.persistentRoute] = state
 		}
 		u.mu.Unlock()
 		r.manager.providerSchedulingWake.signal()
@@ -165,28 +184,43 @@ func (m *Manager) scheduledRouteIdentity(auth *Auth, routeModel string) string {
 }
 
 // scheduledNextAvailability never picks, reserves, or updates selector state.
-func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) (bool, time.Time, <-chan struct{}) {
+func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) (bool, time.Time, <-chan struct{}, bool) {
 	changed := m.providerSchedulingWake.watch()
 	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
 	hardBinding := scheduledHardAffinity(selector, model, opts)
+	persistent := PersistentRetryPilot(ctx)
 	m.providerSchedulingUse.mu.Lock()
 	defer m.providerSchedulingUse.mu.Unlock()
 	var next time.Time
+	var probePending bool
 	for _, c := range candidates {
 		if hardBinding != "" && c.auth.ID != hardBinding {
 			continue
+		}
+		if persistent && c.owner == "codex" && len(c.reasons) == 0 {
+			state := m.providerSchedulingUse.backoff[c.routeID]
+			if state.probe != nil {
+				probePending = true
+				continue
+			}
+			if state.at.After(now) {
+				if next.IsZero() || state.at.Before(next) {
+					next = state.at
+				}
+				continue
+			}
 		}
 		if !m.providerSchedulingUse.available(c.limits) {
 			continue
 		}
 		if len(c.reasons) == 0 {
-			return true, time.Time{}, changed
+			return true, time.Time{}, changed, false
 		}
 		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (next.IsZero() || c.retryAt.Before(next)) {
 			next = c.retryAt
 		}
 	}
-	return false, next, changed
+	return false, next, changed, probePending
 }
 
 func scheduledHardAffinity(selector Selector, model string, opts cliproxyexecutor.Options) string {

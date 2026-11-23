@@ -22,13 +22,14 @@ type ProviderSchedulingResource struct {
 
 // ProviderSchedulingConfig scopes rollout of the unified request scheduler.
 type ProviderSchedulingConfig struct {
-	Resources      map[string]ProviderSchedulingResource `yaml:"resources,omitempty" json:"resources,omitempty"`
-	AllowedFunding []string                              `yaml:"allowed-funding,omitempty" json:"allowed-funding,omitempty"`
-	CallerFunding  map[string][]string                   `yaml:"caller-funding,omitempty" json:"caller-funding,omitempty"`
-	Mode           string                                `yaml:"mode,omitempty" json:"mode,omitempty"`
-	Models         []string                              `yaml:"models,omitempty" json:"models,omitempty"`
-	Callers        []string                              `yaml:"callers,omitempty" json:"callers,omitempty"`
-	MaxActiveWait  string                                `yaml:"max-active-wait,omitempty" json:"max-active-wait,omitempty"`
+	Resources             map[string]ProviderSchedulingResource `yaml:"resources,omitempty" json:"resources,omitempty"`
+	AllowedFunding        []string                              `yaml:"allowed-funding,omitempty" json:"allowed-funding,omitempty"`
+	CallerFunding         map[string][]string                   `yaml:"caller-funding,omitempty" json:"caller-funding,omitempty"`
+	Mode                  string                                `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Models                []string                              `yaml:"models,omitempty" json:"models,omitempty"`
+	Callers               []string                              `yaml:"callers,omitempty" json:"callers,omitempty"`
+	MaxActiveWait         string                                `yaml:"max-active-wait,omitempty" json:"max-active-wait,omitempty"`
+	PersistentRetryModels []string                              `yaml:"persistent-retry-models,omitempty" json:"persistent-retry-models,omitempty"`
 }
 
 // ProviderSchedulingMode matches the public model and opaque authenticated caller reference against rollout scope.
