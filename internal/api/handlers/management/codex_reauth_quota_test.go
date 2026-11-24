@@ -15,8 +15,18 @@ import (
 )
 
 func TestCodexReauthPublishesCurrentQuotaSource(t *testing.T) {
-	for _, blocked := range []bool{false, true} {
-		t.Run(fmt.Sprintf("previously_blocked=%t", blocked), func(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		targeted  bool
+		blocked   bool
+		ambiguous bool
+	}{
+		{name: "targeted", targeted: true},
+		{name: "targeted_previously_blocked", targeted: true, blocked: true},
+		{name: "untargeted_plan_change"},
+		{name: "untargeted_multiple_matches", ambiguous: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			authDir := filepath.Join(dir, "auth")
 			if err := os.MkdirAll(authDir, 0700); err != nil {
@@ -45,14 +55,14 @@ func TestCodexReauthPublishesCurrentQuotaSource(t *testing.T) {
 			})
 
 			const id, account, email = "codex-local-name.json", "fixture-account", "user@example.test"
-			record := func(name, accountID, grant string) *coreauth.Auth {
+			record := func(name, accountID, grant, plan string) *coreauth.Auth {
 				return &coreauth.Auth{
 					ID: name, FileName: name, Provider: "codex",
-					Storage:  &codex.CodexTokenStorage{AccessToken: grant, RefreshToken: "refresh-" + grant, AccountID: accountID, Email: email, PlanType: "plus"},
-					Metadata: map[string]any{"email": email, "account_id": accountID, "plan_type": "plus"},
+					Storage:  &codex.CodexTokenStorage{AccessToken: grant, RefreshToken: "refresh-" + grant, AccountID: accountID, Email: email, PlanType: plan},
+					Metadata: map[string]any{"email": email, "account_id": accountID, "plan_type": plan},
 				}
 			}
-			old := record(id, account, "old")
+			old := record(id, account, "old", "prolite")
 			old.Metadata["label"] = "custom alias"
 			old.Metadata["priority"] = 17
 			old.Metadata["excluded_models"] = []string{"excluded-model"}
@@ -69,7 +79,7 @@ func TestCodexReauthPublishesCurrentQuotaSource(t *testing.T) {
 			}
 			original := before.ResourceIdentity.Targets[0]
 
-			if blocked {
+			if tc.blocked {
 				raw, err := os.ReadFile(path)
 				if err != nil {
 					t.Fatal(err)
@@ -90,19 +100,52 @@ func TestCodexReauthPublishesCurrentQuotaSource(t *testing.T) {
 				}
 			}
 
+			// Even the same email is insufficient to match another account.
+			otherAccount := "different-account"
+			if tc.ambiguous {
+				otherAccount = account
+			}
+			otherPath, err := h.saveTokenRecord(context.Background(), record("other-local-name.json", otherAccount, "other", "plus"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			readFile := func(path string) []byte {
+				t.Helper()
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return raw
+			}
+			originalFile, otherFile := string(readFile(path)), string(readFile(otherPath))
+			newName := codex.CredentialFileName(email, "pro", "fixture", true)
 			run := func(grantAccount, grant string) bool {
-				state := fmt.Sprintf("codex-reauth-catalog-%t-%s", blocked, grant)
+				state := "codex-reauth-catalog-" + tc.name + "-" + grant
 				RegisterOAuthSession(state, "codex")
 				t.Cleanup(func() { CancelOAuthSession(state) })
-				SetOAuthSessionTarget(state, oauthRecoveryTarget{AuthID: id, FileName: id, Path: path, Provider: "codex", AccountID: account, Email: email})
-				_, ok := h.commitAndCompleteBuiltinOAuthSession(context.Background(), state, "codex", "", record("oauth-default-name.json", grantAccount, grant), "failed", true)
+				if tc.targeted {
+					SetOAuthSessionTarget(state, oauthRecoveryTarget{AuthID: id, FileName: id, Path: path, Provider: "codex", AccountID: account, Email: email})
+				}
+				_, ok := h.commitAndCompleteBuiltinOAuthSession(context.Background(), state, "codex", "", record(newName, grantAccount, grant, "pro"), "failed", true)
 				return ok
 			}
-			if run("different-account", "mismatch") {
+			if tc.targeted && run("different-account", "mismatch") {
 				t.Fatal("wrong account was accepted")
 			}
-			if !run(account, "new") {
-				t.Fatal("verified OAuth did not save")
+			if run(account, "new") == tc.ambiguous {
+				t.Fatal("OAuth should save only when the credential to replace is unambiguous")
+			}
+			if _, err := os.Stat(filepath.Join(authDir, newName)); !os.IsNotExist(err) {
+				t.Fatal("OAuth created a duplicate credential after the plan changed")
+			}
+			if string(readFile(otherPath)) != otherFile {
+				t.Fatal("OAuth modified the other credential")
+			}
+			if tc.ambiguous {
+				if string(readFile(path)) != originalFile {
+					t.Fatal("ambiguous OAuth modified an existing credential")
+				}
+				return
 			}
 			now, _ := manager.GetByID(id)
 			current := h.currentRuntimeSource(now)
@@ -138,13 +181,10 @@ func TestCodexReauthPublishesCurrentQuotaSource(t *testing.T) {
 			}
 			headers, _ := saved["headers"].(map[string]any)
 			excluded, _ := saved["excluded_models"].([]any)
-			if saved["access_token"] != "new" || saved["refresh_token"] != "refresh-new" ||
+			if saved["access_token"] != "new" || saved["refresh_token"] != "refresh-new" || saved["plan_type"] != "pro" ||
 				saved["label"] != "custom alias" || saved["priority"] != float64(17) || saved["disabled"] != true ||
 				headers["X-Local"] != "keep" || len(excluded) != 1 || excluded[0] != "excluded-model" {
 				t.Fatal("new credentials and original local settings did not survive together")
-			}
-			if _, err := os.Stat(filepath.Join(authDir, "oauth-default-name.json")); !os.IsNotExist(err) {
-				t.Fatal("OAuth created a duplicate credential")
 			}
 		})
 	}

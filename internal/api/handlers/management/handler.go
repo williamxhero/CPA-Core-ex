@@ -70,6 +70,7 @@ type Handler struct {
 	authCache               managementAuthCache
 	siwcOAuthFactory        func(*config.Config, string) siwcOAuthService
 	siwcCommitMu            sync.Mutex
+	codexOAuthCommitMu      sync.Mutex
 	v8AuthUploadMu          sync.Mutex
 	pluginLoginSaveMu       sync.Mutex
 }

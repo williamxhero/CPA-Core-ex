@@ -541,6 +541,21 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 	}
 	target, hasTarget := GetOAuthSessionTarget(state)
 	isTargeted := hasTarget && strings.TrimSpace(target.AuthID) != ""
+	autoTarget := false
+	if sessionProvider == "codex" && !isTargeted {
+		// Serialize account lookup and persistence so two untargeted sessions
+		// cannot both choose a new filename for the same account.
+		h.codexOAuthCommitMu.Lock()
+		defer h.codexOAuthCommitMu.Unlock()
+		var errTarget error
+		target, errTarget = h.existingCodexOAuthTarget(ctx, record)
+		if errTarget != nil {
+			SetOAuthSessionError(state, errTarget.Error())
+			return "", false
+		}
+		autoTarget = target.AuthID != ""
+		isTargeted = autoTarget
+	}
 	if isTargeted {
 		if strings.TrimSpace(target.Provider) != "" && strings.TrimSpace(record.Provider) != "" &&
 			!h.oauthTargetProviderMatches(target.Provider, record.Provider) {
@@ -554,7 +569,7 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 			return "", false
 		}
 		ctx = withTargetedOAuthSave(ctx)
-		if h.resourceCatalog != nil && sessionProvider == "codex" {
+		if sessionProvider == "codex" && (h.resourceCatalog != nil || autoTarget) {
 			if storage, ok := record.Storage.(*codex.CodexTokenStorage); ok && storage != nil {
 				verifiedAccountID := strings.TrimSpace(storage.AccountID)
 				expectedAccountID := strings.TrimSpace(target.AccountID)
@@ -566,7 +581,18 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 					if target.Path == "" || !sameOAuthTargetPath(path, target.Path) {
 						return resourcecatalog.ErrConflict
 					}
-					return h.resourceCatalog.SaveReauthenticatedCodex(path, verifiedAccountID, data)
+					if h.resourceCatalog != nil {
+						return h.resourceCatalog.SaveReauthenticatedCodex(path, verifiedAccountID, data)
+					}
+					// Without a catalog, check the owner again under the file
+					// lock so a stale lookup cannot replace another account.
+					var metadata map[string]any
+					raw, errRead := os.ReadFile(path)
+					if errRead != nil || json.Unmarshal(raw, &metadata) != nil ||
+						metadataStringValue(metadata, "type") != "codex" || metadataStringValue(metadata, "account_id") != verifiedAccountID {
+						return resourcecatalog.ErrConflict
+					}
+					return codex.WriteJSONFileAtomic(path, data)
 				})
 			}
 		}
@@ -635,6 +661,50 @@ func (h *Handler) commitAndCompleteBuiltinOAuthSession(ctx context.Context, stat
 
 	CompleteOAuthSessionWithOutcome(state, record.ID, savedGrantHash, strings.TrimSpace(savedPath) != "", adopted, hadPrevAuth, prevVersion, prevEpoch, adoptedVersion, adoptedEpoch, adoptErr, verifyErr)
 	return savedPath, true
+}
+
+// existingCodexOAuthTarget matches a freshly exchanged grant to one native
+// file, including disabled credentials and files not yet adopted by runtime.
+// Plan and email are not lookup keys: the plan can change, and email alone
+// cannot distinguish multiple accounts.
+func (h *Handler) existingCodexOAuthTarget(ctx context.Context, record *coreauth.Auth) (oauthRecoveryTarget, error) {
+	storage, ok := record.Storage.(*codex.CodexTokenStorage)
+	if !ok || storage == nil || strings.TrimSpace(storage.AccountID) == "" {
+		return oauthRecoveryTarget{}, nil
+	}
+	store, ok := h.tokenStoreWithBaseDir().(*sdkAuth.FileTokenStore)
+	if !ok {
+		return oauthRecoveryTarget{}, nil
+	}
+	existing, errList := store.List(ctx)
+	if errors.Is(errList, os.ErrNotExist) {
+		return oauthRecoveryTarget{}, nil
+	}
+	if errList != nil {
+		return oauthRecoveryTarget{}, errors.New("Could not check existing Codex credentials")
+	}
+	accountID := strings.TrimSpace(storage.AccountID)
+	var target oauthRecoveryTarget
+	for _, auth := range existing {
+		if auth == nil || auth.Provider != "codex" || auth.SourcePluginID != "" {
+			continue
+		}
+		// Use the account ID recorded by the file owner, not an email or a
+		// value inferred from an auth index, metadata alias, or filename.
+		if metadataStringValue(auth.Metadata, "account_id") != accountID {
+			continue
+		}
+		path := strings.TrimSpace(auth.Attributes[coreauth.AttributePath])
+		if target.AuthID != "" {
+			return oauthRecoveryTarget{}, errors.New("Multiple credentials for this Codex account; select the credential to reauthenticate")
+		}
+		info, errStat := os.Lstat(path)
+		if auth.ID == "" || errStat != nil || !info.Mode().IsRegular() {
+			return oauthRecoveryTarget{}, errors.New("Could not resolve the existing Codex credential file")
+		}
+		target = oauthRecoveryTarget{AuthID: auth.ID, FileName: auth.FileName, Path: path, Provider: "codex", AccountID: accountID}
+	}
+	return target, nil
 }
 
 func sameOAuthTargetPath(actual, expected string) bool {
