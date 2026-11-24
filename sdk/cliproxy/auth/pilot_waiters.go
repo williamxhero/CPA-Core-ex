@@ -117,8 +117,6 @@ func (m *Manager) joinPilotWait(ctx context.Context, opportunity *scheduledRetry
 		u.waiterBytes += opportunity.bufferBytes
 		u.waiters = append(u.waiters, pilotWaiter{budget: b, ctx: ctx, caller: caller, bytes: opportunity.bufferBytes})
 	} else if u.waiters[i].routes == nil {
-		// Requeue after serving a turn, without reacquiring capacity or
-		// overtaking callers who were waiting during that attempt.
 		w := u.waiters[i]
 		copy(u.waiters[i:], u.waiters[i+1:])
 		i = len(u.waiters) - 1

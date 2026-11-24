@@ -1145,10 +1145,9 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	executor = executorForAuth(executor, auth)
-	discard := discardStreamChunks
-	if r, _ := ctx.Value(persistentReservationKey{}).(*routeReservation); r != nil {
-		// The reservation drains once it owns the raw channel again.
-		discard = func(<-chan cliproxyexecutor.StreamChunk) {}
+	reservation, _ := ctx.Value(persistentReservationKey{}).(*routeReservation)
+	discard := func(chunks <-chan cliproxyexecutor.StreamChunk) {
+		discardStreamChunksForReservation(reservation, chunks)
 	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
