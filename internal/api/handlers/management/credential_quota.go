@@ -418,6 +418,9 @@ func (h *Handler) QueryCredentialQuota(c *gin.Context) {
 		return
 	} else {
 		obs.ClearedQuotaWindows = cleared
+		if len(cleared) != 0 {
+			h.authManager.NotifyInferenceAdmissionChanged()
+		}
 	}
 	c.JSON(200, obs)
 }

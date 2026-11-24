@@ -2253,6 +2253,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
 			auth.NextRetryAfter = time.Time{}
+		} else if pilotCodex(ctx, result.Provider) && result.Error != nil && result.Error.Code == string(PilotCodexRevoked) && !auth.Disabled && auth.Status != StatusDisabled {
+			// A structured permanent rejection is scoped to this current
+			// credential. Do not schedule repeated renewal of a revoked grant.
+			auth.RequiresSignIn = true
+			auth.Unavailable = true
+			auth.Status = StatusError
+			auth.LastError = cloneError(result.Error)
+			auth.NextRetryAfter = time.Time{}
+			auth.NextRefreshAfter = time.Time{}
 		} else if auth.Status == StatusDisabled {
 			// A terminal TOS_VIOLATION already deactivated the credential inside
 			// applyAuthFailureState; preserve that state instead of overwriting
@@ -4251,6 +4260,9 @@ func isMissingModelPhrase(value string) bool {
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if fact := pilotCodexFailure(err); fact != "" {
+		return fact == PilotCodexInvalid || fact == PilotCodexPolicy
 	}
 	if isStreamTruncatedError(err) {
 		// The explicit accepted-generation boundary overrides generic retry

@@ -12,15 +12,25 @@ import (
 // SchedulingCandidateDecision contains only allowlisted scheduling facts. A
 // missing resource ID means the runtime row has no catalog binding.
 type SchedulingCandidateDecision struct {
-	ResourceID string         `json:"resource_id,omitempty"`
-	Family     string         `json:"family"`
-	Priority   int            `json:"priority"`
-	Registered bool           `json:"registered"`
-	Eligible   bool           `json:"eligible"`
-	Available  bool           `json:"available"`
-	Reasons    []string       `json:"reasons,omitempty"`
-	Refresh    SchedulingTime `json:"refresh"`
-	Recheck    SchedulingTime `json:"recheck"`
+	ResourceID string                   `json:"resource_id,omitempty"`
+	Family     string                   `json:"family"`
+	Priority   int                      `json:"priority"`
+	Registered bool                     `json:"registered"`
+	Eligible   bool                     `json:"eligible"`
+	Available  bool                     `json:"available"`
+	Reasons    []string                 `json:"reasons,omitempty"`
+	Refresh    SchedulingTime           `json:"refresh"`
+	Recheck    SchedulingTime           `json:"recheck"`
+	Quota      *SchedulingQuotaEvidence `json:"quota_evidence,omitempty"`
+}
+
+// SchedulingQuotaEvidence comes only from the current gate inspector or a
+// live inference rejection cooldown, not cached balances or reset estimates.
+type SchedulingQuotaEvidence struct {
+	Source     string     `json:"source"`
+	Scope      string     `json:"scope"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	Window     string     `json:"window,omitempty"`
 }
 
 type SchedulingTime struct {
@@ -113,6 +123,14 @@ func cloneSchedulingRows(rows []SchedulingCandidateDecision) []SchedulingCandida
 			at := *row.Recheck.At
 			row.Recheck.At = &at
 		}
+		if row.Quota != nil {
+			quota := *row.Quota
+			if quota.ObservedAt != nil {
+				at := *quota.ObservedAt
+				quota.ObservedAt = &at
+			}
+			row.Quota = &quota
+		}
 	}
 	return out
 }
@@ -146,14 +164,33 @@ func (m *Manager) schedulingView(mode, model string, candidates []scheduledCandi
 			row.Reasons = appendSchedulingReason(row.Reasons, "credential_quota")
 		}
 		row.Refresh = schedulingRefreshTime(candidate.auth)
+		if slices.Contains(row.Reasons, "refresh_in_progress") {
+			row.Refresh.State = "in_progress"
+		}
+		if evidence := candidate.quotaEvidence; evidence != nil {
+			quota := &SchedulingQuotaEvidence{Source: "current_quota_gate", Scope: "route_admission"}
+			if evidence.ObservedAtMS > 0 {
+				at := time.UnixMilli(evidence.ObservedAtMS).UTC()
+				quota.ObservedAt = &at
+			}
+			switch evidence.Window {
+			case "primary", "secondary":
+				quota.Window = evidence.Window
+			}
+			row.Quota = quota
+		} else if candidate.quotaBlocked {
+			row.Quota = &SchedulingQuotaEvidence{Source: "active_quota_cooldown", Scope: "model"}
+			if candidate.auth.Quota.Reason == "credential_quota" {
+				row.Quota.Scope = "credential"
+			}
+		}
 		recheck := candidate.diagnosticQuotaAt
 		if recheck.IsZero() {
 			recheck = candidate.retryAt
 		}
 		row.Recheck = schedulingKnownTime(recheck)
 		for _, reason := range row.Reasons {
-			switch reason {
-			case "model_not_registered", "provider_out_of_scope", "protocol_incompatible", "streaming_incompatible", "tools_incompatible", "image_incompatible", "reasoning_incompatible", "hard_binding", "caller_ineligible", "funding_ineligible":
+			if schedulingIneligible(reason) {
 				row.Eligible = false
 			}
 		}
@@ -192,6 +229,14 @@ func (m *Manager) schedulingView(mode, model string, candidates []scheduledCandi
 		return left.Priority > right.Priority
 	})
 	return d
+}
+
+func schedulingIneligible(reason string) bool {
+	switch reason {
+	case "model_not_registered", "provider_out_of_scope", "protocol_incompatible", "streaming_incompatible", "tools_incompatible", "image_incompatible", "reasoning_incompatible", "hard_binding", "caller_ineligible", "funding_ineligible":
+		return true
+	}
+	return false
 }
 
 // SchedulingCandidateSnapshot runs the pure candidate pass against the current

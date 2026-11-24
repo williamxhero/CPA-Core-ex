@@ -37,6 +37,9 @@ func (h *Handler) observeCodexQuotaRejection(ctx context.Context, dispatched *co
 			"component": "credential_quota", "provider": "codex", "window": evidence.Window, "model": evidence.Model,
 		}).Warn("Native scoped quota rejection could not publish")
 	}
+	if handled {
+		h.authManager.NotifyInferenceAdmissionChanged()
+	}
 	return handled
 }
 

@@ -373,6 +373,7 @@ func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, regis
 	job := &authRefreshJob{
 		id:                id,
 		registrationEpoch: registrationEpoch,
+		credentialVersion: auth.CredentialVersion,
 		pendingUntil:      now.Add(refreshPendingBackoff),
 		loop:              loop,
 	}
@@ -393,11 +394,18 @@ func (m *Manager) beginRefreshJob(ctx context.Context, job *authRefreshJob) bool
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	auth := m.auths[job.id]
-	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RegistrationEpoch != job.registrationEpoch {
+	if ctx.Err() != nil || m.refreshJobs[job.id] != job || auth == nil || auth.RegistrationEpoch != job.registrationEpoch || auth.CredentialVersion != job.credentialVersion {
 		return false
 	}
 	job.running = true
 	return true
+}
+
+// Caller holds m.mu. A due date (including a queued job) does not imply
+// that this lifecycle actually has a refresh exchange underway.
+func (m *Manager) runningRefreshLocked(a *Auth) bool {
+	job := m.refreshJobs[a.ID]
+	return job != nil && job.running && job.registrationEpoch == a.RegistrationEpoch && job.credentialVersion == a.CredentialVersion
 }
 
 func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queuedOnly bool) {
@@ -414,6 +422,8 @@ func (m *Manager) finishRefreshJob(job *authRefreshJob, retryAt time.Time, queue
 		auth.UpdatedAt = time.Now()
 	}
 	m.mu.Unlock()
+	// The executor outcome and job retirement are visible before waking waiters.
+	m.providerSchedulingWake.signal()
 	// Notify the current loop, which may differ from the job's original loop.
 	m.queueRefreshReschedule(job.id)
 }
@@ -1169,6 +1179,11 @@ func (m *Manager) RefreshAfterUnauthorized(ctx context.Context, auth *Auth, exec
 // 401 so the current auth can be retried before fallback/suspend.
 func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, execErr error, alreadyTried bool, clientHeaders ...http.Header) (*Auth, bool) {
 	if m == nil || auth == nil || execErr == nil {
+		return auth, false
+	}
+	// A pilot transport status is not a rejected access token. Only the
+	// adapter's auth fact can open this refresh path for pilot Codex.
+	if pilotCodex(ctx, executorKeyFromAuth(auth)) && pilotCodexFailure(execErr) != PilotCodexAuth {
 		return auth, false
 	}
 	// Request-scoped failures describe this request, not stale credentials.

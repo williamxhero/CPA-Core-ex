@@ -751,8 +751,12 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	}
 }
 
-func (r *UsageReporter) failFromErrors(_ context.Context, errs ...error) usage.Failure {
-	return failFromErrorsWithRules(r.requestScopedErrorRules(), errs...)
+func (r *UsageReporter) failFromErrors(ctx context.Context, errs ...error) usage.Failure {
+	failure := failFromErrorsWithRules(r.requestScopedErrorRules(), errs...)
+	if cliproxyauth.PersistentRetryPilot(ctx) {
+		failure.Body = ""
+	}
+	return failure
 }
 
 func failFromErrors(errs ...error) usage.Failure {

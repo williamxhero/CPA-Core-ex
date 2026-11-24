@@ -188,24 +188,50 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 	return newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling), body, true
 }
 
-func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHeaders http.Header, body []byte) statusErr {
-	if !cliproxyauth.PersistentRetryPilot(ctx) || err.credentialScoped || err.persistentQuotaGate || isCodexUsageLimitError(body) {
+func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHeaders http.Header, body []byte, httpStatus int) statusErr {
+	if !cliproxyauth.PersistentRetryPilot(ctx) {
 		return err
 	}
-	// Only the pilot reads the response-level status preserved by
-	// codexTerminalFailureBody; the shared mapping ignores it.
-	if status := codexPilotResponseStatus(body); status != 0 {
+	if err.persistentQuotaGate || (!err.pilotQuotaUnproven && httpStatus != 0 && isCodexUsageLimitError(body)) {
+		err.pilotCodexFailure = cliproxyauth.PilotCodexQuota
+		return err
+	}
+	// Keep the received HTTP status for HTTP errors. For SSE failure frames,
+	// use their explicit status when present, not legacy prose remapping.
+	if httpStatus != 0 {
+		err.code = httpStatus
+	} else if status := codexPilotResponseStatus(body); status != 0 {
 		err.code = status
 	}
-	// An HTTP 429 alone is not evidence that a funding source is exhausted.
-	// Keep the structured quota cases on their existing paths.
-	code := ojson.GetBytesNoCopy(body, "error.code").String()
-	kind := ojson.GetBytesNoCopy(body, "error.type").String()
-	if err.code == http.StatusTooManyRequests && clienterror.Classify(err.code, code+" "+kind) != clienterror.FailureQuotaExhausted {
-		err.transientRateLimit = true
+	if isCodexUsageLimitError(body) {
+		err.code = http.StatusTooManyRequests // The window rejection is real, even when exhaustion is unproven.
+		err.credentialScoped = false
 	}
-	err.retryAfter = laterRetryAfter(err.retryAfter, codexPilotRetryAfter(ctx, headers, eventHeaders))
+	code := strings.ToLower(strings.TrimSpace(codexErrorCodeOf(body)))
+	kind := strings.ToLower(strings.TrimSpace(ojson.GetBytesNoCopy(body, "error.type").String()))
+	switch {
+	case code == "cyber_policy", code == "cyber_policy_violation", code == "bio_policy", code == "misalignment_policy_violation", code == "content_policy_violation", code == "image_content_policy_violation", kind == "image_generation_user_error":
+		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexPolicy, http.StatusBadRequest
+	case code == "invalid_prompt", code == "invalid_value", code == "context_length_exceeded", code == "context_too_large", code == "previous_response_not_found", code == "invalid_encrypted_content", code == "thinking_signature_invalid", kind == "invalid_request_error" && ojson.GetBytesNoCopy(body, "error.param").Type == ojson.String:
+		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexInvalid, http.StatusBadRequest
+	case code == "token_revoked", code == "account_deactivated", code == "invalid_api_key", code == "refresh_token_reused", code == "refresh_token_invalidated":
+		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexRevoked, http.StatusUnauthorized
+	case code == "token_expired", code == "unauthorized", kind == "authentication_error":
+		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexAuth, http.StatusUnauthorized
+	case code == "permission_denied", code == "insufficient_permissions", kind == "permission_error":
+		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexPermission, http.StatusForbidden
+	case code == "model_not_found", code == "model_not_supported":
+		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexModel, http.StatusNotFound
+	default:
+		err.pilotCodexFailure = cliproxyauth.PilotCodexRecoverable
+		err.transientRateLimit = err.code == http.StatusTooManyRequests
+		err.retryAfter = codexPilotRetryAfter(ctx, headers, eventHeaders)
+	}
 	return err
+}
+
+func codexPilotTransportFailure(err error) statusErr {
+	return statusErr{code: http.StatusBadGateway, msg: err.Error(), pilotCodexFailure: cliproxyauth.PilotCodexTransport}
 }
 
 // codexPilotResponseStatus reads the preserved response-level status only when

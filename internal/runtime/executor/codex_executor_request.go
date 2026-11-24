@@ -197,7 +197,9 @@ func (e *CodexExecutor) cacheHelperDoc(ctx context.Context, from sdktranslator.F
 		rawJSON = doc.Bytes()
 	}
 	wireBody := rawJSON
-	if e.cfg != nil && e.cfg.Codex.UpstreamRequestCompression && auth != nil &&
+	// The pilot has one scheduler-owned business send per dispatch. Use
+	// identity encoding rather than the legacy status-triggered zstd resend.
+	if e.cfg != nil && e.cfg.Codex.UpstreamRequestCompression && auth != nil && !cliproxyauth.PersistentRetryPilot(ctx) &&
 		!codexAuthUsesAPIKey(auth) && !codexUseSIWCForRequest(ctx, auth, headers) &&
 		len(rawJSON) >= e.cfg.Codex.RequestCompressionMinBytes() {
 		parsedURL, errParse := neturl.Parse(url)

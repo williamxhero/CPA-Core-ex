@@ -14,6 +14,10 @@ func (e *CodexExecutor) codexHTTPBusinessError(ctx context.Context, a *cliproxya
 	result := newCodexStatusErrWithHeadersAndCooling(res.StatusCode, res.Header, body, e.modelLevelCooling())
 	evidence, ok := helps.ExtractCodexQuotaRejection(a, res, body, sent, model, time.Now())
 	if !ok {
+		if cliproxyauth.PersistentRetryPilot(ctx) && a != nil && !codexAuthUsesAPIKey(a) && isCodexUsageLimitError(body) {
+			result.pilotQuotaUnproven = true
+			result.credentialScoped = false
+		}
 		return result
 	}
 	installed, handled := cliproxyexecutor.ObserveCodexQuotaRejection(ctx, evidence)
@@ -22,6 +26,12 @@ func (e *CodexExecutor) codexHTTPBusinessError(ctx context.Context, a *cliproxya
 		if handled {
 			// The durable gate owns the stop; a second cooldown for the same
 			// event would only duplicate the restriction.
+			result.credentialScoped = false
+		} else if cliproxyauth.PersistentRetryPilot(ctx) {
+			// The OAuth inference response proves a window rejection. Without
+			// current WHAM confirmation it does not prove every legal funding
+			// source is exhausted. Do not turn this into a whole-account pause.
+			result.pilotQuotaUnproven = true
 			result.credentialScoped = false
 		} else {
 			// The upstream rejection is still real even when the account-wide

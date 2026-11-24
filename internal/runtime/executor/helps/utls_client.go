@@ -109,10 +109,18 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 	tlsConn, err := t.createConnection(req.Context(), hostname, addr)
 	if err != nil {
+		if cliproxyauth.PersistentRetryPilot(req.Context()) {
+			return nil, codexPreHTTPHandshakeError{err}
+		}
 		return nil, err
 	}
 	return roundTripUtlsConnection(req, tlsConn)
 }
+
+// Only this path proves that the primary transport never reached HTTP.
+type codexPreHTTPHandshakeError struct{ error }
+
+func (e codexPreHTTPHandshakeError) Unwrap() error { return e.error }
 
 // roundTripUtlsConnection selects the HTTP protocol before sending the request.
 // Empty ALPN is HTTP/1.1, including when a TLS-inspecting proxy omits ALPN.
@@ -458,6 +466,15 @@ func (t *utlsChatGPTFallbackRoundTripper) RoundTrip(req *http.Request) (*http.Re
 	}
 	if !replayable {
 		return nil, errPrimary
+	}
+	if cliproxyauth.PersistentRetryPilot(req.Context()) {
+		// A failure after a possible HTTP write belongs to the conductor's
+		// shared budget, not to a hidden second business send. A proven
+		// pre-HTTP TLS failure can still switch fingerprints before sending.
+		var beforeHTTP codexPreHTTPHandshakeError
+		if !errors.As(errPrimary, &beforeHTTP) {
+			return nil, errPrimary
+		}
 	}
 	fallback := t.fallbackRoundTripper()
 	if fallback == nil {

@@ -93,6 +93,9 @@ type scheduledCandidate struct {
 	diagnosticQuotaAt time.Time
 	diagnosticQuota   bool
 	diagnosticExpired bool
+	refreshRunning    bool
+	quotaBlocked      bool
+	quotaEvidence     *resource.QuotaGateEvidence
 }
 
 func schedulingResource(a *Auth) (resourceID, parentID string) {
@@ -165,6 +168,7 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		allowed[canonicalSchedulingProvider(p)] = struct{}{}
 	}
 	reg := registry.GetGlobalRegistry()
+	persistent := PersistentRetryPilot(ctx)
 	m.mu.RLock()
 	selector := m.selector
 	candidates := make([]scheduledCandidate, 0, len(m.auths))
@@ -174,7 +178,8 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 		}
 		p := executorKeyFromAuth(a)
 		exec, _ := m.executorLocked(p)
-		candidates = append(candidates, scheduledCandidate{auth: a.Clone(), owner: p, exec: exec})
+		candidates = append(candidates, scheduledCandidate{auth: a.Clone(), owner: p, exec: exec,
+			refreshRunning: persistent && p == "codex" && m.runningRefreshLocked(a)})
 	}
 	m.mu.RUnlock()
 
@@ -232,16 +237,47 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			c.reasons = append(c.reasons, configReason)
 		}
 		blocked, reason, next := isAuthBlockedForModelForRequest(ctx, a, c.model, now, opts.Headers)
-		if wantsSchedulingDecision(ctx) {
-			if exp, known := a.AccessTokenExpirationTimeForRequest(ctx, opts.Headers); known && !exp.IsZero() {
-				c.diagnosticExpired = !exp.After(now)
+		pilotRoute := persistent && c.owner == "codex"
+		var authBlock string
+		if pilotRoute || wantsSchedulingDecision(ctx) {
+			exp, known := a.AccessTokenExpirationTimeForRequest(ctx, opts.Headers)
+			c.diagnosticExpired = known && !exp.IsZero() && !exp.After(now)
+		}
+		if pilotRoute {
+			c.quotaBlocked = hasLiveQuotaCooldown(a, c.model, now)
+			state := existingModelState(a, c.model)
+			if state != nil && state.Status == StatusDisabled {
+				blocked, reason = true, blockReasonDisabled
 			}
+			if reason != blockReasonDisabled {
+				token := authAccessTokenForRequest(ctx, a, opts.Headers)
+				rejected := token != "" && (token == a.RejectedAccessToken || token == a.RejectedSIWCAccessToken)
+				switch {
+				case a.LastError != nil && a.LastError.Code == string(PilotCodexRevoked):
+					authBlock = "reauthentication_required"
+				case rejected || c.diagnosticExpired || hasUnauthorizedAuthFailure(a):
+					switch {
+					case a.RequiresSignIn:
+						authBlock = "reauthentication_required"
+					case a.RequiresCredentialRecovery():
+						authBlock = "credential_recovery_required"
+					case c.refreshRunning && !c.quotaBlocked && !authHasUnchangedRejectedRefreshToken(a):
+						authBlock = "refresh_in_progress"
+					default:
+						authBlock = "authentication_unavailable"
+					}
+				}
+			}
+		}
+		if wantsSchedulingDecision(ctx) {
 			if a.Quota.Exceeded && a.Quota.Reason == "credential_quota" && a.Quota.NextRecoverAt.After(now) {
 				c.diagnosticQuota, c.diagnosticQuotaAt = true, a.Quota.NextRecoverAt
 			}
 		}
-		if blocked {
+		if blocked || authBlock != "" {
 			switch {
+			case authBlock != "":
+				c.reasons = append(c.reasons, authBlock)
 			case reason == blockReasonDisabled:
 				c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
 			case reason == blockReasonCooldown || !next.IsZero():
@@ -271,10 +307,14 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			}
 		} else {
 			var err error
-			if authority.inspect != nil && wantsSchedulingDecision(ctx) {
+			if authority.inspect != nil && (persistent || wantsSchedulingDecision(ctx)) {
 				var evidence *resource.QuotaGateEvidence
 				evidence, err = authority.inspect(ctx, a, model)
 				if evidence != nil {
+					c.quotaBlocked = c.quotaBlocked || err != nil
+					if pilotRoute && err != nil {
+						c.quotaEvidence = evidence
+					}
 					c.diagnosticQuota = true
 					if evidence.RecheckAtMS > 0 {
 						c.diagnosticQuotaAt = time.UnixMilli(evidence.RecheckAtMS)

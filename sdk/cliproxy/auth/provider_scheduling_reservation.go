@@ -211,8 +211,22 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 	if persistent {
 		m.providerSchedulingUse.pruneStalePersistentBackoffLocked(scheduledLiveRoutes(candidates), now)
 	}
+	var blockedBy retryStopReason
 	for _, c := range candidates {
 		if hardBinding != "" && c.auth.ID != hardBinding {
+			continue
+		}
+		if persistent && !slices.ContainsFunc(c.reasons, schedulingIneligible) && !slices.Contains(c.reasons, "request_excluded") {
+			reason := candidateStopReason(c)
+			switch {
+			case blockedBy == "":
+				blockedBy = reason
+			case blockedBy != reason:
+				blockedBy = retryStopNoAvailableRoute
+			}
+		}
+		if persistent && c.owner == "codex" && len(c.reasons) == 1 && c.reasons[0] == "refresh_in_progress" {
+			opportunity.refreshPending = true
 			continue
 		}
 		if persistent && c.owner == "codex" && len(c.reasons) == 0 {
@@ -229,21 +243,42 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 			}
 		}
 		if !m.providerSchedulingUse.available(c.limits) {
+			if persistent && c.owner == "codex" && len(c.reasons) == 0 {
+				opportunity.capacityPending = true
+			}
 			continue
 		}
 		if len(c.reasons) == 0 {
 			return scheduledRetryOpportunity{ready: true, changed: opportunity.changed}
 		}
 		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (opportunity.at.IsZero() || c.retryAt.Before(opportunity.at)) {
-			// A quota reset estimate is not a transient send opportunity for
-			// a new pilot request. Keep the legacy cooldown decision intact.
-			if pilotFirstSend && (c.owner != "codex" || hasLiveQuotaCooldown(c.auth, c.model, now)) {
+			// A quota reset estimate schedules rechecks, not inference.
+			if (pilotFirstSend && c.owner != "codex") || (persistent && c.owner == "codex" && c.quotaBlocked) {
 				continue
 			}
 			opportunity.at = c.retryAt
 		}
 	}
+	opportunity.stop = blockedBy
 	return opportunity
+}
+
+func candidateStopReason(c scheduledCandidate) retryStopReason {
+	switch {
+	case slices.Contains(c.reasons, "manual_disabled"):
+		return "manual_disabled"
+	case c.quotaBlocked:
+		return "quota_exhausted"
+	case slices.Contains(c.reasons, "inference_admission_blocked"):
+		return "inference_admission_blocked"
+	}
+	for _, reason := range c.reasons {
+		switch reason {
+		case "reauthentication_required", "credential_recovery_required", "authentication_unavailable":
+			return retryStopReason(reason)
+		}
+	}
+	return retryStopNoAvailableRoute
 }
 
 func scheduledLiveRoutes(candidates []scheduledCandidate) map[string]struct{} {

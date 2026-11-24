@@ -1367,6 +1367,8 @@ type statusErr struct {
 	transientRateLimit  bool
 	transientTransport  bool
 	persistentQuotaGate bool
+	pilotCodexFailure   cliproxyauth.PilotCodexFailure
+	pilotQuotaUnproven  bool
 	tosViolation        bool
 	tosAppealURL        string
 	tosAppealURLText    string
@@ -1383,6 +1385,9 @@ func (e statusErr) Error() string {
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
 func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
+func (e statusErr) PilotCodexFailure() cliproxyauth.PilotCodexFailure {
+	return e.pilotCodexFailure
+}
 
 // IsUpstreamHTTPResponse distinguishes a provider response such as HTTP 499
 // from a downstream context cancellation. Proxies commonly use 499 for both.

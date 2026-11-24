@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -27,7 +28,6 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
-	"golang.org/x/net/context"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -696,6 +696,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		parentCtx = logging.InheritDeferredCapture(parentCtx, requestCtx)
 	}
 	parentCtx = coreauth.InheritRequestBudget(parentCtx, requestCtx)
+	if c != nil && requestCtx != nil {
+		// The HTTP logging boundary needs the same host-owned policy decision
+		// as the execution context, including in error-only capture mode.
+		c.Request = c.Request.WithContext(coreauth.InheritRequestBudget(requestCtx, parentCtx))
+	}
 	if c != nil && logging.DeferredAPICaptureFromContext(parentCtx) == nil && !logging.DeferredAPIRequestCaptureDisabled(parentCtx) {
 		if value, exists := c.Get(logging.DeferredAPIResponseContextKey); exists {
 			if capture, ok := value.(*logging.DeferredAPICapture); ok && capture != nil {
@@ -710,7 +715,8 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
+	newCtx, cancelWithCause := context.WithCancelCause(parentCtx)
+	cancel := func() { cancelWithCause(nil) }
 
 	endpoint := ""
 	if c != nil && c.Request != nil {
@@ -749,7 +755,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		go func() {
 			select {
 			case <-requestCtx.Done():
-				cancel()
+				// The execution context has a different parent. Preserve the
+				// HTTP caller's actual lifecycle event across that bridge.
+				cancelWithCause(requestCtx.Err())
 			case <-cancelCtx.Done():
 			}
 		}()
@@ -759,10 +767,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	newCtx = coreauth.WithCodexClientRequest(newCtx, coreauth.IsCodexClientRequest(newCtx))
 	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...interface{}) {
+		if requestCtx != nil && requestCtx.Err() != nil {
+			cancelWithCause(requestCtx.Err())
+		}
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
-		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 {
+		if cfg := h.CurrentConfig(); cfg != nil && cfg.RequestLog && len(params) == 1 && !coreauth.PersistentRetryPilot(newCtx) {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
 					cancel()

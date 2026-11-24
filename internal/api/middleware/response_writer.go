@@ -18,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -165,7 +166,14 @@ func (w *ResponseWriterWrapper) closeConnectionIfRequestBodyUnconsumed(statusCod
 	}
 }
 
+func (w *ResponseWriterWrapper) privatePilot() bool {
+	return w.ginContext != nil && w.ginContext.Request != nil && coreauth.PersistentRetryPilot(w.ginContext.Request.Context())
+}
+
 func (w *ResponseWriterWrapper) shouldBufferResponseBody() bool {
+	if w.privatePilot() {
+		return false
+	}
 	status := w.effectiveStatusCode()
 	apiErrors := extractAPIResponseErrors(w.ginContext)
 	if status < http.StatusBadRequest {
@@ -235,7 +243,7 @@ func (w *ResponseWriterWrapper) WriteHeader(statusCode int) {
 	w.isStreaming = w.detectStreaming(contentType) || w.streamWriter != nil
 
 	// If streaming, initialize streaming log writer once and refresh uncommitted status updates.
-	if !w.finalized && w.isStreaming && w.logger != nil && w.logger.IsEnabled() {
+	if !w.finalized && w.isStreaming && w.logger != nil && w.logger.IsEnabled() && !w.privatePilot() {
 		if w.streamWriter == nil {
 			if !w.panicked && isUnroutedNotFound(w.ginContext, statusCode, extractAPIResponseErrors(w.ginContext)) {
 				w.isStreaming = false
@@ -407,7 +415,7 @@ func (w *ResponseWriterWrapper) Finalize(c *gin.Context) error {
 	apiRequestSource := w.extractAPIRequestSource(c)
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
-	if (!w.logger.IsEnabled() && !forceLog) || (!w.panicked && isUnroutedNotFound(c, finalStatusCode, slicesAPIResponseError)) {
+	if w.privatePilot() || (!w.logger.IsEnabled() && !forceLog) || (!w.panicked && isUnroutedNotFound(c, finalStatusCode, slicesAPIResponseError)) {
 		errDiscard := w.discardStreamingLogWriter()
 		cleanupFileBodySources(websocketTimelineSource, apiRequestSource, apiResponseSource, apiWebsocketTimelineSource)
 		return errDiscard

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,13 +18,16 @@ import (
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
 const persistentPilotModel = "gpt-6.2-sol"
+const persistentPilotPrimaryResource = "fee222e4-6116-4cd5-9578-23265074d937"
 const persistentPilotChat = `{"model":"gpt-6.2-sol","stream":true,"messages":[{"role":"user","content":"hello"}]}`
 
 type persistentPilotClock interface {
@@ -31,7 +35,7 @@ type persistentPilotClock interface {
 	Wait(context.Context, time.Duration) error
 }
 
-func newPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock persistentPilotClock, upstream http.HandlerFunc) *inventoryHarness {
+func newPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock persistentPilotClock, upstream http.HandlerFunc, options ...ServerOption) *inventoryHarness {
 	t.Helper()
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	caller := sha256.Sum256([]byte(sdkaccess.DefaultAccessProviderName + "\x00open"))
@@ -55,7 +59,9 @@ routing:
     models: [gpt-6.2-sol, pilot-control-model]
     callers: [%x]
     persistent-retry-models: %s
-`, filepath.ToSlash(filepath.Join(dir, "auth")), retries, caller, allowlist)
+    resources:
+      %q: {funding: subscription, max-concurrent: 1}
+`, filepath.ToSlash(filepath.Join(dir, "auth")), retries, caller, allowlist, persistentPilotPrimaryResource)
 	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +73,7 @@ routing:
 	manager.SetConfig(cfg) // Same initial snapshot as the service builder.
 	manager.SetContinuityClockForTest(clock)
 	manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
-	s := NewServer(cfg, manager, sdkaccess.NewManager(), path)
+	s := NewServer(cfg, manager, sdkaccess.NewManager(), path, options...)
 	f := &inventoryHarness{t: t, server: s, manager: manager}
 	t.Cleanup(func() {
 		if err := s.Stop(context.Background()); err != nil {
@@ -92,6 +98,9 @@ func addPersistentPilotCodex(t *testing.T, f *inventoryHarness, name, priority s
 	id := t.Name() + "/" + name
 	a := &coreauth.Auth{ID: id, Provider: "codex", Status: coreauth.StatusActive,
 		Attributes: map[string]string{"base_url": target.URL, "api_key": "test-CANARY", "priority": priority}}
+	if name == "primary" {
+		a.ResourceIdentity = &resource.Binding{Targets: []resource.Target{{ResourceID: persistentPilotPrimaryResource}}}
+	}
 	if _, err := f.manager.Register(coreauth.WithSkipPersist(t.Context()), a); err != nil {
 		t.Fatal(err)
 	}
@@ -602,13 +611,13 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 				return trace.Raw
 			}
 			if scenario == "confirmed-quota" {
-				assertResult(call(), http.StatusTooManyRequests, 1, "")
+				assertResult(call(), http.StatusTooManyRequests, 1, "quota_exhausted")
 				b := startPilotRequest(ctx, f, path, persistentPilotChat)
 				select {
 				case <-clock.timers:
 					t.Fatal("a quota reset estimate opened a first-send wait")
 				case w := <-b:
-					trace := assertResult(w, http.StatusServiceUnavailable, 0, "no_available_route")
+					trace := assertResult(w, http.StatusServiceUnavailable, 0, "quota_exhausted")
 					if primary.Load() != 1 || ojson.Get(trace, "last_recovery_wait").Exists() {
 						t.Fatalf("quota-blocked request sent or waited: %s", trace)
 					}
@@ -624,7 +633,7 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 			switch scenario {
 			case "no-route":
 				updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) { a.Disabled = true })
-				if trace := assertResult(call(), http.StatusServiceUnavailable, 0, "no_available_route"); ojson.Get(trace, "last_recovery_wait").Exists() || ojson.Get(trace, "terminal.code").String() != "no_available_route" {
+				if trace := assertResult(call(), http.StatusServiceUnavailable, 0, "manual_disabled"); ojson.Get(trace, "last_recovery_wait").Exists() || ojson.Get(trace, "terminal.code").String() != "no_available_route" {
 					t.Fatalf("disabled route caused a wait: %s", trace)
 				}
 				return
@@ -690,6 +699,174 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 			trace := assertResult(awaitPilotResult(t, ctx, b), http.StatusBadGateway, 1, "retry_limit")
 			if primary.Load() != 2 || backup.Load() != 0 || ojson.Get(trace, "wait_ms").Int() != 300000 {
 				t.Fatalf("zero allowed more than B's first send or charged waiting as a send: primary=%d backup=%d trace=%s", primary.Load(), backup.Load(), trace)
+			}
+		})
+	}
+}
+
+func waitForPilotEvent(t *testing.T, ctx context.Context, f *inventoryHarness, path, event string) <-chan *httptest.ResponseRecorder {
+	t.Helper()
+	ctx = coreauth.WithFreshRequestBudget(ctx)
+	done := startPilotRequest(ctx, f, path, persistentPilotChat)
+	for {
+		id := coreauth.RoutingTraceID(ctx)
+		if id != "" {
+			trace := readSchedulingTraceForTest(t, f, id)
+			if ojson.Get(trace, "last_recovery_wait."+event).Bool() && ojson.Get(trace, "send_count").Int() == 0 && !ojson.Get(trace, "terminal").Exists() {
+				return done
+			}
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("request did not wait for %s: %d %s", event, result.Code, result.Body)
+		case <-ctx.Done():
+			t.Fatalf("missing %s wait (request %q)", event, id)
+		default:
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestProviderSchedulingPersistentPilotDeadlineWhileWaiting(t *testing.T) {
+	clock := newManualPersistentPilotClock()
+	var sends atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+		sends.Add(1)
+		w.WriteHeader(502)
+	})
+	// A genuine request deadline, not a restriction inferred from Retry-After.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	done := startPilotRequest(ctx, f, "/v1/chat/completions", persistentPilotChat)
+	awaitPilotTimer(t, ctx, clock, done)
+	w := awaitPilotResult(t, t.Context(), done)
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if sends.Load() != 1 || ojson.Get(trace, "retry_stop_reason").String() != "deadline_exceeded" || ojson.Get(trace, "terminal.code").String() != "deadline_exceeded" {
+		t.Fatalf("real deadline reported incorrectly: sends=%d trace=%s", sends.Load(), trace)
+	}
+}
+
+func TestProviderSchedulingPersistentPilotWaitsForCapacity(t *testing.T) {
+	ctx, stop := context.WithTimeout(t.Context(), 8*time.Second)
+	defer stop()
+	clock := newManualPersistentPilotClock()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var sends atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, r *http.Request) {
+		if sends.Add(1) == 1 {
+			close(entered)
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		persistentPilotStart(w, "resp-success")
+		persistentPilotSucceed(w, "capacity-available")
+	})
+	defer close(release)
+	path := "/v1/chat/completions"
+	a := startPilotRequest(ctx, f, path, persistentPilotChat)
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("A never entered upstream")
+	}
+	b := waitForPilotEvent(t, ctx, f, path, "capacity_pending")
+	if sends.Load() != 1 {
+		t.Fatal("B sent before acquiring capacity")
+	}
+	release <- struct{}{}
+	awaitPilotResult(t, ctx, a)
+	w := awaitPilotResult(t, ctx, b)
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if w.Code != 200 || sends.Load() != 2 || !strings.Contains(w.Body.String(), "capacity-available") ||
+		ojson.Get(trace, "send_count").Int() != 1 || !ojson.Get(trace, "last_recovery_wait.capacity_pending").Bool() {
+		t.Fatalf("wrong capacity recovery: status=%d sends=%d trace=%s", w.Code, sends.Load(), trace)
+	}
+}
+
+func TestProviderSchedulingPersistentPilotWaitsForActualRefresh(t *testing.T) {
+	for _, outcome := range []string{"renewed", "invalid-grant"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx, stop := context.WithTimeout(t.Context(), 10*time.Second)
+			defer stop()
+			clock := newManualPersistentPilotClock()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var inference, renewals atomic.Int32
+			issuer, network := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/oauth/token" || renewals.Add(1) != 1 {
+					t.Error("unexpected OAuth request")
+					w.WriteHeader(500)
+					return
+				}
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return
+				}
+				if outcome == "invalid-grant" {
+					w.WriteHeader(400)
+					fmt.Fprint(w, `{"error":"invalid_grant","error_description":"GRANT-CANARY"}`)
+					return
+				}
+				fmt.Fprint(w, `{"access_token":"renewed-CANARY","refresh_token":"new-grant-CANARY","expires_in":3600}`)
+			}))
+			transport := issuer.Client().Transport.(*http.Transport).Clone()
+			transport.Proxy = nil
+			transport.TLSClientConfig.ServerName = "chatgpt.com"
+			transport.DialContext = func(ctx context.Context, protocol, addr string) (net.Conn, error) {
+				if addr != "auth.openai.com:443" {
+					return (&net.Dialer{}).DialContext(ctx, protocol, addr)
+				}
+				return network.DialContext(ctx, protocol, addr)
+			}
+			previous := http.DefaultTransport
+			http.DefaultTransport = transport
+			t.Cleanup(func() { http.DefaultTransport = previous; transport.CloseIdleConnections() })
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, r *http.Request) {
+				inference.Add(1)
+				if r.Header.Get("Authorization") != "Bearer renewed-CANARY" {
+					t.Error("sent inference without the renewed token")
+				}
+				persistentPilotStart(w, "resp-success")
+				persistentPilotSucceed(w, "renewal-available")
+			})
+			id := t.Name() + "/primary"
+			updatePilotAuth(t, f, id, func(a *coreauth.Auth) {
+				delete(a.Attributes, "api_key")
+				a.Metadata = map[string]any{"type": "codex", "access_token": "expired-CANARY", "refresh_token": "old-grant-CANARY", "expired": time.Now().Add(-time.Hour).Format(time.RFC3339)}
+			})
+			// Before a job is running, expiry (even with a scheduled due time)
+			// neither admits an execution nor supplies an event to wait on.
+			path := "/v1/chat/completions"
+			if w := callPersistentPilot(ctx, f, path, persistentPilotChat); w.Code != 503 || inference.Load() != 0 {
+				t.Fatalf("expired credential unexpectedly dispatched: %d %s", w.Code, w.Body)
+			}
+			f.manager.StartAutoRefresh(ctx, time.Millisecond)
+			defer f.manager.StopAutoRefresh()
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				t.Fatal("real OAuth exchange never entered")
+			}
+			b := waitForPilotEvent(t, ctx, f, path, "refresh_pending")
+			if inference.Load() != 0 {
+				t.Fatal("refresh was counted as inference or bypassed")
+			}
+			close(release)
+			w := awaitPilotResult(t, ctx, b)
+			trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+			wantStatus, wantSends := 200, int32(1)
+			if outcome == "invalid-grant" {
+				wantStatus, wantSends = 503, 0
+				if ojson.Get(trace, "retry_stop_reason").String() != "reauthentication_required" {
+					t.Fatalf("grant rejection did not record reauthentication: %s", trace)
+				}
+			}
+			if w.Code != wantStatus || inference.Load() != wantSends || renewals.Load() != 1 || ojson.Get(trace, "send_count").Int() != int64(wantSends) || strings.Contains(w.Body.String()+trace, "CANARY") {
+				t.Fatalf("wrong refresh resolution: status=%d sends=%d trace=%s", w.Code, inference.Load(), trace)
 			}
 		})
 	}
@@ -819,7 +996,7 @@ func TestProviderSchedulingPersistentPilotQuotaEvidenceControlsRetry(t *testing.
 		wantSource   string
 	}{
 		{name: "bare 429", body: `{"error":{"message":"temporary upstream rejection"}}`, recover: true, wantStatus: http.StatusOK, wantSends: 2, wantWaits: 1, wantCategory: "transient_rate_limit", wantSource: "local_backoff"},
-		{name: "authoritative quota 429", body: quotaBody, wantStatus: http.StatusTooManyRequests, wantSends: 1},
+		{name: "authoritative quota 429", body: quotaBody, wantStatus: http.StatusTooManyRequests, wantSends: 1, wantStop: "quota_exhausted"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := newProviderBudgetClock(time.Now(), true)
@@ -850,6 +1027,109 @@ func TestProviderSchedulingPersistentPilotQuotaEvidenceControlsRetry(t *testing.
 			}
 			if source := ojson.Get(trace, "upstream_retry_source").String(); source != tc.wantSource {
 				t.Fatalf("upstream retry source = %q, want %q: %s", source, tc.wantSource, trace)
+			}
+		})
+	}
+}
+
+func TestProviderSchedulingPersistentPilotTerminalEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name, code, stop, public string
+		status                   int
+		local                    bool
+	}{
+		{"local validation", "", "local_validation", "invalid_request", 400, true},
+		{"upstream validation", "invalid_value", "upstream_validation", "invalid_request", 400, false},
+		{"upstream safety policy", "content_policy_violation", "upstream_policy", "upstream_policy", 400, false},
+		{"route permission", "permission_denied", "route_permission_denied", "route_permission_denied", 502, false},
+		{"credential revoked", "token_revoked", "credential_revoked", "credential_revoked", 502, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newProviderBudgetClock(time.Now(), true)
+			var sends atomic.Int32
+			logs := t.TempDir()
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+				if sends.Add(1) > 1 {
+					persistentPilotStart(w, "resp-success")
+					persistentPilotSucceed(w, "not-allowed")
+					return
+				}
+				persistentPilotStart(w, "resp-hidden-CANARY")
+				fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":%q,\"message\":\"UPSTREAM-CANARY\"}}}\n\n", tc.code)
+			}, WithRequestLoggerFactory(func(*config.Config, string) logging.RequestLogger {
+				return logging.NewFileRequestLogger(true, logs, logs, 10)
+			}))
+			ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+			defer cancel()
+			input := `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY"}`
+			if tc.local {
+				input = `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY","previous_response_id":"resp_ag_compact_123"}`
+			}
+			w := callPersistentPilot(ctx, f, "/v1/responses", input)
+			trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+			wantSends := int32(1)
+			if tc.local {
+				wantSends = 0
+			}
+			if w.Code != tc.status || sends.Load() != wantSends || len(clock.waits) != 0 ||
+				ojson.Get(w.Body.String(), "error.code").String() != tc.public || ojson.Get(trace, "send_count").Int() != int64(wantSends) ||
+				ojson.Get(trace, "retry_stop_reason").String() != tc.stop || strings.Contains(w.Body.String()+trace, "CANARY") {
+				t.Fatalf("wrong terminal: status=%d sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace)
+			}
+			entries, err := os.ReadDir(logs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatal("pilot created a full request/response log")
+			}
+		})
+	}
+}
+
+func TestProviderSchedulingPersistentPilotUnclassifiedUpstreamRecovers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail func(http.ResponseWriter)
+	}{
+		{"ordinary-403", func(w http.ResponseWriter) { http.Error(w, "RAW-FAILURE-CANARY", 403) }},
+		{"unrecognized-422", func(w http.ResponseWriter) {
+			http.Error(w, `{"error":{"code":"unknown_rejection","message":"RAW-FAILURE-CANARY"}}`, 422)
+		}},
+		{"unknown-stream-failure", func(w http.ResponseWriter) {
+			persistentPilotStart(w, "resp-hidden-CANARY")
+			fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"status_code\":403,\"error\":{\"code\":\"unrecognized\",\"message\":\"RAW-FAILURE-CANARY\"}}}\n\n")
+		}},
+		{"disconnected-after-preamble", func(w http.ResponseWriter) {
+			// An incomplete chunked HTTP response, not a terminal SSE event.
+			persistentPilotStart(w, "resp-hidden-CANARY")
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				panic(err)
+			}
+			_ = conn.Close()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newProviderBudgetClock(time.Now(), true)
+			var sends atomic.Int32
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+				if sends.Add(1) == 1 {
+					tc.fail(w)
+					return
+				}
+				persistentPilotStart(w, "resp-success")
+				persistentPilotSucceed(w, "recovered-request")
+			})
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			w := callPersistentPilot(ctx, f, "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY"}`)
+			trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+			body := w.Body.String()
+			if w.Code != 200 || sends.Load() != 2 || len(clock.waits) != 1 || strings.Count(body, `"type":"response.created"`) != 1 ||
+				strings.Count(body, `"type":"response.completed"`) != 1 || !strings.Contains(body, "recovered-request") || strings.Contains(body+trace, "CANARY") ||
+				ojson.Get(trace, "send_count").Int() != 2 || ojson.Get(trace, "terminal.code").String() != "succeeded" {
+				t.Fatalf("expected a single recovered response: status=%d sends=%d body=%s trace=%s", w.Code, sends.Load(), body, trace)
 			}
 		})
 	}

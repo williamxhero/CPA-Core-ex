@@ -60,6 +60,7 @@ type requestBudget struct {
 	configuredWait      time.Duration
 	credentials         map[string]struct{}
 	routes              map[string]struct{}
+	pilotRejected       map[string]struct{}
 	maxCredentials      int
 	antigravityFailure  scheduledAntigravityFailure
 	antigravityWaitUsed bool
@@ -187,6 +188,7 @@ func (b *requestBudget) credentialSnapshot() map[string]struct{} {
 	out := make(map[string]struct{}, len(b.credentials)+len(b.routes))
 	maps.Copy(out, b.credentials)
 	maps.Copy(out, b.routes)
+	maps.Copy(out, b.pilotRejected)
 	return out
 }
 
@@ -278,7 +280,7 @@ func bindBusinessInferenceBudget(ctx context.Context, auth *Auth, routeIdentity 
 		if err := sendCtx.Err(); err != nil {
 			return err
 		}
-		if b.persistentRetry && b.Attempts > 0 && !b.deadline.IsZero() && !b.now().Before(b.deadline) {
+		if b.persistentRetry && !b.deadline.IsZero() && !b.now().Before(b.deadline) {
 			return context.DeadlineExceeded
 		}
 		if b.enforced {
@@ -359,6 +361,12 @@ func budgetCanRepeat(ctx context.Context) bool {
 	return !s.OutputCommitted && !s.ReplayUnsafe && ctx.Err() == nil
 }
 
+// IsPilotBusinessSendDenied distinguishes the local ledger's denial of a
+// nested send from the previous send's transport failure.
+func IsPilotBusinessSendDenied(err error) bool {
+	return isBudgetReplayStop(err) || errors.Is(err, context.DeadlineExceeded)
+}
+
 func isBudgetReplayStop(err error) bool {
 	return errors.Is(err, errBudgetReplayUnsafe) || errors.Is(err, errBudgetCredentialLimit)
 }
@@ -420,6 +428,13 @@ type scheduledRetryOpportunity struct {
 	antigravityShortWait bool
 	persistentWait       bool
 	probePending         bool
+	capacityPending      bool
+	refreshPending       bool
+	stop                 retryStopReason
+}
+
+func (o scheduledRetryOpportunity) eventPending() bool {
+	return o.probePending || o.capacityPending || o.refreshPending
 }
 
 func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity scheduledRetryOpportunity, singleLimit time.Duration) (bool, error) {
@@ -430,7 +445,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	if opportunity.ready {
 		return true, nil
 	}
-	if (opportunity.at.IsZero() && !(opportunity.persistentWait && opportunity.probePending)) || !budgetCanRepeat(ctx) {
+	if (opportunity.at.IsZero() && !(opportunity.persistentWait && opportunity.eventPending())) || !budgetCanRepeat(ctx) {
 		return false, nil
 	}
 	clock := m.getContinuityClock()
@@ -446,8 +461,12 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 		return false, nil
 	}
 	if deadline, ok := ctx.Deadline(); (ok && !opportunity.at.Before(deadline)) || (!b.deadline.IsZero() && !opportunity.at.Before(b.deadline)) {
-		b.mu.Unlock()
-		return false, nil
+		if !(opportunity.persistentWait && opportunity.eventPending()) {
+			b.mu.Unlock()
+			return false, nil
+		}
+		// Another candidate can still recover by event before this timer.
+		opportunity.at = time.Time{}
 	}
 	b.waiting = true
 	if opportunity.antigravityShortWait {
@@ -543,6 +562,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 	b := requestBudgetFromContext(ctx)
 	if b.persistentRetry {
 		defer func() {
+			finalErr = pilotLifecycleError(ctx, finalErr)
 			switch {
 			case errors.Is(finalErr, context.Canceled):
 				b.setRetryStop(retryStopCanceled)
@@ -596,8 +616,11 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			if ctx.Err() != nil {
 				return zero, ctx.Err()
 			}
+			if b.persistentRetry && errors.Is(err, context.DeadlineExceeded) {
+				return zero, err
+			}
 			if isRequestInvalidError(err) || isRequestTerminatedError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
-				b.setRetryStop(retryStopNonTransientFailure)
+				b.setRetryStop(pilotRequestStop(err))
 				return zero, err
 			}
 			// Keep the best actual upstream result for the public
@@ -689,14 +712,16 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			// Only a failed pick justifies re-evaluation here, not an
 			// execution preparation failure against an unchanged route.
 			var unavailable scheduledUnavailablePick
-			if errors.As(roundCause, &unavailable) {
+			var blockedBy retryStopReason
+			if errors.As(roundCause, &unavailable) || executor.IsInferenceAdmissionError(roundCause) {
 				opportunity := m.scheduledNextAvailability(ctx, providers, model, opts, attempted, m.getContinuityClock().Now(), true)
 				opportunity.persistentWait = true
+				blockedBy = opportunity.stop
 				proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
 				if err != nil {
 					return zero, err
 				}
-				if proceed {
+				if proceed && (!opportunity.ready || errors.As(roundCause, &unavailable)) {
 					first = true
 					roundCause = nil
 					continue
@@ -706,16 +731,27 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 					break
 				}
 			}
-			b.setRetryStop(retryStopNoAvailableRoute)
+			if !errors.As(roundCause, &unavailable) && roundCause != nil && !executor.IsInferenceAdmissionError(roundCause) {
+				b.setRetryStop(retryStopLocalDispatch)
+				return zero, roundCause
+			}
+			if blockedBy == "" {
+				blockedBy = retryStopNoAvailableRoute
+			}
+			b.setRetryStop(blockedBy)
 			break
 		}
-		if b.persistentRetry && (current.UpstreamCategory == string(upstreamCategoryTransient) || current.UpstreamCategory == string(upstreamCategoryTransientRateLimit)) {
+		if b.persistentRetry && (persistentTransient(roundCause) || pilotCodexFailure(roundCause) != "" || current.UpstreamCategory != "") {
+			fact := pilotCodexFailure(roundCause)
+			recoverable := persistentTransient(roundCause)
 			if b.persistentLimit >= 0 && current.Attempts > b.persistentLimit {
-				b.setRetryStop(retryStopRetryLimit)
-				break
-			}
-			if !persistentTransient(roundCause) {
-				b.setRetryStop(retryStopNonTransientFailure)
+				if recoverable {
+					b.setRetryStop(retryStopRetryLimit)
+				} else if fact != "" {
+					b.setRetryStop(retryStopReason(fact))
+				} else {
+					b.setRetryStop(retryStopNonTransientFailure)
+				}
 				break
 			}
 			// A full per-round route cap must not make a previously tried
@@ -731,7 +767,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 					return zero, ctx.Err()
 				}
 				if isRequestInvalidError(alternateErr) || isRequestTerminatedError(alternateErr) || isRequestStopError(alternateErr) || isSchedulerRejectError(alternateErr) {
-					b.setRetryStop(retryStopNonTransientFailure)
+					b.setRetryStop(pilotRequestStop(alternateErr))
 					return zero, alternateErr
 				}
 				if after, _ := RequestBudgetSnapshotFromContext(ctx); after.Attempts > current.Attempts {
@@ -739,8 +775,20 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 					first = false
 					continue
 				}
+				if m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
+					b.setRetryStop(retryStopLocalDispatch)
+					break
+				}
 			}
-			opportunity := m.scheduledOpportunity(ctx, providers, model, opts, nil, roundCause)
+			// A route-local rejection does not authorize reusing that route in
+			// this request. An eligible untried route can still recover by event.
+			excluded := attempted
+			if recoverable {
+				b.mu.Lock()
+				excluded = maps.Clone(b.pilotRejected)
+				b.mu.Unlock()
+			}
+			opportunity := m.scheduledNextAvailability(ctx, providers, model, opts, excluded, m.getContinuityClock().Now(), true)
 			opportunity.persistentWait = true
 			proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
 			if err != nil {
@@ -750,11 +798,25 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				if !opportunity.at.IsZero() {
 					b.setRetryStop(retryStopDeadlineBeforeRecovery)
 				} else {
-					b.setRetryStop(retryStopNoRecoveryRoute)
+					if opportunity.stop != "" && opportunity.stop != retryStopNoAvailableRoute {
+						b.setRetryStop(opportunity.stop)
+					} else if !recoverable && fact != "" {
+						b.setRetryStop(retryStopReason(fact))
+					} else {
+						b.setRetryStop(retryStopNoRecoveryRoute)
+					}
 				}
 				break
 			}
 			if !opportunity.ready {
+				continue
+			}
+			if !recoverable {
+				// In a route-local stop, the cap-full alternate above must
+				// advance the round at the next real send, not clear exclusions.
+				if room {
+					first = true
+				}
 				continue
 			}
 			if !b.nextRound(s.Round) {

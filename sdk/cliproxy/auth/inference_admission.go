@@ -36,6 +36,14 @@ func (m *Manager) SetInferenceAdmissionInspector(check InferenceAdmission, inspe
 	m.inferenceAdmission.Store(&inferenceAdmissionHolder{check: check, inspect: inspect})
 }
 
+// NotifyInferenceAdmissionChanged wakes existing waiters after an authority
+// commits a changed admission state. It does not itself open any route.
+func (m *Manager) NotifyInferenceAdmissionChanged() {
+	if m != nil {
+		m.providerSchedulingWake.signal()
+	}
+}
+
 // ErrorCodePersistentQuotaGate marks a published pause. MarkResult must not
 // create a second cooldown with the same event's quota reset deadline.
 const ErrorCodePersistentQuotaGate = "persistent_quota_gate"

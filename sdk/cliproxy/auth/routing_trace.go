@@ -34,8 +34,10 @@ type RoutingRetryPolicy struct {
 }
 
 type RoutingRecoveryWait struct {
-	NotBefore    *time.Time `json:"not_before,omitempty"`
-	ProbePending bool       `json:"probe_pending,omitempty"`
+	NotBefore       *time.Time `json:"not_before,omitempty"`
+	ProbePending    bool       `json:"probe_pending,omitempty"`
+	CapacityPending bool       `json:"capacity_pending,omitempty"`
+	RefreshPending  bool       `json:"refresh_pending,omitempty"`
 }
 
 type RoutingTrace struct {
@@ -245,7 +247,7 @@ func recordRoutingRecoveryWait(t *routingTrace, opportunity scheduledRetryOpport
 	if t == nil || !t.collect || !opportunity.persistentWait {
 		return
 	}
-	wait := &RoutingRecoveryWait{ProbePending: opportunity.probePending}
+	wait := &RoutingRecoveryWait{ProbePending: opportunity.probePending, CapacityPending: opportunity.capacityPending, RefreshPending: opportunity.refreshPending}
 	if !opportunity.at.IsZero() {
 		at := opportunity.at.UTC()
 		wait.NotBefore = &at
@@ -274,6 +276,15 @@ func FinishRoutingTrace(ctx context.Context, status int, err error) {
 	if t == nil || !t.collect {
 		return
 	}
+	if PersistentRetryPilot(ctx) {
+		err = pilotLifecycleError(ctx, err)
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			requestBudgetFromContext(ctx).setRetryStop(retryStopDeadlineExceeded)
+		case errors.Is(err, context.Canceled):
+			requestBudgetFromContext(ctx).setRetryStop(retryStopCanceled)
+		}
+	}
 	accounting, _ := RequestBudgetSnapshotFromContext(ctx)
 	updateRoutingAccounting(t, accounting)
 	code := "succeeded"
@@ -285,6 +296,9 @@ func FinishRoutingTrace(ctx context.Context, status int, err error) {
 		code, status = "canceled", 499
 	case errors.Is(err, context.DeadlineExceeded):
 		code = "deadline_exceeded"
+		if status == 0 {
+			status = http.StatusGatewayTimeout
+		}
 	case status >= 400 || err != nil:
 		code = "failed"
 	}
@@ -343,6 +357,8 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 	case errors.As(err, &local):
 		failure.status = http.StatusServiceUnavailable
 		failure.Code, failure.Type, failure.Message = "no_available_route", "server_error", "No route is currently available for this model."
+	case actual && pilotCodexFailure(err) == PilotCodexQuota:
+		failure.Code, failure.Type, failure.Message = "quota_exhausted", "rate_limit_error", "The upstream rejected this route for quota exhaustion."
 	case actual && status == http.StatusTooManyRequests:
 		failure.Code, failure.Type, failure.Message = "rate_limit_exceeded", "rate_limit_error", "The upstream rate limit was reached."
 		// #54 defines these structured, normalized facts as applicable to
@@ -354,6 +370,28 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 				failure.retryAt, failure.now = ag.RetryAt, func() time.Time { return RequestBudgetNow(ctx) }
 			}
 		}
+	case actual && pilotCodexFailure(err) != "":
+		fact := pilotCodexFailure(err)
+		failure.Code, failure.Type, failure.Message = string(fact), "server_error", "The upstream service could not complete the request."
+		switch fact {
+		case PilotCodexInvalid, PilotCodexPolicy:
+			failure.Type, failure.Message = "invalid_request_error", "The upstream rejected this request."
+		case PilotCodexAuth, PilotCodexRevoked:
+			failure.status = http.StatusBadGateway
+			failure.Message = "The upstream credential could not authenticate."
+		case PilotCodexPermission, PilotCodexModel:
+			failure.status = http.StatusBadGateway
+		case PilotCodexRecoverable:
+			failure.Code = "upstream_unavailable"
+		}
+	case pilotCodexTerminalFallback(budget, actual, status):
+		failure.Code, failure.Type, failure.Message = "upstream_unavailable", "server_error", "The upstream service could not complete the request."
+		if !actual {
+			failure.Code, failure.Message = "local_dispatch_rejected", "The request could not be dispatched."
+			if status >= 400 && status < 500 {
+				failure.Code, failure.Type, failure.Message = "invalid_request", "invalid_request_error", "The request failed local validation."
+			}
+		}
 	case actual && (status == http.StatusUnauthorized || status == http.StatusForbidden):
 		failure.status = http.StatusBadGateway
 		failure.Code, failure.Type, failure.Message = "upstream_authentication_required", "server_error", "The upstream credential could not authenticate."
@@ -363,4 +401,14 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 		return err
 	}
 	return failure
+}
+
+func pilotCodexTerminalFallback(budget RequestBudgetSnapshot, actual bool, status int) bool {
+	switch retryStopReason(budget.RetryStopReason) {
+	case retryStopLocalValidation, retryStopLocalDispatch:
+		return !actual
+	case retryStopRequestPolicy, retryStopStreamRecoveryLimit, retryStopOutputCommitted, retryStopReplayUnsafe:
+		return actual && status < http.StatusInternalServerError
+	}
+	return false
 }

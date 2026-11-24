@@ -146,27 +146,34 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if errValidate := helps.ValidateCodexHostedImageGenerationDoc(doc, httpReq.Header, e.cfg, !useSIWC && !codexAuthUsesAPIKey(auth)); errValidate != nil {
 		return nil, errValidate
 	}
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
+	pilot := cliproxyauth.PersistentRetryPilot(ctx)
+	if !pilot {
+		var authID, authLabel, authType, authValue string
+		if auth != nil {
+			authID = auth.ID
+			authLabel = auth.Label
+			authType, authValue = auth.AccountInfo()
+		}
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   httpReq.Header.Clone(),
+			Body:      upstreamBody,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      upstreamBody,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
 
+	recordError := func(err error) {
+		if !pilot {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+		}
+	}
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
-	pilot := cliproxyauth.PersistentRetryPilot(ctx)
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
 	// Count raw startup lines even when the translator emits nothing for them.
 	pilotStartup := pilot
@@ -187,26 +194,41 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	httpResp, err := doCodexRequest(httpClient, httpReq, upstreamBody, prepareHeaders, responseReady)
 	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		recordError(err)
+		if pilot && ctx.Err() == nil && cliproxyexecutor.BusinessUpstreamAttempted(ctx) && !cliproxyexecutor.IsInferenceAdmissionError(err) && !cliproxyauth.IsPilotBusinessSendDenied(err) {
+			return nil, codexPilotTransportFailure(err)
+		}
 		return nil, err
 	}
-	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if !pilot {
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		if !pilot {
+			helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		}
 		if readErr != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
+			recordError(readErr)
+			if pilot && ctx.Err() == nil {
+				return nil, codexPilotTransportFailure(readErr)
+			}
 			return nil, readErr
 		}
 		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
-			return nil, errClearReplay
+			if !pilot {
+				return nil, errClearReplay
+			}
+			return nil, cliproxyauth.NewRequestScopedError("Could not invalidate the rejected continuation state.", http.StatusBadGateway)
 		}
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		if !pilot {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		}
 		businessErr := e.codexHTTPBusinessError(ctx, auth, httpResp, data, upstreamBody, baseModel)
-		return nil, codexPilotFailureFacts(ctx, businessErr, httpResp.Header, nil, data)
+		return nil, codexPilotFailureFacts(ctx, businessErr, httpResp.Header, nil, data, httpResp.StatusCode)
 	}
 
 	bufferedFrames := 0
@@ -216,7 +238,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 	scanner := helps.NewCodexSSEScanner(ctx, httpResp.Body, 52_428_800) // 50MB
 	scanner.SetOnLine(func(rawLine []byte) {
-		helps.AppendAPIResponseChunk(ctx, e.cfg, rawLine)
+		if !pilot {
+			helps.AppendAPIResponseChunk(ctx, e.cfg, rawLine)
+		}
 		if pilotStartup {
 			pilotLines++
 			pilotBytes += len(rawLine)
@@ -335,7 +359,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if pilot {
-						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody)
+						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, 0)
 					}
 					closeBootstrapBody()
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -343,7 +367,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						reporter.PublishFailure(ctx, errClearReplay)
 						return nil, errClearReplay
 					}
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					recordError(streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					if pilot {
 						return nil, streamErr
@@ -381,6 +405,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					// contract that only overload and rate-limit rejections fail the attempt over.
 					// The conductor commits a stream once it has seen a payload, so this only takes
 					// effect for downstream formats that render the held frames into a chunk.
+					if pilot {
+						return nil, codexPilotTransportFailure(streamErr)
+					}
 					bootstrapTerminalErr = streamErr
 					break
 				}
@@ -480,12 +507,18 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
-				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				recordError(errScan)
 				reporter.PublishFailure(ctx, errScan)
+				if pilot {
+					return nil, codexPilotTransportFailure(errScan)
+				}
 				return nil, errScan
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
+			}
+			if pilot {
+				return nil, codexPilotTransportFailure(newCodexIncompleteStreamError())
 			}
 			if len(bufferedChunks) == 0 && len(initialChunks) == 0 {
 				emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}
@@ -572,7 +605,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if pilot {
-						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody)
+						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, 0)
 					}
 					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
@@ -583,7 +616,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						}
 						return
 					}
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					recordError(streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
@@ -601,7 +634,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					sawOutputDelta = true
 				}
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
-					streamErr := newCodexEmptyIncompleteStreamError()
+					var streamErr error = newCodexEmptyIncompleteStreamError()
+					if pilot {
+						streamErr = codexPilotTransportFailure(streamErr)
+					}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
@@ -660,7 +696,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			if ctx.Err() != nil {
 				return
 			}
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			recordError(errScan)
+		}
+		if pilot && ctx.Err() == nil {
+			streamErr := codexPilotTransportFailure(newCodexIncompleteStreamError())
+			reporter.PublishFailure(ctx, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+			return
 		}
 		if emittedCount == 0 {
 			emptyErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before first payload"}

@@ -1797,8 +1797,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 		}
 
-		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, routeModel)
+		if !pilotCodex(ctx, provider) {
+			debugLogAuthSelection(logEntryWithRequestID(ctx), auth, provider, routeModel)
+		}
 		if selection != nil {
 			if errRuntimeAuth := m.bindHomeSelectionRuntimeAuth(ctx, opts, selection); errRuntimeAuth != nil {
 				selection.End("runtime_auth_bind_failed")
@@ -1889,6 +1890,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				m.reportHomeResult(execCtx, result, auth)
 				releaseAttempt()
 			} else {
+				if pilotCodex(execCtx, provider) && result.Error != nil {
+					result.Error.Message = "Codex credential preparation failed"
+				}
 				m.MarkResult(execCtx, result)
 			}
 			noteStreamReplayExcludedAuth(ctx, auth.ID)

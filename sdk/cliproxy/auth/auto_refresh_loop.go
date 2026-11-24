@@ -33,6 +33,7 @@ type authAutoRefreshLoop struct {
 type authRefreshJob struct {
 	id                string
 	registrationEpoch uint64
+	credentialVersion uint64
 	pendingUntil      time.Time
 	loop              *authAutoRefreshLoop
 	running           bool // guarded by manager.mu

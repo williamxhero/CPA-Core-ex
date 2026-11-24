@@ -1234,7 +1234,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					return nil, wrapRequestStopError(errStream)
 				}
 				lastErr = errStream
-				if result.CredentialScope {
+				if result.CredentialScope || isPilotRouteRejection(errStream) {
 					return nil, preferredExecutionAttemptError(errStream, upstreamErr)
 				}
 				continue
@@ -1243,7 +1243,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errStream
 			}
 			lastErr = errStream
-			if result.CredentialScope {
+			if result.CredentialScope || isPilotRouteRejection(errStream) {
 				return nil, preferredExecutionAttemptError(errStream, upstreamErr)
 			}
 			continue
@@ -1338,7 +1338,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 					return nil, wrapRequestStopError(bootstrapErr)
 				}
 				lastErr = bootstrapErr
-				if result.CredentialScope {
+				if result.CredentialScope || isPilotRouteRejection(bootstrapErr) {
 					currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 					return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 				}
@@ -1351,20 +1351,20 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				if isCredentialScopedError(bootstrapErr) {
 					result.CredentialScope = true
 				}
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, bootstrapErr, false)
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
-			if idx < len(execModels)-1 {
+			if idx < len(execModels)-1 && !isPilotRouteRejection(bootstrapErr) && (!pilotCodex(ctx, provider) || budgetCanRepeat(ctx)) {
 				rerr := resultErrorFromError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: rerr, Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
 				if isCredentialScopedError(bootstrapErr) {
 					result.CredentialScope = true
 				}
-				m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+				m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, bootstrapErr, false)
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
@@ -1399,7 +1399,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			}
 			warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, time.Since(startStream), emptyErr)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: false, Error: resultErrorFromError(emptyErr), Options: execOpts, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}
-			m.recordExecutionResult(ctx, result, auth, ephemeralResult)
+			m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, emptyErr, false)
 			if idx < len(execModels)-1 {
 				lastErr = emptyErr
 				continue
