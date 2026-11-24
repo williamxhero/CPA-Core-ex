@@ -287,10 +287,10 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 				c.reasons = append(c.reasons, authBlock)
 			case reason == blockReasonDisabled:
 				switch {
-				case isTOSViolationResultError(a.LastError), state != nil && isTOSViolationResultError(state.LastError), a.Disabled && a.Metadata[DisableCauseMetadataKey] == "tos_violation":
-					c.reasons = appendSchedulingReason(c.reasons, "tos_violation")
 				case a.Disabled && a.Metadata[DisableCauseMetadataKey] == "manual":
 					c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
+				case a.Disabled && a.Metadata[DisableCauseMetadataKey] == "tos_violation", isTOSViolationResultError(a.LastError), state != nil && isTOSViolationResultError(state.LastError):
+					c.reasons = appendSchedulingReason(c.reasons, "tos_violation")
 				default:
 					c.reasons = appendSchedulingReason(c.reasons, "disabled")
 				}
@@ -377,6 +377,9 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 					c.blockedUntil = state.at
 					c.reasons = append(c.reasons, "cooldown")
 				case state.slotLimit() > 0 && u.pilotInUse[c.routeID] >= state.slotLimit():
+					if u.available(c.limits) {
+						c.blockedUntil = state.stableAt()
+					}
 					c.reasons = append(c.reasons, "recovery_capacity_full")
 				case u.olderWaiter(b, c.routeID):
 					c.reasons = append(c.reasons, "older_waiter")

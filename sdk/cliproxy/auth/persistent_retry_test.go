@@ -161,6 +161,77 @@ func TestManagerPilotFirstSendAtCooldownEdge(t *testing.T) {
 	}
 }
 
+func TestManagerPilotFirstSendAtRecoveryCapacityEdge(t *testing.T) {
+	for _, cross := range []bool{false, true} {
+		name := "wait_for_timer"
+		if cross {
+			name = "threshold_between_pick_and_recheck"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, upstream := setupForceMappingManager(t, "codex", "upstream-fixture", persistentRetryPilotModel)
+			const id = "fee222e4-6116-4cd5-9578-23265074d937"
+			cfg := &internalconfig.Config{}
+			cfg.Routing.ProviderScheduling = internalconfig.ProviderSchedulingConfig{Mode: "enforce", PersistentRetryModels: []string{persistentRetryPilotModel}, Resources: map[string]internalconfig.ProviderSchedulingResource{id: {MaxConcurrent: 3}}}
+			m.SetConfig(cfg)
+			clock := newFakeContinuityClock(time.Now().Add(-2 * time.Minute))
+			m.SetContinuityClockForTest(clock)
+			a, _ := m.GetByID("codex-force-mapping-auth")
+			a.ResourceIdentity = &resource.Binding{Targets: []resource.Target{{ResourceID: id}}}
+			if _, err := m.Update(WithSkipPersist(t.Context()), a); err != nil {
+				t.Fatal(err)
+			}
+			providers := []string{"codex"}
+			pick := func() *routeReservation {
+				ctx := WithFreshRequestBudget(t.Context())
+				b := requestBudgetFromContext(ctx)
+				b.persistentRetry, b.persistentLimit, b.now = true, -1, clock.Now
+				opts := executor.Options{Metadata: map[string]any{}}
+				if _, _, _, err := m.pickScheduledRoute(ctx, providers, persistentRetryPilotModel, opts, nil); err != nil {
+					t.Fatal(err)
+				}
+				return takeRouteReservation(opts)
+			}
+			fault := pick()
+			fault.notePersistentFailure(fault.ctx, persistentTestFailure())
+			fault.release()
+			clock.Advance(2 * time.Second)
+			for range 3 {
+				success := pick()
+				success.completePersistentProbe()
+				success.release()
+			}
+			// Fill both validation slots. Neither holder returns a result or wakes the new request.
+			for range 2 {
+				hold := pick()
+				defer hold.release()
+			}
+			edge := clock.Now().Add(time.Minute)
+			clock.Advance(time.Minute - time.Millisecond)
+			misses := 0
+			ctx := WithSchedulingDecisionObserver(t.Context(), func(d SchedulingDecision) {
+				if d.Counts.Available == 0 {
+					misses++
+					if cross && misses == 1 {
+						clock.Advance(time.Millisecond)
+					}
+				}
+			})
+			s, err := m.ExecuteStream(ctx, providers, executor.Request{Model: persistentRetryPilotModel}, executor.Options{Stream: true, SourceFormat: sdktranslator.FormatOpenAIResponse, Metadata: map[string]any{executor.RequestPathMetadataKey: "/v1/responses"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for chunk := range s.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+			}
+			if misses != 1 || !clock.Now().Equal(edge) || len(upstream.StreamModels()) != 1 {
+				t.Fatalf("misses=%d time relative to threshold=%s sends=%v", misses, clock.Now().Sub(edge), upstream.StreamModels())
+			}
+		})
+	}
+}
+
 func persistentTestFailure() error {
 	return &Error{HTTPStatus: http.StatusBadGateway, Message: "temporary upstream rejection"}
 }

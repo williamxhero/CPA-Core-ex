@@ -217,8 +217,17 @@ func (s *persistentRouteBackoff) pace(now time.Time, delay time.Duration, source
 	}
 }
 
+// A clock transition alone can lift the validation cap only after three successes.
+func (s persistentRouteBackoff) stableAt() time.Time {
+	if s.successes < 3 || s.firstSuccess.IsZero() {
+		return time.Time{}
+	}
+	return s.firstSuccess.Add(pilotStableFor)
+}
+
 func (s persistentRouteBackoff) stable(now time.Time) bool {
-	return s.successes >= 3 && !s.firstSuccess.IsZero() && now.Sub(s.firstSuccess) >= pilotStableFor
+	at := s.stableAt()
+	return !at.IsZero() && !now.Before(at)
 }
 
 // Evaluation can observe the 60s threshold after the third success. No timer

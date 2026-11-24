@@ -98,6 +98,7 @@ func (m *Manager) joinPilotWait(ctx context.Context, opportunity *scheduledRetry
 	i := u.waiterIndex(b)
 	if i < 0 {
 		capacity := m.runtimeConfigSnapshot().Routing.ProviderScheduling.PersistentRetry.WaiterCapacity()
+		recordWaiterCapacity(b.trace.Load(), capacity)
 		n := 0
 		for _, w := range u.waiters {
 			if w.caller == caller {

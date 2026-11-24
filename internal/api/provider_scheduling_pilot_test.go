@@ -708,6 +708,51 @@ func TestProviderSchedulingPersistentPilotFirstSendAfterOrdinaryCooldown(t *test
 	}
 }
 
+func TestProviderSchedulingPilotManagementDisableAfterTOS(t *testing.T) {
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, newProviderBudgetClock(time.Now(), false), func(http.ResponseWriter, *http.Request) { t.Error("disabled credential sent") })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","disabled":true,"cpa_disable_cause":"tos_violation"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := fileauth.NewFileTokenStore()
+	store.SetBaseDir(dir)
+	f.manager.SetStore(store)
+	reload := func() {
+		entries, err := store.List(t.Context())
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("load: %v (%d entries)", err, len(entries))
+		}
+		a := entries[0]
+		a.ID = t.Name() + "/primary"
+		if _, err := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reload()
+	updatePilotAuth(t, f, t.Name()+"/primary", func(a *coreauth.Auth) { a.LastError = &coreauth.Error{Code: "tos_violation"} })
+	check := func(want string) {
+		t.Helper()
+		w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
+		trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+		if w.Code != 503 || ojson.Get(trace, "retry_stop_reason").String() != want {
+			t.Fatalf("want %s: %d %s", want, w.Code, trace)
+		}
+	}
+	check("tos_violation")
+	r := httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/status", strings.NewReader(`{"name":"fixture.json","disabled":true}`))
+	r.RemoteAddr = "127.0.0.1:1234"
+	r.Header.Set("Authorization", "Bearer test-password")
+	w := httptest.NewRecorder()
+	f.server.engine.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("disable: %d %s", w.Code, w.Body)
+	}
+	check("manual_disabled")
+	reload()
+	check("manual_disabled")
+}
+
 func TestProviderSchedulingPilotReloadedDisableWithoutCause(t *testing.T) {
 	for _, tc := range []struct{ name, body, stop string }{{"legacy", `{"type":"codex","disabled":true}`, "disabled"}, {"operational", `{"type":"codex","disabled":true,"cpa_disable_cause":"tos_violation"}`, "tos_violation"}} {
 		t.Run(tc.name, func(t *testing.T) {

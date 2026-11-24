@@ -374,12 +374,25 @@ func TestProviderSchedulingPilotLiveCadenceReload(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
+	reloadPilotSetting(t, ctx, f, "[3s, 5s", "[4s, 5s")
+	release <- struct{}{}
+	timer := awaitPilotTimer(t, ctx, clock, done)
+	trace := readSchedulingTraceForTest(t, f, coreauth.RoutingTraceID(req))
+	if timer.at.Sub(clock.Now()) != 4*time.Second || ojson.Get(trace, "retry_policy.admission_cadence.probe_backoff.0").String() != "3s" || ojson.Get(trace, "retry_policy.cadence.probe_backoff.0").String() != "4s" {
+		t.Fatalf("timer=%v trace=%s", timer.at, trace)
+	}
+	cancel()
+	awaitPilotResult(t, t.Context(), done)
+}
+
+func reloadPilotSetting(t *testing.T, ctx context.Context, f *inventoryHarness, old, next string) {
+	t.Helper()
 	path := f.server.configFilePath
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if errWrite := os.WriteFile(path, []byte(strings.Replace(string(raw), "[3s, 5s", "[4s, 5s", 1)), 0600); errWrite != nil {
+	if errWrite := os.WriteFile(path, []byte(strings.Replace(string(raw), old, next, 1)), 0600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
 	cfg, errLoad := config.LoadConfig(path)
@@ -389,14 +402,37 @@ func TestProviderSchedulingPilotLiveCadenceReload(t *testing.T) {
 	if !f.manager.ApplyConfigWithCooldownStateStore(ctx, cfg, nil) || !f.server.UpdateClientsContext(ctx, cfg) {
 		t.Fatal("reload failed")
 	}
-	release <- struct{}{}
-	timer := awaitPilotTimer(t, ctx, clock, done)
-	trace := readSchedulingTraceForTest(t, f, coreauth.RoutingTraceID(req))
-	if timer.at.Sub(clock.Now()) != 4*time.Second || ojson.Get(trace, "retry_policy.admission_cadence.probe_backoff.0").String() != "3s" || ojson.Get(trace, "retry_policy.cadence.probe_backoff.0").String() != "4s" {
-		t.Fatalf("timer=%v trace=%s", timer.at, trace)
+}
+
+func TestProviderSchedulingPilotWaiterCapacityReload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	started, release := make(chan struct{}), make(chan struct{})
+	f := newConfiguredPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, newManualPersistentPilotClock(), 1, "    persistent-retry: {max-waiters: 4, max-waiters-per-caller: 2}\n", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(502)
+	})
+	_, active := pilotWaiter(ctx, f, "open", "admitted")
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	other, waiting := pilotWaiter(ctx, f, "open", "waiting")
+	awaitPilotWaitTrace(t, ctx, other, f, waiting, "capacity_pending")
+	reloadPilotSetting(t, ctx, f, "max-waiters-per-caller: 2", "max-waiters-per-caller: 1")
+	close(release)
+	w := awaitPilotResult(t, ctx, active)
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if w.Code != 503 || ojson.Get(trace, "retry_stop_reason").String() != "caller_waiter_capacity" || ojson.Get(trace, "retry_policy.admission_waiter_capacity.per_caller").Int() != 2 || ojson.Get(trace, "retry_policy.waiter_capacity.per_caller").Int() != 1 {
+		t.Fatalf("status=%d trace=%s", w.Code, trace)
 	}
 	cancel()
-	awaitPilotResult(t, t.Context(), done)
+	awaitPilotResult(t, t.Context(), waiting)
 }
 
 func TestProviderSchedulingPersistentPilotRollbackOnYAMLReload(t *testing.T) {

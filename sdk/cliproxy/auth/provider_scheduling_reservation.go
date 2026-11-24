@@ -292,8 +292,8 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 					continue
 				}
 				if state.slotLimit() > 0 && u.pilotInUse[c.routeID] >= state.slotLimit() {
-					if state.successes >= 3 && u.available(c.limits) {
-						opportunity.noteRoute(c.routeID, state.firstSuccess.Add(pilotStableFor), "recovery_validation")
+					if at := state.stableAt(); !at.IsZero() && u.available(c.limits) {
+						opportunity.noteRoute(c.routeID, at, "recovery_validation")
 					} else {
 						opportunity.noteRoute(c.routeID, time.Time{}, "")
 					}

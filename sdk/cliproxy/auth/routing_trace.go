@@ -33,6 +33,7 @@ type RoutingRetryPolicy struct {
 	UpstreamErrorRetryLimit int                                          `json:"upstream_error_retry_limit"`
 	AdmissionCadence        internalconfig.PersistentRetryCadence        `json:"admission_cadence"`
 	Cadence                 internalconfig.PersistentRetryCadence        `json:"cadence"`
+	AdmissionWaiterCapacity internalconfig.PersistentRetryWaiterCapacity `json:"admission_waiter_capacity"`
 	WaiterCapacity          internalconfig.PersistentRetryWaiterCapacity `json:"waiter_capacity"`
 	WaiterBufferBytes       int                                          `json:"waiter_buffer_bytes"`
 }
@@ -327,7 +328,18 @@ func recordRoutingRetryPolicy(t *routingTrace, sourceFormat string, limit int, c
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit, AdmissionCadence: cfg.Cadence(), Cadence: cfg.Cadence(), WaiterCapacity: cfg.WaiterCapacity(), WaiterBufferBytes: pilotWaitBufferBytes}
+	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit, AdmissionCadence: cfg.Cadence(), Cadence: cfg.Cadence(), AdmissionWaiterCapacity: cfg.WaiterCapacity(), WaiterCapacity: cfg.WaiterCapacity(), WaiterBufferBytes: pilotWaitBufferBytes}
+}
+
+func recordWaiterCapacity(t *routingTrace, capacity internalconfig.PersistentRetryWaiterCapacity) {
+	if t == nil || !t.collect {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if policy := t.data.RetryPolicy; policy != nil {
+		policy.WaiterCapacity = capacity
+	}
 }
 
 func recordRoutingRecoveryWait(t *routingTrace, opportunity scheduledRetryOpportunity) {
