@@ -3925,7 +3925,7 @@ func isTOSViolationResultError(err *Error) bool {
 // result error onto the credential record so the management API can surface it
 // for the operator. It is a no-op for errors without appeal metadata.
 func persistTOSAppealMetadata(auth *Auth, err *Error) {
-	if auth == nil || err == nil || len(err.Metadata) == 0 {
+	if auth == nil || err == nil {
 		return
 	}
 	if auth.Metadata == nil {
@@ -3936,6 +3936,7 @@ func persistTOSAppealMetadata(auth *Auth, err *Error) {
 			auth.Metadata[key] = trimmed
 		}
 	}
+	auth.Metadata[DisableCauseMetadataKey] = "tos_violation"
 }
 
 func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {

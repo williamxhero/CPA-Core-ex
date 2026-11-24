@@ -146,6 +146,7 @@ func (r *routeReservation) notePersistentFailure(ctx context.Context, err error)
 		category = upstreamCategoryTransientRateLimit
 	}
 	b.UpstreamCategory = string(category)
+	b.pacedStatus = statusCodeFromError(err)
 	b.UpstreamRetryAt = state.at
 	b.UpstreamRetrySource = state.source
 	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)

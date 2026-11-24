@@ -6,10 +6,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 type forceMappingExecutor struct {
@@ -341,6 +344,53 @@ func TestManagerExecuteStream_OAuthAliasForceMappingRewritesStreamResponse(t *te
 	}
 	if got := string(payload); !strings.Contains(got, aliasModel) || forceMappingPayloadLeaksUpstream(got, upstreamModel) {
 		t.Fatalf("stream payload = %s, want alias %q without upstream %q", got, aliasModel, upstreamModel)
+	}
+}
+
+type slowMappedCodex struct {
+	*forceMappingExecutor
+	chunks chan cliproxyexecutor.StreamChunk
+}
+
+func (e *slowMappedCodex) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return &cliproxyexecutor.StreamResult{Chunks: e.chunks}, nil
+}
+
+func TestPilotForceMappedStreamWaitsForProducer(t *testing.T) {
+	m, base := setupForceMappingManager(t, "codex", "fixture-upstream", persistentRetryPilotModel)
+	cfg := &internalconfig.Config{}
+	cfg.Codex.StreamBootstrapTimeout = "15ms"
+	cfg.Routing.ProviderScheduling = internalconfig.ProviderSchedulingConfig{Mode: "enforce", PersistentRetryModels: []string{persistentRetryPilotModel}}
+	m.SetConfig(cfg)
+	m.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{"codex": {{Name: "fixture-upstream", Alias: persistentRetryPilotModel, ForceMapping: true, Fork: true}}})
+	ch := make(chan cliproxyexecutor.StreamChunk, 3)
+	m.RegisterExecutor(&slowMappedCodex{base, ch})
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte("x-sse-field: pending\n")}
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	s, err := m.ExecuteStream(ctx, []string{"codex"}, cliproxyexecutor.Request{Model: persistentRetryPilotModel}, cliproxyexecutor.Options{Stream: true, SourceFormat: sdktranslator.FormatOpenAIResponse, Metadata: map[string]any{cliproxyexecutor.RequestPathMetadataKey: "/v1/responses"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case chunk := <-s.Chunks:
+		close(ch)
+		t.Fatalf("premature chunk: %+v", chunk)
+	case <-timer.C:
+	}
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte("data: " + strings.ReplaceAll(liveCodexResponsesCompletedUpstream, "gpt-5.4", "fixture-upstream") + "\n\n")}
+	close(ch)
+	var out strings.Builder
+	for chunk := range s.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+		out.Write(chunk.Payload)
+	}
+	if !strings.Contains(out.String(), persistentRetryPilotModel) {
+		t.Fatalf("missing mapped completion: %s", out.String())
 	}
 }
 

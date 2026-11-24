@@ -22,6 +22,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	fileauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 	log "github.com/sirupsen/logrus"
@@ -707,6 +708,34 @@ func TestProviderSchedulingPersistentPilotFirstSendAfterOrdinaryCooldown(t *test
 	}
 }
 
+func TestProviderSchedulingPilotReloadedDisableWithoutCause(t *testing.T) {
+	for _, tc := range []struct{ name, body, stop string }{{"legacy", `{"type":"codex","disabled":true}`, "disabled"}, {"operational", `{"type":"codex","disabled":true,"cpa_disable_cause":"tos_violation"}`, "tos_violation"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "fixture.json"), []byte(tc.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			store := fileauth.NewFileTokenStore()
+			store.SetBaseDir(dir)
+			entries, err := store.List(t.Context())
+			if err != nil || len(entries) != 1 {
+				t.Fatalf("reload: count=%d err=%v", len(entries), err)
+			}
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, newProviderBudgetClock(time.Now(), false), func(http.ResponseWriter, *http.Request) { t.Error("disabled credential sent") })
+			a := entries[0]
+			a.ID = t.Name() + "/primary"
+			if _, errUpdate := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
+			trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+			if w.Code != 503 || strings.Contains(trace, "manual_disabled") || ojson.Get(trace, "retry_stop_reason").String() != tc.stop || ojson.Get(trace, "send_count").Int() != 0 {
+				t.Fatalf("status=%d trace=%s", w.Code, trace)
+			}
+		})
+	}
+}
+
 func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 	const path = "/v1/chat/completions"
 	for _, scenario := range []string{"trusted-hint", "healthy-backup", "backup-wakes-waiter", "cancel", "no-route", "operational-suspension", "ineligible-backup", "unscoped-quota"} {
@@ -776,7 +805,10 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 			primaryID := t.Name() + "/primary"
 			switch scenario {
 			case "no-route":
-				updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) { a.Disabled = true })
+				updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) {
+					a.Disabled = true
+					a.Metadata = map[string]any{coreauth.DisableCauseMetadataKey: "manual"}
+				})
 				if trace := assertResult(call(), http.StatusServiceUnavailable, 0, "manual_disabled"); ojson.Get(trace, "last_recovery_wait").Exists() || ojson.Get(trace, "terminal.code").String() != "no_available_route" {
 					t.Fatalf("disabled route caused a wait: %s", trace)
 				}
@@ -975,6 +1007,15 @@ func TestProviderSchedulingPersistentPilotRefreshLogsOpaqueCredential(t *testing
 	}
 	registry.GetGlobalRegistry().RegisterClient(file, "codex", []*registry.ModelInfo{{ID: persistentPilotModel}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(file) })
+	transport := http.DefaultTransport
+	http.DefaultTransport = nativeFundingTestTransport(func(r *http.Request) (*http.Response, error) {
+		resp, err := transport.RoundTrip(r)
+		if err == nil && r.URL.Path == "/oauth/token" {
+			resp.Body = pilotCloseErrorBody{resp.Body}
+		}
+		return resp, err
+	})
+	t.Cleanup(func() { http.DefaultTransport = transport })
 	hook.Reset() // Observe the request and refresh, not fixture registration.
 	w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
 	trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
@@ -1126,6 +1167,38 @@ func TestProviderSchedulingPersistentPilotFiniteSameRouteBudget(t *testing.T) {
 	}
 }
 
+func TestProviderSchedulingPilotCompatibilityFallbackHonorsCredentialLimit(t *testing.T) {
+	var primary, compat atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, newProviderBudgetClock(time.Now(), true), func(w http.ResponseWriter, _ *http.Request) {
+		if primary.Add(1) == 1 {
+			http.Error(w, "temporary", 502)
+			return
+		}
+		persistentPilotStart(w, "resp-primary")
+		persistentPilotSucceed(w, "primary-recovered")
+	})
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { compat.Add(1); http.Error(w, "unexpected fallback", 502) }))
+	t.Cleanup(target.Close)
+	const provider = "openai-compatibility"
+	id := t.Name() + "/compat"
+	f.manager.RegisterExecutor(runtimeexecutor.NewOpenAICompatExecutor(provider, f.server.cfg))
+	_, err := f.manager.Register(coreauth.WithSkipPersist(t.Context()), &coreauth.Auth{ID: id, Provider: provider, Status: coreauth.StatusActive, Attributes: map[string]string{"api_key": "fixture", "base_url": target.URL, "compat_name": provider, "priority": "10"}, Metadata: map[string]any{"request_retry": 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(id, provider, []*registry.ModelInfo{{ID: persistentPilotModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+	defer cancel()
+	w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
+	if compat.Load() != 0 {
+		t.Fatalf("legacy credential sent in excluded round: compat=%d primary=%d status=%d", compat.Load(), primary.Load(), w.Code)
+	}
+	if primary.Load() != 2 || w.Code != 200 {
+		t.Fatalf("eligible pilot did not recover: primary=%d status=%d body=%s", primary.Load(), w.Code, w.Body)
+	}
+}
+
 func TestProviderSchedulingPersistentPilotExplicitBudgetOverridesCredentialRetry(t *testing.T) {
 	for _, limit := range []int{-1, 1} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
@@ -1160,6 +1233,24 @@ func TestProviderSchedulingPersistentPilotExplicitBudgetOverridesCredentialRetry
 				ojson.Get(trace, "retry_policy.upstream_error_retry_limit").Int() != int64(limit) ||
 				ojson.Get(trace, "send_count").Int() != int64(wantSends) || ojson.Get(trace, "retry_stop_reason").String() != wantStop {
 				t.Fatalf("wrong budget outcome: status=%d sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace)
+			}
+		})
+	}
+}
+
+func TestProviderSchedulingPilotUnscopedQuotaFrameStatus(t *testing.T) {
+	for _, path := range []string{"status_code", "error.status_code"} {
+		t.Run(path, func(t *testing.T) {
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, newProviderBudgetClock(time.Now(), true), func(w http.ResponseWriter, _ *http.Request) {
+				persistentPilotStart(w, "resp-hidden")
+				doc := ojson.NewDocString(`{"type":"response.failed","error":{"type":"usage_limit_reached","message":"RAW-CANARY"}}`)
+				_ = doc.Set(path, 502)
+				fmt.Fprintf(w, "data: %s\n\n", doc.String())
+			})
+			w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
+			trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+			if w.Code != 502 || ojson.Get(trace, "upstream_category").String() != "transient_upstream" || strings.Contains(w.Body.String()+trace, "CANARY") {
+				t.Fatalf("status=%d body=%s trace=%s", w.Code, w.Body, trace)
 			}
 		})
 	}
@@ -1347,6 +1438,20 @@ func TestProviderSchedulingPersistentPilotTerminalEvidence(t *testing.T) {
 				t.Fatal("pilot created a full request/response log")
 			}
 		})
+	}
+}
+
+func TestProviderSchedulingPilotMixedRouteDenialAtLimit(t *testing.T) {
+	var a, b atomic.Int32
+	f := newPersistentPilotHTTPWithYAML(t, "[gpt-6.2-sol]", 1, newProviderBudgetClock(time.Now(), true), 1, 2, "", func(w http.ResponseWriter, _ *http.Request) { a.Add(1); http.Error(w, "RAW-CANARY", 502) })
+	addPersistentPilotCodex(t, f, "backup", "10", func(w http.ResponseWriter, _ *http.Request) {
+		b.Add(1)
+		http.Error(w, `{"error":{"code":"permission_denied","message":"RAW-CANARY"}}`, 403)
+	})
+	w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
+	trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+	if w.Code != 502 || a.Load() != 1 || b.Load() != 1 || ojson.Get(w.Body.String(), "error.code").String() != "upstream_unavailable" || ojson.Get(trace, "retry_stop_reason").String() != "retry_limit" || strings.Contains(trace+w.Body.String(), "CANARY") {
+		t.Fatalf("status=%d sends=%d+%d body=%s trace=%s", w.Code, a.Load(), b.Load(), w.Body, trace)
 	}
 }
 

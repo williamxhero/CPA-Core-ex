@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func newPersistentBackoffTest(t *testing.T, start time.Time) (*Manager, *fakeContinuityClock, *routeReservation, context.Context, func() RequestBudgetSnapshot) {
@@ -89,6 +90,74 @@ func TestPersistentRetryReservationReleasedBeforeRecheck(t *testing.T) {
 				t.Fatalf("unchanged local rejection must not retry: err=%v calls=%d accounting=%+v", err, calls, snapshot())
 			}
 		})
+	}
+}
+
+func TestPersistentRetryCooldownExpiresBetweenPickAndRecheck(t *testing.T) {
+	m, clock, _, ctx, snapshot := newPersistentBackoffTest(t, time.Now())
+	m.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+	a := &Auth{ID: t.Name(), Provider: "codex", Status: StatusActive, ModelStates: map[string]*ModelState{persistentRetryPilotModel: {Unavailable: true, NextRetryAfter: clock.Now().Add(time.Minute)}}}
+	if _, err := m.Register(WithSkipPersist(ctx), a); err != nil {
+		t.Fatal(err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: persistentRetryPilotModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+	b := requestBudgetFromContext(ctx)
+	b.persistentRetry, b.persistentLimit = true, -1
+	req := executor.Request{Model: persistentRetryPilotModel}
+	providers := []string{"codex"}
+	calls := 0
+	_, err := runScheduledExecution(m, ctx, providers, req, executor.Options{Metadata: map[string]any{}}, nil, func(ctx context.Context, opts executor.Options, _, _ int, _ *int) (string, error) {
+		calls++
+		_, _, _, errPick := m.pickScheduledRoute(ctx, providers, req.Model, opts, nil)
+		if calls == 1 {
+			if _, ok := errPick.(scheduledUnavailablePick); !ok {
+				t.Fatalf("expected cooldown miss, got %v", errPick)
+			}
+			clock.Advance(time.Minute)
+		}
+		if r := takeRouteReservation(opts); r != nil {
+			r.release()
+		}
+		return "", errPick
+	})
+	if err != nil || calls != 2 || snapshot().ActiveWait != 0 {
+		t.Fatalf("expiry without notification: calls=%d err=%v budget=%+v", calls, err, snapshot())
+	}
+}
+
+func TestManagerPilotFirstSendAtCooldownEdge(t *testing.T) {
+	m, upstream := setupForceMappingManager(t, "codex", "upstream-fixture", persistentRetryPilotModel)
+	cfg := &internalconfig.Config{}
+	cfg.Routing.ProviderScheduling = internalconfig.ProviderSchedulingConfig{Mode: "enforce", PersistentRetryModels: []string{persistentRetryPilotModel}}
+	m.SetConfig(cfg)
+	clock := newFakeContinuityClock(time.Now())
+	m.SetContinuityClockForTest(clock)
+	a, _ := m.GetByID("codex-force-mapping-auth")
+	a.Unavailable = true
+	a.NextRetryAfter = clock.Now().Add(time.Minute)
+	a.ModelStates = map[string]*ModelState{persistentRetryPilotModel: {Unavailable: true, NextRetryAfter: a.NextRetryAfter}, "upstream-fixture": {Unavailable: true, NextRetryAfter: a.NextRetryAfter}}
+	if _, errUpdate := m.Update(WithSkipPersist(t.Context()), a); errUpdate != nil {
+		t.Fatal(errUpdate)
+	}
+	crossed := false
+	ctx := WithSchedulingDecisionObserver(t.Context(), func(d SchedulingDecision) {
+		if !crossed && d.Counts.Available == 0 {
+			crossed = true
+			clock.Advance(time.Minute)
+		}
+	})
+	s, err := m.ExecuteStream(ctx, []string{"codex"}, executor.Request{Model: persistentRetryPilotModel}, executor.Options{Stream: true, SourceFormat: sdktranslator.FormatOpenAIResponse, Metadata: map[string]any{executor.RequestPathMetadataKey: "/v1/responses"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for chunk := range s.Chunks {
+		if chunk.Err != nil {
+			t.Fatal(chunk.Err)
+		}
+	}
+	if !crossed || len(upstream.StreamModels()) != 1 {
+		t.Fatalf("crossed=%v upstream=%v", crossed, upstream.StreamModels())
 	}
 }
 

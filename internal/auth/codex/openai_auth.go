@@ -252,7 +252,7 @@ func (o *CodexAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken 
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			log.Errorf("token refresh response body close error: %v", errClose)
+			log.Error("token refresh response body close failed")
 		}
 	}()
 

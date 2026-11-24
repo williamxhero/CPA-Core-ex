@@ -1531,7 +1531,11 @@ func effectiveRequestRetryLimit(auth *Auth, defaultRetry int) int {
 	return defaultRetry
 }
 
-func (m *Manager) requestRetryRoundExclusions(retryRound int, defaultRequestRetry int) map[string]struct{} {
+func (m *Manager) requestRetryRoundExclusions(retryRound, defaultRequestRetry int) map[string]struct{} {
+	return m.roundExclusions(retryRound, defaultRequestRetry, false)
+}
+
+func (m *Manager) roundExclusions(retryRound int, defaultRequestRetry int, explicitCodexPilot bool) map[string]struct{} {
 	excluded := make(map[string]struct{})
 	if m == nil || retryRound <= 0 {
 		return excluded
@@ -1543,6 +1547,9 @@ func (m *Manager) requestRetryRoundExclusions(retryRound int, defaultRequestRetr
 	defer m.mu.RUnlock()
 	for _, auth := range m.auths {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		if explicitCodexPilot && executorKeyFromAuth(auth) == "codex" {
 			continue
 		}
 		if effectiveRequestRetryLimit(auth, defaultRequestRetry) < retryRound {

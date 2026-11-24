@@ -41,6 +41,7 @@ type RequestBudgetSnapshot struct {
 	OutputCommitted     bool
 	ReplayUnsafe        bool
 	UpstreamCategory    string
+	pacedStatus         int
 	UpstreamRetryAt     time.Time
 	UpstreamRetrySource string
 	ServedModel         string
@@ -765,7 +766,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				if err != nil {
 					return zero, err
 				}
-				if proceed && (!opportunity.ready || scheduledPickChanged(roundCause, pickWake)) {
+				if proceed && (!opportunity.ready || m.scheduledPickChanged(roundCause, pickWake)) {
 					first = true
 					roundCause = nil
 					continue
@@ -806,9 +807,19 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				}
 				break
 			}
+			var nextExcluded map[string]struct{}
+			if b.pilotExplicitLimit {
+				nextRound := s.Round + 1
+				if persistentRoundPending {
+					nextRound = s.Round
+				}
+				nextExcluded = m.roundExclusions(nextRound, roundLimit, true)
+			}
+			alternateExcluded := maps.Clone(attempted)
+			maps.Copy(alternateExcluded, nextExcluded)
 			// A full per-round route cap must not make a previously tried
 			// route beat an available untried route. Charge the new round at send.
-			if !room && m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
+			if !room && m.scheduledOpportunity(ctx, providers, model, opts, alternateExcluded, nil).ready {
 				alternate := &scheduledAlternateRound{from: s.Round, excluded: attempted}
 				alternateCtx := context.WithValue(ctxRound, scheduledAlternateRoundKey{}, alternate)
 				alternateWake := m.providerSchedulingWake.watch()
@@ -828,8 +839,8 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 					first = false
 					continue
 				}
-				if m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
-					if scheduledPickChanged(alternateErr, alternateWake) {
+				if m.scheduledOpportunity(ctx, providers, model, opts, alternateExcluded, nil).ready {
+					if m.scheduledPickChanged(alternateErr, alternateWake) {
 						continue
 					}
 					b.setRetryStop(retryStopLocalDispatch)
@@ -839,9 +850,16 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			// A route-local rejection does not authorize reusing that route in
 			// this request. An eligible untried route can still recover by event.
 			excluded := attempted
+			if !room {
+				excluded = alternateExcluded
+			}
 			if recoverable {
+				excluded = nextExcluded
+				if excluded == nil {
+					excluded = make(map[string]struct{})
+				}
 				b.mu.Lock()
-				excluded = maps.Clone(b.pilotRejected)
+				maps.Copy(excluded, b.pilotRejected)
 				b.mu.Unlock()
 			}
 			opportunity := m.scheduledNextAvailability(ctx, providers, model, opts, excluded, m.getContinuityClock().Now(), true)
@@ -877,7 +895,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				continue
 			}
 			if persistentRoundPending {
-				if pickWake != nil && !scheduledPickChanged(pickErr, pickWake) {
+				if pickWake != nil && !m.scheduledPickChanged(pickErr, pickWake) {
 					b.setRetryStop(retryStopLocalDispatch)
 					break
 				}
@@ -939,10 +957,13 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 
 // Retry an apparent readiness mismatch only after a typed miss and an
 // observed state change. A locally unexecutable route cannot drive a spin.
-func scheduledPickChanged(err error, changed <-chan struct{}) bool {
+func (m *Manager) scheduledPickChanged(err error, changed <-chan struct{}) bool {
 	var unavailable scheduledUnavailablePick
 	if !errors.As(err, &unavailable) {
 		return false
+	}
+	if !unavailable.recheckAt.IsZero() && !m.getContinuityClock().Now().Before(unavailable.recheckAt) {
+		return true
 	}
 	select {
 	case <-changed:

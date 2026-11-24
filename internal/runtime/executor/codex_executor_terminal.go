@@ -240,15 +240,9 @@ func codexPilotTransportFailure(err error) statusErr {
 	return statusErr{code: http.StatusBadGateway, msg: err.Error(), pilotCodexFailure: cliproxyauth.PilotCodexTransport}
 }
 
-// codexPilotResponseStatus reads the preserved response-level status only when
-// no error-level status already governed the terminal mapping.
+// Prefer explicit error status over envelope status and legacy quota remapping.
 func codexPilotResponseStatus(body []byte) int {
-	for _, path := range []string{"error.status_code", "error.status", "status"} {
-		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
-			return 0
-		}
-	}
-	for _, path := range []string{"response.status_code", "response.status"} {
+	for _, path := range []string{"error.status_code", "error.status", "status", "response.status_code", "response.status"} {
 		if status := int(ojson.GetBytesNoCopy(body, path).Int()); status >= 400 && status <= 599 {
 			return status
 		}

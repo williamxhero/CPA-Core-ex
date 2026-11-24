@@ -31,6 +31,7 @@ type RoutingTerminal struct {
 type RoutingRetryPolicy struct {
 	SourceFormat            string                                       `json:"source_format"`
 	UpstreamErrorRetryLimit int                                          `json:"upstream_error_retry_limit"`
+	AdmissionCadence        internalconfig.PersistentRetryCadence        `json:"admission_cadence"`
 	Cadence                 internalconfig.PersistentRetryCadence        `json:"cadence"`
 	WaiterCapacity          internalconfig.PersistentRetryWaiterCapacity `json:"waiter_capacity"`
 	WaiterBufferBytes       int                                          `json:"waiter_buffer_bytes"`
@@ -326,7 +327,7 @@ func recordRoutingRetryPolicy(t *routingTrace, sourceFormat string, limit int, c
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit, Cadence: cfg.Cadence(), WaiterCapacity: cfg.WaiterCapacity(), WaiterBufferBytes: pilotWaitBufferBytes}
+	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit, AdmissionCadence: cfg.Cadence(), Cadence: cfg.Cadence(), WaiterCapacity: cfg.WaiterCapacity(), WaiterBufferBytes: pilotWaitBufferBytes}
 }
 
 func recordRoutingRecoveryWait(t *routingTrace, opportunity scheduledRetryOpportunity) {
@@ -350,6 +351,9 @@ func recordPilotRecovery(t *routingTrace, view RoutingPilotRecovery) {
 	}
 	t.mu.Lock()
 	t.data.PilotRecovery = &view
+	if policy := t.data.RetryPolicy; policy != nil && view.Cadence != nil {
+		policy.Cadence = *view.Cadence
+	}
 	t.mu.Unlock()
 }
 
@@ -468,6 +472,17 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 	case errors.As(err, &local):
 		failure.status = http.StatusServiceUnavailable
 		failure.Code, failure.Type, failure.Message = "no_available_route", "server_error", "No route is currently available for this model."
+	case actual && budget.RetryStopReason == string(retryStopRetryLimit) && isPilotRouteRejection(err):
+		// The final credential's denial does not describe the paced route
+		// the request could have used with another business send.
+		failure.status = budget.pacedStatus
+		if failure.status < 400 || failure.status > 599 {
+			failure.status = http.StatusBadGateway
+		}
+		failure.Code, failure.Type, failure.Message = "upstream_unavailable", "server_error", "The upstream service could not complete the request."
+		if failure.status == http.StatusTooManyRequests {
+			failure.Code, failure.Type, failure.Message = "rate_limit_exceeded", "rate_limit_error", "The upstream rate limit was reached."
+		}
 	case actual && pilotCodexFailure(err) == PilotCodexQuota:
 		failure.Code, failure.Type, failure.Message = "quota_exhausted", "rate_limit_error", "The upstream rejected this route for quota exhaustion."
 	case actual && status == http.StatusTooManyRequests:

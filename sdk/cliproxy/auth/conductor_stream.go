@@ -279,7 +279,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		for _, chunk := range buffered {
 			pendingBytes += len(chunk.Payload)
 		}
-		bootstrapTimeout := m.streamBootstrapTimeout()
+		var bootstrapTimeout time.Duration
+		if !pilotCodex(ctx, provider) {
+			bootstrapTimeout = m.streamBootstrapTimeout()
+		}
 		var bootstrapTimer *time.Timer
 		var bootstrapTimeoutCh <-chan time.Time
 		startBootstrapTimer := func() {

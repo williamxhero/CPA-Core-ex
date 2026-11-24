@@ -1663,8 +1663,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	// The explicit pilot limit is enforced at the shared business-send
 	// boundary. Legacy credential retry overrides must not veto that policy.
 	budget := requestBudgetFromContext(ctx)
-	if !homeMode && (budget == nil || !budget.pilotExplicitLimit) {
-		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
+	if !homeMode {
+		for authID := range m.roundExclusions(retryRound, defaultRequestRetry, budget != nil && budget.pilotExplicitLimit) {
 			tried[authID] = struct{}{}
 		}
 	}

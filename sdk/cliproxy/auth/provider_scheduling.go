@@ -77,9 +77,15 @@ func newNoAvailableRouteError(model string) error { return localNoAvailableRoute
 
 // A failed atomic pick can be re-evaluated against new availability. A
 // selector rejection with a nonempty pool isn't evidence of a recovery.
-type scheduledUnavailablePick struct{ localNoAvailableRoute }
+type scheduledUnavailablePick struct {
+	localNoAvailableRoute
+	recheckAt time.Time
+}
 
 func (e scheduledUnavailablePick) Unwrap() error { return e.localNoAvailableRoute }
+
+// DisableCauseMetadataKey carries explicit source provenance across file reloads.
+const DisableCauseMetadataKey = "cpa_disable_cause"
 
 type scheduledCandidate struct {
 	auth              *Auth
@@ -90,6 +96,7 @@ type scheduledCandidate struct {
 	limits            []schedulingLimit
 	reasons           []string
 	retryAt           time.Time
+	blockedUntil      time.Time // Observed expiry, not authorization to wait.
 	diagnosticQuotaAt time.Time
 	diagnosticQuota   bool
 	diagnosticExpired bool
@@ -280,14 +287,15 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 				c.reasons = append(c.reasons, authBlock)
 			case reason == blockReasonDisabled:
 				switch {
-				case isTOSViolationResultError(a.LastError), state != nil && isTOSViolationResultError(state.LastError):
+				case isTOSViolationResultError(a.LastError), state != nil && isTOSViolationResultError(state.LastError), a.Disabled && a.Metadata[DisableCauseMetadataKey] == "tos_violation":
 					c.reasons = appendSchedulingReason(c.reasons, "tos_violation")
-				case a.Disabled:
+				case a.Disabled && a.Metadata[DisableCauseMetadataKey] == "manual":
 					c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
 				default:
 					c.reasons = appendSchedulingReason(c.reasons, "disabled")
 				}
 			case reason == blockReasonCooldown || !next.IsZero():
+				c.blockedUntil = next
 				c.reasons = append(c.reasons, "cooldown")
 				if eligible, nextEligible := retryRoundAvailabilityForAuthForRequest(ctx, a, c.model, now, opts.Headers); eligible && scheduledTrustedRecovery(a, c.model, nextEligible, now) {
 					c.retryAt = nextEligible
@@ -366,6 +374,7 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 				case state.probe != nil:
 					c.reasons = append(c.reasons, "probe_in_flight")
 				case state.at.After(now):
+					c.blockedUntil = state.at
 					c.reasons = append(c.reasons, "cooldown")
 				case state.slotLimit() > 0 && u.pilotInUse[c.routeID] >= state.slotLimit():
 					c.reasons = append(c.reasons, "recovery_capacity_full")
@@ -400,7 +409,13 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			unlock()
 			report(nil)
 			if persistent {
-				return nil, nil, "", scheduledUnavailablePick{localNoAvailableRoute{model: model}}
+				miss := scheduledUnavailablePick{localNoAvailableRoute: localNoAvailableRoute{model: model}}
+				for _, c := range candidates {
+					if c.blockedUntil.After(now) && (miss.recheckAt.IsZero() || c.blockedUntil.Before(miss.recheckAt)) {
+						miss.recheckAt = c.blockedUntil
+					}
+				}
+				return nil, nil, "", miss
 			}
 			return nil, nil, "", newNoAvailableRouteError(model)
 		}

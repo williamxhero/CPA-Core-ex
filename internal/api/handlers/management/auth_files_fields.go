@@ -257,6 +257,11 @@ func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["disabled"] = disabled
+	if disabled {
+		auth.Metadata[coreauth.DisableCauseMetadataKey] = "manual"
+	} else {
+		delete(auth.Metadata, coreauth.DisableCauseMetadataKey)
+	}
 }
 
 // PatchAuthFileFields updates arbitrary metadata fields of an auth file.
@@ -847,16 +852,7 @@ func syncAuthFileDisabledState(auth *coreauth.Auth) {
 	if !ok {
 		return
 	}
-	auth.Disabled = disabled
-	if disabled {
-		auth.Status = coreauth.StatusDisabled
-		if strings.TrimSpace(auth.StatusMessage) == "" {
-			auth.StatusMessage = "disabled via management API"
-		}
-		return
-	}
-	auth.Status = coreauth.StatusActive
-	auth.StatusMessage = ""
+	applyAuthDisabledState(auth, disabled)
 }
 
 func (h *Handler) removeAuth(ctx context.Context, id string) {

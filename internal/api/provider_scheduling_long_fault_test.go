@@ -354,6 +354,51 @@ func TestProviderSchedulingPersistentPilotLongHintDwellAndCancel(t *testing.T) {
 	}
 }
 
+func TestProviderSchedulingPilotLiveCadenceReload(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	clock := newManualPersistentPilotClock()
+	f := newConfiguredPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, clock, 1, "    persistent-retry: {probe-backoff: [3s, 5s, 7s, 9s], jitter-percent: 0}\n", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(502)
+	})
+	req, done := pilotWaiter(ctx, f, "open", "cadence")
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	path := f.server.configFilePath
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if errWrite := os.WriteFile(path, []byte(strings.Replace(string(raw), "[3s, 5s", "[4s, 5s", 1)), 0600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
+	}
+	if !f.manager.ApplyConfigWithCooldownStateStore(ctx, cfg, nil) || !f.server.UpdateClientsContext(ctx, cfg) {
+		t.Fatal("reload failed")
+	}
+	release <- struct{}{}
+	timer := awaitPilotTimer(t, ctx, clock, done)
+	trace := readSchedulingTraceForTest(t, f, coreauth.RoutingTraceID(req))
+	if timer.at.Sub(clock.Now()) != 4*time.Second || ojson.Get(trace, "retry_policy.admission_cadence.probe_backoff.0").String() != "3s" || ojson.Get(trace, "retry_policy.cadence.probe_backoff.0").String() != "4s" {
+		t.Fatalf("timer=%v trace=%s", timer.at, trace)
+	}
+	cancel()
+	awaitPilotResult(t, t.Context(), done)
+}
+
 func TestProviderSchedulingPersistentPilotRollbackOnYAMLReload(t *testing.T) {
 	guard, stop := context.WithTimeout(t.Context(), 8*time.Second)
 	defer stop()
