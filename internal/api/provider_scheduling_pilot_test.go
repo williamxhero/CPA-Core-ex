@@ -1087,6 +1087,68 @@ func TestProviderSchedulingPersistentPilotTerminalEvidence(t *testing.T) {
 	}
 }
 
+func TestProviderSchedulingPersistentPilotStructuredFailureScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, envelope, stop, result string
+		status, wantStatus           int
+		primary, backup              int32
+		waits                        int
+		primaryFailsFirst            bool
+	}{
+		{"model_denial_is_route_local", `{"error":{"type":"invalid_request_error","code":"model_not_found","param":"model","message":"RAW-CANARY"}}`, "", "backup-success", 404, 200, 1, 1, 0, false},
+		{"explicit_overload_is_transient", `{"error":{"type":"invalid_request_error","code":"server_is_overloaded","param":"model","message":"RAW-CANARY"}}`, "", "primary-recovered", 503, 200, 2, 0, 1, false},
+		{"specific_validation_without_param_is_terminal", `{"error":{"type":"invalid_request_error","code":"string_above_max_length","param":null,"message":"RAW-CANARY"}}`, "upstream_validation", "invalid_request", 400, 400, 1, 0, 0, false},
+		{"unknown_code_with_param_remains_recoverable", `{"error":{"type":"invalid_request_error","code":"unknown_rejection","param":"model","message":"RAW-CANARY"}}`, "", "primary-recovered", 400, 200, 2, 0, 1, false},
+		{"route_rejection_does_not_discard_prior_transient", `{"error":{"type":"permission_error","code":"permission_denied","message":"RAW-CANARY"}}`, "", "primary-recovered", 403, 200, 2, 1, 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newProviderBudgetClock(time.Now(), true)
+			var primary, backup atomic.Int32
+			reject := func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.envelope)
+			}
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+				if primary.Add(1) == 1 {
+					if tc.primaryFailsFirst {
+						http.Error(w, "RAW-CANARY", http.StatusBadGateway)
+					} else {
+						reject(w)
+					}
+					return
+				}
+				persistentPilotStart(w, "resp-fresh-primary")
+				persistentPilotSucceed(w, "primary-recovered")
+			})
+			if tc.backup > 0 {
+				addPersistentPilotCodex(t, f, "backup", "10", func(w http.ResponseWriter, _ *http.Request) {
+					if backup.Add(1) == 1 && tc.primaryFailsFirst {
+						reject(w)
+						return
+					}
+					persistentPilotStart(w, "resp-fresh-backup")
+					persistentPilotSucceed(w, "backup-success")
+				})
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+			defer cancel()
+			w := callPersistentPilot(ctx, f, "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"fixture"}`)
+			trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+			body := w.Body.String()
+			sends, stop := ojson.Get(trace, "send_count").Int(), ojson.Get(trace, "retry_stop_reason").String()
+			resultOK := strings.Contains(body, tc.result) && ojson.Get(trace, "terminal.code").String() == "succeeded"
+			if tc.wantStatus != http.StatusOK {
+				resultOK = ojson.Get(body, "error.code").String() == tc.result && ojson.Get(trace, "terminal.code").String() == tc.result
+			}
+			if w.Code != tc.wantStatus || primary.Load() != tc.primary || backup.Load() != tc.backup || len(clock.waits) != tc.waits ||
+				sends != int64(tc.primary+tc.backup) || stop != tc.stop || !resultOK || strings.Contains(body+trace, "RAW-CANARY") {
+				t.Fatalf("status=%d primary=%d backup=%d waits=%d counted=%d stop=%q\nbody=%s\ntrace=%s", w.Code, primary.Load(), backup.Load(), len(clock.waits), sends, stop, body, trace)
+			}
+		})
+	}
+}
+
 func TestProviderSchedulingPersistentPilotUnclassifiedUpstreamRecovers(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -212,7 +212,12 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 	switch {
 	case code == "cyber_policy", code == "cyber_policy_violation", code == "bio_policy", code == "misalignment_policy_violation", code == "content_policy_violation", code == "image_content_policy_violation", kind == "image_generation_user_error":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexPolicy, http.StatusBadRequest
-	case code == "invalid_prompt", code == "invalid_value", code == "context_length_exceeded", code == "context_too_large", code == "previous_response_not_found", code == "invalid_encrypted_content", code == "thinking_signature_invalid", kind == "invalid_request_error" && ojson.GetBytesNoCopy(body, "error.param").Type == ojson.String:
+	// Only specific validation codes prove a request-wide fault. A generic
+	// invalid_request_error envelope can label route denials or overloads;
+	// its param field does not establish scope.
+	case code == "invalid_prompt", code == "invalid_value", code == "unsupported_value",
+		code == "context_length_exceeded", code == "context_too_large", code == "message_too_big", code == "string_above_max_length",
+		code == "previous_response_not_found", code == "invalid_encrypted_content", code == "thinking_signature_invalid":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexInvalid, http.StatusBadRequest
 	case code == "token_revoked", code == "account_deactivated", code == "invalid_api_key", code == "refresh_token_reused", code == "refresh_token_invalidated":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexRevoked, http.StatusUnauthorized
