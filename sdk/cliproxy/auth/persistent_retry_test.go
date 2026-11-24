@@ -5,19 +5,22 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func newPersistentBackoffTest(t *testing.T, start time.Time) (*Manager, *fakeContinuityClock, *routeReservation, context.Context, func() RequestBudgetSnapshot) {
 	t.Helper()
 	clock := newFakeContinuityClock(start)
-	m := &Manager{}
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{})
 	m.SetContinuityClockForTest(clock)
 	ctx := WithFreshRequestBudget(t.Context())
 	b := requestBudgetFromContext(ctx)
 	b.mu.Lock()
 	b.now = clock.Now
 	b.mu.Unlock()
-	r := &routeReservation{manager: m, persistentRoute: "route:persistent-test"}
+	r := &routeReservation{manager: m, persistentRoute: "route:persistent-test", ctx: ctx}
 	return m, clock, r, ctx, func() RequestBudgetSnapshot {
 		snapshot, _ := RequestBudgetSnapshotFromContext(ctx)
 		return snapshot
@@ -30,8 +33,8 @@ func persistentTestFailure() error {
 
 func assertPersistentStepWait(t *testing.T, wait, base time.Duration) {
 	t.Helper()
-	if wait < base || wait > base+base/4 {
-		t.Fatalf("wait = %v, want the %v step with up to 25%% jitter", wait, base)
+	if wait < base || wait > base+base/5 {
+		t.Fatalf("wait = %v, want the %v step with up to 20%% jitter", wait, base)
 	}
 }
 
@@ -44,7 +47,8 @@ func attachPersistentTestProbe(m *Manager, r *routeReservation) {
 	m.providerSchedulingUse.mu.Lock()
 	state := m.providerSchedulingUse.backoff[r.persistentRoute]
 	state.probe = r
-	r.probeAt = state.at
+	r.faultGeneration = state.generation
+	m.providerSchedulingUse.pilotInUse = map[string]int{r.persistentRoute: 1}
 	m.providerSchedulingUse.backoff[r.persistentRoute] = state
 	m.providerSchedulingUse.mu.Unlock()
 }
@@ -119,7 +123,7 @@ func TestPersistentRouteBackoffKeepsPendingProbeEntry(t *testing.T) {
 	}
 }
 
-func TestPersistentRouteBackoffDropsProbeEntryOnCompletion(t *testing.T) {
+func TestPersistentRouteBackoffReleasesProbeIntoVerification(t *testing.T) {
 	start := time.Unix(1_800_000_000, 0)
 	m, clock, r, ctx, _ := newPersistentBackoffTest(t, start)
 	r.notePersistentFailure(ctx, persistentTestFailure())
@@ -127,7 +131,9 @@ func TestPersistentRouteBackoffDropsProbeEntryOnCompletion(t *testing.T) {
 
 	clock.Advance(2 * time.Second)
 	r.completePersistentProbe()
-	if persistentBackoffEntry(m, r.persistentRoute) {
-		t.Fatal("completed probe kept the route entry")
+	r.release()
+	state := m.providerSchedulingUse.backoff[r.persistentRoute]
+	if state.probe != nil || state.successes != 1 || state.slotLimit() != 1 {
+		t.Fatal("completed probe did not enter serial verification")
 	}
 }

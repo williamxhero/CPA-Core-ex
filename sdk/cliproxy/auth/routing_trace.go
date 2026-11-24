@@ -29,8 +29,11 @@ type RoutingTerminal struct {
 // RoutingRetryPolicy is the policy attached to the pilot request ledger, not
 // the configured allowlist or the settings of a subsequent reload.
 type RoutingRetryPolicy struct {
-	SourceFormat            string `json:"source_format"`
-	UpstreamErrorRetryLimit int    `json:"upstream_error_retry_limit"`
+	SourceFormat            string                                       `json:"source_format"`
+	UpstreamErrorRetryLimit int                                          `json:"upstream_error_retry_limit"`
+	Cadence                 internalconfig.PersistentRetryCadence        `json:"cadence"`
+	WaiterCapacity          internalconfig.PersistentRetryWaiterCapacity `json:"waiter_capacity"`
+	WaiterBufferBytes       int                                          `json:"waiter_buffer_bytes"`
 }
 
 type RoutingRecoveryWait struct {
@@ -38,39 +41,73 @@ type RoutingRecoveryWait struct {
 	ProbePending    bool       `json:"probe_pending,omitempty"`
 	CapacityPending bool       `json:"capacity_pending,omitempty"`
 	RefreshPending  bool       `json:"refresh_pending,omitempty"`
+	QueuePending    bool       `json:"queue_pending,omitempty"`
+	TimingSource    string     `json:"timing_source,omitempty"`
+	Waiters         int        `json:"waiters"`
+	CadenceTier     string     `json:"cadence_tier,omitempty"`
+}
+
+// RoutingPilotRecovery is a redacted snapshot of one eligible fault group.
+type RoutingPilotRecovery struct {
+	CadenceTier          string                                 `json:"cadence_tier,omitempty"`
+	TimingSource         string                                 `json:"timing_source,omitempty"`
+	NextProbeAt          *time.Time                             `json:"next_probe_at,omitempty"`
+	StableSince          *time.Time                             `json:"stable_since,omitempty"`
+	FaultAgeMS           int64                                  `json:"fault_age_ms"`
+	Failures             int                                    `json:"failures"`
+	Probes               int                                    `json:"probes"`
+	Slots                int                                    `json:"slots"`
+	SlotLimit            int                                    `json:"slot_limit,omitempty"`
+	Waiters              int                                    `json:"waiters"`
+	ConsecutiveSuccesses int                                    `json:"consecutive_successes"`
+	Alarmed              bool                                   `json:"alarmed"`
+	Resolved             bool                                   `json:"resolved,omitempty"`
+	Cadence              *internalconfig.PersistentRetryCadence `json:"cadence,omitempty"`
 }
 
 type RoutingTrace struct {
-	RequestID           string               `json:"request_id"`
-	Model               string               `json:"model"`
-	Mode                string               `json:"mode"`
-	StartedAt           time.Time            `json:"started_at"`
-	Stages              []SchedulingDecision `json:"stages"`
-	OmittedStages       int                  `json:"omitted_stages,omitempty"`
-	SendCount           int                  `json:"send_count"`
-	Round               int                  `json:"round"`
-	RoundSends          int                  `json:"round_sends"`
-	WaitMS              int64                `json:"wait_ms"`
-	OutputCommitted     bool                 `json:"output_committed"`
-	ReplayUnsafe        bool                 `json:"replay_unsafe"`
-	UpstreamCategory    string               `json:"upstream_category,omitempty"`
-	UpstreamRetrySource string               `json:"upstream_retry_source,omitempty"`
-	RetryStopReason     string               `json:"retry_stop_reason,omitempty"`
-	RetryPolicy         *RoutingRetryPolicy  `json:"retry_policy,omitempty"`
-	LastRecoveryWait    *RoutingRecoveryWait `json:"last_recovery_wait,omitempty"`
-	Terminal            *RoutingTerminal     `json:"terminal,omitempty"`
+	RequestID           string                `json:"request_id"`
+	Model               string                `json:"model"`
+	Mode                string                `json:"mode"`
+	StartedAt           time.Time             `json:"started_at"`
+	Stages              []SchedulingDecision  `json:"stages"`
+	OmittedStages       int                   `json:"omitted_stages,omitempty"`
+	SendCount           int                   `json:"send_count"`
+	Round               int                   `json:"round"`
+	RoundSends          int                   `json:"round_sends"`
+	WaitMS              int64                 `json:"wait_ms"`
+	OutputCommitted     bool                  `json:"output_committed"`
+	ReplayUnsafe        bool                  `json:"replay_unsafe"`
+	UpstreamCategory    string                `json:"upstream_category,omitempty"`
+	UpstreamRetrySource string                `json:"upstream_retry_source,omitempty"`
+	RetryStopReason     string                `json:"retry_stop_reason,omitempty"`
+	RetryPolicy         *RoutingRetryPolicy   `json:"retry_policy,omitempty"`
+	LastRecoveryWait    *RoutingRecoveryWait  `json:"last_recovery_wait,omitempty"`
+	PilotRecovery       *RoutingPilotRecovery `json:"pilot_recovery,omitempty"`
+	Terminal            *RoutingTerminal      `json:"terminal,omitempty"`
 }
 
+const routingActivePilotEntries = internalconfig.PersistentRetryMaxWaiters * 2
+
 type routingTraceStore struct {
-	mu    sync.Mutex
-	next  int
-	slots [routingTraceEntries]*routingTrace
+	mu     sync.Mutex
+	next   int
+	slots  [routingTraceEntries]*routingTrace
+	active map[string]*routingTrace
+}
+
+func (s *routingTraceStore) putLocked(t *routingTrace) {
+	s.slots[s.next] = t
+	s.next = (s.next + 1) % len(s.slots)
 }
 
 type routingTrace struct {
-	mu      sync.Mutex
-	data    RoutingTrace
-	collect bool
+	mu         sync.Mutex
+	data       RoutingTrace
+	collect    bool
+	store      *routingTraceStore
+	now        func() time.Time
+	retainedAt time.Time // under store.mu; completion time for a retained pilot
 }
 
 func routingTraceFromContext(ctx context.Context) *routingTrace {
@@ -110,7 +147,7 @@ func (m *Manager) StartRoutingTrace(ctx context.Context, requestedModel, routing
 	if !safeRoutingModel(requestedModel) {
 		requestedModel = ""
 	}
-	t := &routingTrace{collect: providerSchedulingCaller(ctx) != "", data: RoutingTrace{
+	t := &routingTrace{collect: providerSchedulingCaller(ctx) != "", store: &m.routingTraces, now: m.getContinuityClock().Now, data: RoutingTrace{
 		RequestID: id.String(), Mode: mode, Model: requestedModel,
 		StartedAt: m.getContinuityClock().Now().UTC(), Stages: make([]SchedulingDecision, 0),
 	}}
@@ -122,10 +159,36 @@ func (m *Manager) StartRoutingTrace(ctx context.Context, requestedModel, routing
 	}
 	s := &m.routingTraces
 	s.mu.Lock()
-	s.slots[s.next] = t
-	s.next = (s.next + 1) % len(s.slots)
+	if s.active[t.data.RequestID] == nil && t.retainedAt.IsZero() {
+		s.putLocked(t)
+	}
 	s.mu.Unlock()
 	return t.data.RequestID
+}
+
+func (m *Manager) retainPilotTrace(t *routingTrace) bool {
+	if t == nil || !t.collect {
+		return true
+	}
+	s := t.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active[t.data.RequestID] == t || !t.retainedAt.IsZero() {
+		return true
+	}
+	if len(s.active) >= routingActivePilotEntries {
+		return false
+	}
+	if s.active == nil {
+		s.active = make(map[string]*routingTrace)
+	}
+	for i, entry := range s.slots {
+		if entry == t {
+			s.slots[i] = nil
+		}
+	}
+	s.active[t.data.RequestID] = t
+	return true
 }
 
 // Only public model identifiers can be projected, never an arbitrary payload.
@@ -153,12 +216,19 @@ func (m *Manager) RoutingTrace(id string) (RoutingTrace, bool) {
 	now := m.getContinuityClock().Now()
 	s := &m.routingTraces
 	s.mu.Lock()
-	var found *routingTrace
+	found := s.active[id]
 	for i, entry := range s.slots {
+		if found != nil {
+			break
+		}
 		if entry == nil {
 			continue
 		}
-		if !entry.data.StartedAt.Add(routingTraceTTL).After(now) {
+		retainedAt := entry.retainedAt
+		if retainedAt.IsZero() {
+			retainedAt = entry.data.StartedAt
+		}
+		if !retainedAt.Add(routingTraceTTL).After(now) {
 			s.slots[i] = nil
 			continue
 		}
@@ -188,6 +258,22 @@ func (m *Manager) RoutingTrace(id string) (RoutingTrace, bool) {
 			wait.NotBefore = &at
 		}
 		view.LastRecoveryWait = &wait
+	}
+	if view.PilotRecovery != nil {
+		recovery := *view.PilotRecovery
+		if recovery.Cadence != nil {
+			cadence := *recovery.Cadence
+			recovery.Cadence = &cadence
+		}
+		if recovery.NextProbeAt != nil {
+			at := *recovery.NextProbeAt
+			recovery.NextProbeAt = &at
+		}
+		if recovery.StableSince != nil {
+			at := *recovery.StableSince
+			recovery.StableSince = &at
+		}
+		view.PilotRecovery = &recovery
 	}
 	if view.Terminal != nil {
 		terminal := *view.Terminal
@@ -234,20 +320,21 @@ func catalogRoutingID(raw string) string {
 	return raw
 }
 
-func recordRoutingRetryPolicy(t *routingTrace, sourceFormat string, limit int) {
+func recordRoutingRetryPolicy(t *routingTrace, sourceFormat string, limit int, cfg internalconfig.PersistentRetryConfig) {
 	if t == nil || !t.collect {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit}
+	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit, Cadence: cfg.Cadence(), WaiterCapacity: cfg.WaiterCapacity(), WaiterBufferBytes: pilotWaitBufferBytes}
 }
 
 func recordRoutingRecoveryWait(t *routingTrace, opportunity scheduledRetryOpportunity) {
 	if t == nil || !t.collect || !opportunity.persistentWait {
 		return
 	}
-	wait := &RoutingRecoveryWait{ProbePending: opportunity.probePending, CapacityPending: opportunity.capacityPending, RefreshPending: opportunity.refreshPending}
+	wait := &RoutingRecoveryWait{ProbePending: opportunity.probePending, CapacityPending: opportunity.capacityPending, RefreshPending: opportunity.refreshPending,
+		QueuePending: opportunity.queuePending, TimingSource: opportunity.timingSource, Waiters: opportunity.waiters, CadenceTier: opportunity.cadenceTier}
 	if !opportunity.at.IsZero() {
 		at := opportunity.at.UTC()
 		wait.NotBefore = &at
@@ -255,6 +342,15 @@ func recordRoutingRecoveryWait(t *routingTrace, opportunity scheduledRetryOpport
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.data.LastRecoveryWait = wait
+}
+
+func recordPilotRecovery(t *routingTrace, view RoutingPilotRecovery) {
+	if t == nil || !t.collect {
+		return
+	}
+	t.mu.Lock()
+	t.data.PilotRecovery = &view
+	t.mu.Unlock()
 }
 
 func updateRoutingAccounting(t *routingTrace, accounting RequestBudgetSnapshot) {
@@ -303,9 +399,20 @@ func FinishRoutingTrace(ctx context.Context, status int, err error) {
 		code = "failed"
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.data.Terminal == nil {
 		t.data.Terminal = &RoutingTerminal{Code: code, Status: status}
+	}
+	t.mu.Unlock()
+	s := t.store
+	if s != nil {
+		finishedAt := t.now()
+		s.mu.Lock()
+		if s.active[t.data.RequestID] == t {
+			delete(s.active, t.data.RequestID)
+			t.retainedAt = finishedAt
+			s.putLocked(t)
+		}
+		s.mu.Unlock()
 	}
 }
 
@@ -345,6 +452,7 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 	}
 	status := clienterror.HTTPStatusFromError(err)
 	var local localNoAvailableRoute
+	var capacity pilotBackpressure
 	var terminated *executor.RequestTerminatedError
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &terminated) {
 		return err
@@ -354,6 +462,9 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 	actual := budget.Attempts > 0 && (hasUpstreamExecutionAttempt(err) || errors.As(err, &ag))
 	failure := &RoutingFailure{Model: trace.data.Model, RequestID: trace.data.RequestID, status: status}
 	switch {
+	case errors.As(err, &capacity):
+		failure.status = http.StatusServiceUnavailable
+		failure.Code, failure.Type, failure.Message = "local_backpressure", "server_error", capacity.Error()
 	case errors.As(err, &local):
 		failure.status = http.StatusServiceUnavailable
 		failure.Code, failure.Type, failure.Message = "no_available_route", "server_error", "No route is currently available for this model."

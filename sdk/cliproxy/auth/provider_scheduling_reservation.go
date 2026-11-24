@@ -19,9 +19,13 @@ type schedulingLimit struct {
 }
 
 type providerSchedulingUse struct {
-	mu      sync.Mutex
-	counts  map[string]int
-	backoff map[string]persistentRouteBackoff
+	mu              sync.Mutex
+	counts          map[string]int
+	pilotInUse      map[string]int
+	pilotGeneration uint64
+	backoff         map[string]persistentRouteBackoff
+	waiters         []pilotWaiter
+	waiterBytes     int
 }
 
 type providerSchedulingWake struct {
@@ -76,7 +80,7 @@ func (u *providerSchedulingUse) available(limits []schedulingLimit) bool {
 // disappeared cannot accumulate state. Callers hold u.mu.
 func (u *providerSchedulingUse) pruneStalePersistentBackoffLocked(live map[string]struct{}, now time.Time) {
 	for routeID, state := range u.backoff {
-		if state.probe != nil || state.at.After(now) {
+		if state.probe != nil || u.pilotInUse[routeID] != 0 || state.at.After(now) {
 			continue
 		}
 		if _, ok := live[routeID]; ok {
@@ -87,22 +91,22 @@ func (u *providerSchedulingUse) pruneStalePersistentBackoffLocked(live map[strin
 }
 
 type routeReservation struct {
-	once            sync.Once
-	manager         *Manager
-	limits          []schedulingLimit
-	persistentRoute string
-	probeAt         time.Time
+	once             sync.Once
+	manager          *Manager
+	limits           []schedulingLimit
+	persistentRoute  string
+	faultGeneration  uint64
+	pacingDelay      time.Duration
+	pacingSource     string
+	completed        bool
+	validationFailed bool
+	ctx              context.Context
+	attempt          *pilotStreamAttempt
 }
 
 func (r *routeReservation) completePersistentProbe() {
-	if r == nil || r.probeAt.IsZero() {
-		return
-	}
-	u := &r.manager.providerSchedulingUse
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if state := u.backoff[r.persistentRoute]; state.probe == r && state.at.Equal(r.probeAt) {
-		delete(u.backoff, r.persistentRoute)
+	if r != nil {
+		r.completed = true
 	}
 }
 
@@ -119,21 +123,48 @@ func (r *routeReservation) release() {
 		return
 	}
 	r.once.Do(func() {
-		u := &r.manager.providerSchedulingUse
-		u.mu.Lock()
-		for _, limit := range r.limits {
-			u.counts[limit.id]--
-			if u.counts[limit.id] == 0 {
-				delete(u.counts, limit.id)
+		if attempt := r.attempt; attempt != nil {
+			select {
+			case <-attempt.exit():
+			default:
+				go func() {
+					<-attempt.exit()
+					r.free()
+				}()
+				return
 			}
 		}
-		if state := u.backoff[r.persistentRoute]; state.probe == r {
-			state.probe = nil
-			u.backoff[r.persistentRoute] = state
-		}
-		u.mu.Unlock()
-		r.manager.providerSchedulingWake.signal()
+		r.free()
 	})
+}
+
+func (r *routeReservation) free() {
+	if a := r.attempt; a != nil && a.canceledBootstrap {
+		err := markUpstreamExecutionAttemptFromContext(a.ctx, a.err)
+		if persistentTransient(err) {
+			r.notePersistentFailure(a.ctx, err)
+		}
+	}
+	u := &r.manager.providerSchedulingUse
+	u.mu.Lock()
+	for _, limit := range r.limits {
+		u.counts[limit.id]--
+		if u.counts[limit.id] == 0 {
+			delete(u.counts, limit.id)
+		}
+	}
+	var alarm pilotAlarm
+	if r.persistentRoute != "" {
+		if u.pilotInUse[r.persistentRoute] > 1 {
+			u.pilotInUse[r.persistentRoute]--
+		} else {
+			delete(u.pilotInUse, r.persistentRoute)
+		}
+		alarm = r.finishPersistentRecovery(u)
+	}
+	u.mu.Unlock()
+	alarm.emit()
+	r.manager.providerSchedulingWake.signal()
 }
 
 func wrapRouteReservationStream(ctx context.Context, result *cliproxyexecutor.StreamResult, reservation *routeReservation) *cliproxyexecutor.StreamResult {
@@ -206,10 +237,24 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now, pilotFirstSend)
 	hardBinding := scheduledHardAffinity(selector, model, opts)
 	persistent := PersistentRetryPilot(ctx)
-	m.providerSchedulingUse.mu.Lock()
-	defer m.providerSchedulingUse.mu.Unlock()
+	u := &m.providerSchedulingUse
+	u.mu.Lock()
+	var alarms []pilotAlarm
+	defer func() {
+		u.mu.Unlock()
+		for _, alarm := range alarms {
+			alarm.emit()
+		}
+		if len(alarms) > 0 {
+			m.providerSchedulingWake.signal()
+		}
+	}()
 	if persistent {
 		m.providerSchedulingUse.pruneStalePersistentBackoffLocked(scheduledLiveRoutes(candidates), now)
+	}
+	b := requestBudgetFromContext(ctx)
+	if persistent {
+		opportunity.routes = make(map[string]struct{})
 	}
 	var blockedBy retryStopReason
 	for _, c := range candidates {
@@ -225,38 +270,69 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 				blockedBy = retryStopNoAvailableRoute
 			}
 		}
-		if persistent && c.owner == "codex" && len(c.reasons) == 1 && c.reasons[0] == "refresh_in_progress" {
+		pilot := persistent && c.owner == "codex"
+		if pilot && len(c.reasons) == 1 && c.reasons[0] == "refresh_in_progress" {
+			opportunity.noteRoute(c.routeID, time.Time{}, "")
 			opportunity.refreshPending = true
 			continue
 		}
-		if persistent && c.owner == "codex" && len(c.reasons) == 0 {
-			state := m.providerSchedulingUse.backoff[c.routeID]
-			if state.probe != nil {
-				opportunity.probePending = true
-				continue
+		if len(c.reasons) == 0 {
+			if pilot {
+				if alarm := u.evaluatePersistentRecovery(c.routeID, now); alarm.code != "" {
+					alarms = append(alarms, alarm)
+				}
+				state := u.backoff[c.routeID]
+				if state.probe != nil {
+					opportunity.noteRoute(c.routeID, time.Time{}, "")
+					opportunity.probePending = true
+					continue
+				}
+				if state.at.After(now) {
+					opportunity.noteRoute(c.routeID, state.at, state.source)
+					continue
+				}
+				if state.slotLimit() > 0 && u.pilotInUse[c.routeID] >= state.slotLimit() {
+					if state.successes >= 3 && u.available(c.limits) {
+						opportunity.noteRoute(c.routeID, state.firstSuccess.Add(pilotStableFor), "recovery_validation")
+					} else {
+						opportunity.noteRoute(c.routeID, time.Time{}, "")
+					}
+					opportunity.capacityPending = true
+					continue
+				}
 			}
-			if state.at.After(now) {
-				if opportunity.at.IsZero() || state.at.Before(opportunity.at) {
-					opportunity.at = state.at
+			if !u.available(c.limits) {
+				if pilot {
+					opportunity.noteRoute(c.routeID, time.Time{}, "")
+					opportunity.capacityPending = true
 				}
 				continue
 			}
-		}
-		if !m.providerSchedulingUse.available(c.limits) {
-			if persistent && c.owner == "codex" && len(c.reasons) == 0 {
-				opportunity.capacityPending = true
-			}
-			continue
-		}
-		if len(c.reasons) == 0 {
-			return scheduledRetryOpportunity{ready: true, changed: opportunity.changed}
-		}
-		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (opportunity.at.IsZero() || c.retryAt.Before(opportunity.at)) {
-			// A quota reset estimate schedules rechecks, not inference.
-			if (pilotFirstSend && c.owner != "codex") || (persistent && c.owner == "codex" && c.quotaBlocked) {
+			if pilot && u.olderWaiter(b, c.routeID) {
+				opportunity.noteRoute(c.routeID, time.Time{}, "")
+				opportunity.queuePending = true
 				continue
 			}
-			opportunity.at = c.retryAt
+			return scheduledRetryOpportunity{ready: true, changed: opportunity.changed}
+		}
+		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (pilot || u.available(c.limits)) {
+			// A quota reset estimate schedules rechecks, not inference.
+			if (pilotFirstSend && c.owner != "codex") || (pilot && c.quotaBlocked) {
+				continue
+			}
+			if pilot {
+				state := u.backoff[c.routeID]
+				if state.probe != nil {
+					opportunity.noteRoute(c.routeID, time.Time{}, "")
+					opportunity.probePending = true
+					continue
+				}
+				if state.at.After(c.retryAt) {
+					opportunity.noteRoute(c.routeID, state.at, state.source)
+					continue
+				}
+			}
+			opportunity.noteRoute(c.routeID, c.retryAt, "credential_cooldown")
 		}
 	}
 	opportunity.stop = blockedBy

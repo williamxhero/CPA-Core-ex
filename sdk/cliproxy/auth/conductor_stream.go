@@ -29,6 +29,12 @@ type streamBootstrapError struct {
 	headers http.Header
 }
 
+func discardStreamChunksForReservation(r *routeReservation, ch <-chan cliproxyexecutor.StreamChunk) {
+	if r == nil {
+		discardStreamChunks(ch)
+	}
+}
+
 func cloneHTTPHeader(headers http.Header) http.Header {
 	if headers == nil {
 		return nil
@@ -210,6 +216,11 @@ func (m *Manager) streamBootstrapTimeout() time.Duration {
 // readStreamBootstrapWithTimeout cannot protect that phase because it has not
 // received a stream to read yet.
 func (m *Manager) streamGateAttemptWithTimeout(ctx context.Context, executor ProviderExecutor, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if r, _ := ctx.Value(persistentReservationKey{}).(*routeReservation); r != nil {
+		return m.pilotStreamGate(ctx, r, func() (*cliproxyexecutor.StreamResult, error) {
+			return m.streamGateAttempt(ctx, executor, auth, req, opts)
+		})
+	}
 	timeout := m.streamBootstrapTimeout()
 	if timeout <= 0 {
 		return m.streamGateAttempt(ctx, executor, auth, req, opts)
@@ -249,8 +260,10 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 	if replayState != nil {
 		replayState.noteProvider(provider)
 	}
+	reservation, _ := ctx.Value(persistentReservationKey{}).(*routeReservation)
 	go func() {
 		defer close(out)
+		defer reservation.release()
 		if state := streamReplayStateFromContext(ctx); state != nil {
 			ctx = withStreamReplayState(ctx, state)
 		}
@@ -668,7 +681,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 						return retry, true, false
 					}
 				}
-				discardStreamChunks(source)
+				discardStreamChunksForReservation(reservation, source)
 				return nil, false, true
 			}
 			return source, false, false
@@ -702,7 +715,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 							break
 						}
 					}
-					discardStreamChunks(current)
+					discardStreamChunksForReservation(reservation, current)
 					return
 				}
 			}
@@ -801,7 +814,15 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 								return
 							}
 						}
-						chunk, ok = <-current
+						if reservation != nil {
+							select {
+							case <-ctx.Done():
+								return
+							case chunk, ok = <-current:
+							}
+						} else {
+							chunk, ok = <-current
+						}
 					}
 				}
 				if !ok {
@@ -837,7 +858,7 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 							break
 						}
 					}
-					discardStreamChunks(current)
+					discardStreamChunksForReservation(reservation, current)
 					return
 				}
 			}
@@ -865,9 +886,12 @@ func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, re
 		}
 		if !failed && !replayed && (ephemeralResult || claudeOAuthRequestCancellation(ctx, auth, nil) == nil) {
 			m.recordExecutionResult(ctx, Result{AuthID: auth.ID, Provider: provider, Model: resultModel, RouteModel: routeModel, Success: true, CompletedResponse: sawCompleted && !sawIncomplete, Options: opts, AccessToken: accessToken, CredentialVersion: auth.CredentialVersion, RegistrationEpoch: auth.RegistrationEpoch, ExecutionSeq: executionSeq}, auth, ephemeralResult)
-			if sawCompleted && !sawIncomplete {
-				reservation, _ := ctx.Value(persistentReservationKey{}).(*routeReservation)
-				reservation.completePersistentProbe()
+			if reservation != nil && ctx.Err() == nil {
+				if sawCompleted && !sawIncomplete {
+					reservation.completePersistentProbe()
+				} else {
+					reservation.validationFailed = true
+				}
 			}
 		}
 	}()
@@ -1121,6 +1145,11 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		return nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	executor = executorForAuth(executor, auth)
+	discard := discardStreamChunks
+	if r, _ := ctx.Value(persistentReservationKey{}).(*routeReservation); r != nil {
+		// The reservation drains once it owns the raw channel again.
+		discard = func(<-chan cliproxyexecutor.StreamChunk) {}
+	}
 	ctx = contextWithRequestedModelAlias(ctx, opts, routeModel)
 	var lastErr error
 	var upstreamErr error
@@ -1260,14 +1289,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
 				m.recordCanceledUpstreamCooldown(ctx, auth, provider, resultModel, routeModel, execOpts, bootstrapErr, ephemeralResult, executionSeq)
-				discardStreamChunks(streamResult.Chunks)
+				discard(streamResult.Chunks)
 				return nil, errCtx
 			}
 			if allowRetry && !ephemeralResult && budgetCanRepeat(ctx) {
 				alreadyTried := didRefreshOnUnauthorized
 				refreshed, okRefresh := m.tryRefreshAfterUnauthorized(newUpstreamAttemptContext(ctx), auth, bootstrapErr, alreadyTried, execOpts.Headers)
 				if okRefresh {
-					discardStreamChunks(streamResult.Chunks)
+					discard(streamResult.Chunks)
 					auth = refreshed
 					publishSelectedAuthMetadata(execOpts.Metadata, auth)
 					didRefreshOnUnauthorized = true
@@ -1311,12 +1340,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		if !ephemeralResult {
 			if errCancel := claudeOAuthRequestCancellation(ctx, auth, bootstrapErr); errCancel != nil {
-				discardStreamChunks(streamResult.Chunks)
+				discard(streamResult.Chunks)
 				return nil, errCancel
 			}
 		}
 		if noteScheduledAntigravityFailure(ctx, bootstrapErr, auth, provider, execReq.Model) {
-			discardStreamChunks(streamResult.Chunks)
+			discard(streamResult.Chunks)
 			return nil, bootstrapErr
 		}
 		if bootstrapErr != nil {
@@ -1333,7 +1362,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
-				discardStreamChunks(streamResult.Chunks)
+				discard(streamResult.Chunks)
 				if isRequestScopedStop(action, okAction) {
 					return nil, wrapRequestStopError(bootstrapErr)
 				}
@@ -1354,7 +1383,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				m.recordPilotStreamResult(ctx, result, auth, ephemeralResult, bootstrapErr, false)
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
-				discardStreamChunks(streamResult.Chunks)
+				discard(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 && !isPilotRouteRejection(bootstrapErr) && (!pilotCodex(ctx, provider) || budgetCanRepeat(ctx)) {
@@ -1368,7 +1397,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 				bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 				syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
-				discardStreamChunks(streamResult.Chunks)
+				discard(streamResult.Chunks)
 				lastErr = bootstrapErr
 				if result.CredentialScope {
 					currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
@@ -1386,7 +1415,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			bootstrapErr = annotateTrustedRetryAfterByHint(bootstrapErr)
 			bootstrapErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			syncPreferredUpstreamError(&upstreamErr, bootstrapErr)
-			discardStreamChunks(streamResult.Chunks)
+			discard(streamResult.Chunks)
 			currentErr := newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			return nil, preferredExecutionAttemptError(currentErr, upstreamErr)
 		}

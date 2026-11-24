@@ -2024,6 +2024,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			return wrapHomeStream(ctx, streamResult, selection, releaseAttempt), nil
 		}
+		if routeReservation != nil && routeReservation.persistentRoute != "" {
+			// The conductor wrapper owns the reservation and raw consumer now.
+			routeReservation = nil
+			return streamResult, nil
+		}
 		wrapped := wrapRouteReservationStream(ctx, streamResult, routeReservation)
 		routeReservation = nil
 		return wrapped, nil

@@ -3,10 +3,8 @@ package auth
 import (
 	"context"
 	"errors"
-	"math/rand/v2"
 	"net/http"
 	"slices"
-	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -158,50 +156,6 @@ func persistentTransient(err error) bool {
 	return false
 }
 
-type persistentRouteBackoff struct {
-	failures int
-	at       time.Time
-	probe    *routeReservation
-}
-
-func (r *routeReservation) notePersistentFailure(ctx context.Context, err error) {
-	now := RequestBudgetNow(ctx)
-	u := &r.manager.providerSchedulingUse
-	u.mu.Lock()
-	if u.backoff == nil {
-		u.backoff = make(map[string]persistentRouteBackoff)
-	}
-	// Scheduler pruning owns removal of routes that leave the candidate pool;
-	// a live route keeps its escalation step across elapsed waits.
-	state := u.backoff[r.persistentRoute]
-	state.failures = min(state.failures+1, 6)
-	base := time.Second << (state.failures - 1)
-	wait := min(30*time.Second, base+rand.N(base/4+1))
-	source := "local_backoff"
-	if hint := trustedRetryAfterHint(err); hint != nil && *hint > wait {
-		wait = *hint
-		source = "retry_after"
-	}
-	if next := now.Add(wait); next.After(state.at) {
-		state.at = next
-	}
-	u.backoff[r.persistentRoute] = state
-	u.mu.Unlock()
-	r.manager.providerSchedulingWake.signal()
-
-	b := requestBudgetFromContext(ctx)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	category := upstreamCategoryTransient
-	if statusCodeFromError(err) == http.StatusTooManyRequests {
-		category = upstreamCategoryTransientRateLimit
-	}
-	b.UpstreamCategory = string(category)
-	b.UpstreamRetryAt = state.at
-	b.UpstreamRetrySource = source
-	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
-}
-
 type persistentReservationKey struct{}
 
 func isPilotRouteRejection(err error) bool {
@@ -251,6 +205,9 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 		return
 	}
 	if reservation != nil && result.Error != nil {
+		if hasUpstreamExecutionAttempt(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			reservation.validationFailed = true
+		}
 		notePilotRouteRejection(ctx, reservation, err)
 		// Rules inspected the response before this point. Never persist its text.
 		result.Error.Message = "Codex inference rejected"

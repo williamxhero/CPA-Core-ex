@@ -37,12 +37,18 @@ type persistentPilotClock interface {
 
 func newPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock persistentPilotClock, upstream http.HandlerFunc, options ...ServerOption) *inventoryHarness {
 	t.Helper()
+	return newConfiguredPersistentPilotHTTP(t, allowlist, retries, clock, 1, "", upstream, options...)
+}
+
+func newConfiguredPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock persistentPilotClock, slots int, pilotYAML string, upstream http.HandlerFunc, options ...ServerOption) *inventoryHarness {
+	t.Helper()
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	caller := sha256.Sum256([]byte(sdkaccess.DefaultAccessProviderName + "\x00open"))
+	other := sha256.Sum256([]byte(sdkaccess.DefaultAccessProviderName + "\x00second-pilot"))
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	yaml := fmt.Sprintf(`access:
-  api-keys: [open, outside-pilot]
+  api-keys: [open, second-pilot, outside-pilot]
 management:
   secret-key: test-password
 oauth:
@@ -57,11 +63,11 @@ routing:
   provider-scheduling:
     mode: enforce
     models: [gpt-6.2-sol, pilot-control-model]
-    callers: [%x]
+    callers: [%x, %x]
     persistent-retry-models: %s
     resources:
-      %q: {funding: subscription, max-concurrent: 1}
-`, filepath.ToSlash(filepath.Join(dir, "auth")), retries, caller, allowlist, persistentPilotPrimaryResource)
+      %q: {funding: subscription, max-concurrent: %d}
+%s`, filepath.ToSlash(filepath.Join(dir, "auth")), retries, caller, other, allowlist, persistentPilotPrimaryResource, slots, pilotYAML)
 	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
 		t.Fatal(err)
 	}

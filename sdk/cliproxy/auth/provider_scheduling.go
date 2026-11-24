@@ -340,35 +340,57 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		now := m.getContinuityClock().Now()
 		candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now, false)
 		persistent := PersistentRetryPilot(ctx)
+		b := requestBudgetFromContext(ctx)
 		u := &m.providerSchedulingUse
+		var alarms []pilotAlarm
 		u.mu.Lock()
+		hardBinding := scheduledHardAffinity(selector, model, opts)
 		if persistent {
 			u.pruneStalePersistentBackoffLocked(scheduledLiveRoutes(candidates), now)
 			for i := range candidates {
 				c := &candidates[i]
-				if c.owner != "codex" || len(c.reasons) != 0 {
+				if c.owner != "codex" || len(c.reasons) != 0 || (hardBinding != "" && c.auth.ID != hardBinding) {
 					continue
 				}
-				if state := u.backoff[c.routeID]; state.probe != nil || state.at.After(now) {
-					c.reasons = append(c.reasons, "cooldown")
+				if alarm := u.evaluatePersistentRecovery(c.routeID, now); alarm.code != "" {
+					alarms = append(alarms, alarm)
 				}
+				switch state := u.backoff[c.routeID]; {
+				case state.probe != nil:
+					c.reasons = append(c.reasons, "probe_in_flight")
+				case state.at.After(now):
+					c.reasons = append(c.reasons, "cooldown")
+				case state.slotLimit() > 0 && u.pilotInUse[c.routeID] >= state.slotLimit():
+					c.reasons = append(c.reasons, "recovery_capacity_full")
+				case u.olderWaiter(b, c.routeID):
+					c.reasons = append(c.reasons, "older_waiter")
+				}
+			}
+		}
+		unlock := func() {
+			u.mu.Unlock()
+			for _, alarm := range alarms {
+				alarm.emit()
+			}
+			if len(alarms) != 0 {
+				m.providerSchedulingWake.signal()
 			}
 		}
 		available, byID := m.scheduledAvailable(candidates)
 		report := func(selected *Auth) {
 			if wantsSchedulingDecision(ctx) {
-				decision := m.schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected, scheduledHardAffinity(selector, model, opts))
+				decision := m.schedulingView(internalconfig.ProviderSchedulingEnforce, model, candidates, selected, hardBinding)
 				publishSchedulingDecision(ctx, decision)
 			}
 		}
 		var boundUnavailable bool
 		if persistent {
-			if bound := scheduledHardAffinity(selector, model, opts); bound != "" {
-				boundUnavailable = byID[bound].auth == nil
+			if hardBinding != "" {
+				boundUnavailable = byID[hardBinding].auth == nil
 			}
 		}
 		if len(available) == 0 || boundUnavailable {
-			u.mu.Unlock()
+			unlock()
 			report(nil)
 			if persistent {
 				return nil, nil, "", scheduledUnavailablePick{localNoAvailableRoute{model: model}}
@@ -383,13 +405,13 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = model
 		a, err := selector.Pick(selectorCtx, "mixed", selectionArgForSelector(selector, model), opts, available)
 		if err != nil || a == nil {
-			u.mu.Unlock()
+			unlock()
 			report(nil)
 			return nil, nil, "", newNoAvailableRouteError(model)
 		}
 		c, ok := byID[a.ID]
 		if !ok || !slices.Contains(available, c.auth) {
-			u.mu.Unlock()
+			unlock()
 			report(nil)
 			return nil, nil, "", newNoAvailableRouteError(model)
 		}
@@ -397,12 +419,12 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		current := m.auths[a.ID]
 		if current == nil || current.Generation != c.auth.Generation || current.RegistrationEpoch != c.auth.RegistrationEpoch || cfg != m.runtimeConfigSnapshot() {
 			m.mu.RUnlock()
-			u.mu.Unlock()
+			unlock()
 			continue
 		}
 		if errCtx := ctx.Err(); errCtx != nil {
 			m.mu.RUnlock()
-			u.mu.Unlock()
+			unlock()
 			return nil, nil, "", errCtx
 		}
 		persistentCodex := persistent && c.owner == "codex"
@@ -415,17 +437,28 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			}
 			r := &routeReservation{manager: m, limits: c.limits}
 			if persistentCodex {
-				r.persistentRoute = c.routeID
+				r.persistentRoute, r.ctx = c.routeID, ctx
+				if u.pilotInUse == nil {
+					u.pilotInUse = make(map[string]int)
+				}
+				u.pilotInUse[c.routeID]++
 				if state, exists := u.backoff[c.routeID]; exists {
-					state.probe = r
-					u.backoff[c.routeID] = state
-					r.probeAt = state.at
+					r.faultGeneration = state.generation
+					if state.firstSuccess.IsZero() {
+						state.probe = r
+						u.backoff[c.routeID] = state
+					}
+					recordPilotRecovery(b.trace.Load(), state.view(u.pilotInUse[c.routeID], u.waiterCount(c.routeID), now))
 				}
 			}
 			opts.Metadata[routeReservationMetadata] = r
 		}
+		removed := persistent && u.removeWaiter(b)
 		m.mu.RUnlock()
-		u.mu.Unlock()
+		unlock()
+		if removed {
+			m.providerSchedulingWake.signal()
+		}
 		report(c.auth)
 		return c.auth, c.exec, c.owner, nil
 	}

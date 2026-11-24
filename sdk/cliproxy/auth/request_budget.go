@@ -159,7 +159,7 @@ func (m *Manager) setupRequestBudget(ctx context.Context, req executor.Request, 
 		b.now = m.getContinuityClock().Now
 		b.persistentLimit, b.persistentRetry = m.persistentRetryLimit(ctx, req, opts)
 		if b.persistentRetry {
-			recordRoutingRetryPolicy(b.trace.Load(), string(opts.SourceFormat), b.persistentLimit)
+			recordRoutingRetryPolicy(b.trace.Load(), string(opts.SourceFormat), b.persistentLimit, m.runtimeConfigSnapshot().Routing.ProviderScheduling.PersistentRetry)
 		}
 	}
 	return ctx, opts
@@ -430,11 +430,27 @@ type scheduledRetryOpportunity struct {
 	probePending         bool
 	capacityPending      bool
 	refreshPending       bool
+	queuePending         bool
+	routes               map[string]struct{}
+	route, timingSource  string
+	cadenceTier          string
+	alarmAt              time.Time
+	waiters              int
+	bufferBytes          int
 	stop                 retryStopReason
 }
 
 func (o scheduledRetryOpportunity) eventPending() bool {
-	return o.probePending || o.capacityPending || o.refreshPending
+	return o.probePending || o.capacityPending || o.refreshPending || o.queuePending
+}
+
+func (o *scheduledRetryOpportunity) noteRoute(route string, at time.Time, source string) {
+	if o.routes != nil {
+		o.routes[route] = struct{}{}
+	}
+	if o.route == "" || (!at.IsZero() && (o.at.IsZero() || at.Before(o.at))) {
+		o.route, o.at, o.timingSource = route, at, source
+	}
 }
 
 func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity scheduledRetryOpportunity, singleLimit time.Duration) (bool, error) {
@@ -451,7 +467,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	clock := m.getContinuityClock()
 	start := clock.Now()
 	wait := opportunity.at.Sub(start)
-	if !opportunity.at.IsZero() && wait <= 0 {
+	if !opportunity.at.IsZero() && wait <= 0 && !opportunity.persistentWait {
 		return !opportunity.antigravityShortWait, nil
 	}
 	b.mu.Lock()
@@ -468,6 +484,18 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 		// Another candidate can still recover by event before this timer.
 		opportunity.at = time.Time{}
 	}
+	// Join outside the budget lock; route selection uses the inverse order.
+	b.mu.Unlock()
+	if opportunity.persistentWait {
+		if err := m.joinPilotWait(ctx, &opportunity, start); err != nil {
+			var full pilotBackpressure
+			if errors.As(err, &full) {
+				b.setRetryStop(full.limit)
+			}
+			return false, err
+		}
+	}
+	b.mu.Lock()
 	b.waiting = true
 	if opportunity.antigravityShortWait {
 		b.antigravityWaitUsed = true
@@ -478,15 +506,23 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 	executor.NotifyContinuityWaitStart(ctx)
 	defer executor.NotifyContinuityWaitEnd(ctx)
 	var err error
-	if opportunity.at.IsZero() {
+	wakeAt := opportunity.at
+	// A dwell alarm is only an observation while a real waiter is alive.
+	// It neither advances the route timer nor authorizes a send.
+	if !opportunity.alarmAt.IsZero() && (wakeAt.IsZero() || opportunity.alarmAt.Before(wakeAt)) {
+		wakeAt = opportunity.alarmAt
+	}
+	if wakeAt.IsZero() {
 		select {
 		case <-ctx.Done():
 			err = ctx.Err()
 		case <-opportunity.changed:
 			err = ctx.Err()
 		}
+	} else if delay := wakeAt.Sub(clock.Now()); delay > 0 {
+		err = waitForRecoverySignal(ctx, clock, delay, opportunity.changed)
 	} else {
-		err = waitForRecoverySignal(ctx, clock, wait, opportunity.changed)
+		err = ctx.Err()
 	}
 	elapsed := clock.Now().Sub(start)
 	b.mu.Lock()
@@ -561,6 +597,11 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 	var zero T
 	b := requestBudgetFromContext(ctx)
 	if b.persistentRetry {
+		if !m.retainPilotTrace(b.trace.Load()) {
+			b.setRetryStop(pilotTraceCapacity)
+			return zero, pilotBackpressure{pilotTraceCapacity}
+		}
+		defer m.leavePilotWait(b)
 		defer func() {
 			finalErr = pilotLifecycleError(ctx, finalErr)
 			switch {
@@ -716,6 +757,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			if errors.As(roundCause, &unavailable) || executor.IsInferenceAdmissionError(roundCause) {
 				opportunity := m.scheduledNextAvailability(ctx, providers, model, opts, attempted, m.getContinuityClock().Now(), true)
 				opportunity.persistentWait = true
+				opportunity.bufferBytes = len(req.Payload) + len(opts.OriginalRequest)
 				blockedBy = opportunity.stop
 				proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
 				if err != nil {
@@ -790,6 +832,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			}
 			opportunity := m.scheduledNextAvailability(ctx, providers, model, opts, excluded, m.getContinuityClock().Now(), true)
 			opportunity.persistentWait = true
+			opportunity.bufferBytes = len(req.Payload) + len(opts.OriginalRequest)
 			proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
 			if err != nil {
 				return zero, err
