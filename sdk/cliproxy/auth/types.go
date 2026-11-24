@@ -756,6 +756,15 @@ func (a *Auth) indexSeed() string {
 	return ""
 }
 
+// LogReference returns an opaque credential identifier without exposing file names,
+// configured indices or secret material. It does not modify the credential.
+func (a *Auth) LogReference() string {
+	if a == nil || strings.TrimSpace(a.ID) == "" {
+		return ""
+	}
+	return stableAuthIndex("log:" + a.Provider + "\x00" + a.ID)
+}
+
 // EnsureIndex returns a stable index derived from the auth file name or credential identity.
 func (a *Auth) EnsureIndex() string {
 	if a == nil {

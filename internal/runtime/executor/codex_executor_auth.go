@@ -486,10 +486,10 @@ func (e *CodexExecutor) refreshLocked(ctx context.Context, auth *cliproxyauth.Au
 		return nil, fmt.Errorf("codex executor: refresh failed")
 	}
 	if outerErr != nil {
-		log.Warnf("codex executor: SIWC token refreshed but outer token refresh failed for %s: %v", auth.ID, outerErr)
+		helps.LogWithRequestID(ctx).WithField("credential_ref", auth.LogReference()).Warn("Codex SIWC token refreshed but outer token refresh failed")
 	}
 	if siwcErr != nil {
-		log.Warnf("codex executor: outer token refreshed but SIWC token refresh failed for %s: %v", auth.ID, siwcErr)
+		helps.LogWithRequestID(ctx).WithField("credential_ref", auth.LogReference()).Warn("Codex outer token refreshed but SIWC token refresh failed")
 	}
 
 	patch := codexauth.NewCredentialRefreshPatchWithDiskBaseline(beforeRefresh.Metadata, diskBaseline, auth.Metadata, outerRefreshed || diskRotatedOuter, siwcRefreshed || diskRotatedSIWC)

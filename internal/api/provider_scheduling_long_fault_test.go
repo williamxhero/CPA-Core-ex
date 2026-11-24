@@ -374,26 +374,26 @@ func TestProviderSchedulingPersistentPilotRollbackOnYAMLReload(t *testing.T) {
 	}
 	// A registered but nonpilot model remains outside the policy even
 	// when the authenticated caller matches enforce mode.
-	w = call(strings.ReplaceAll(persistentPilotChat, persistentPilotModel, "pilot-control-model"))
+	w = call(setPilotFixtureField(persistentPilotChat, "model", "pilot-control-model"))
 	trace = readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
 	if w.Code != http.StatusBadGateway || ojson.Get(trace, "retry_policy").Exists() || sends.Load() != 2 {
 		t.Fatalf("control model entered pilot: %d %d %s", w.Code, sends.Load(), trace)
 	}
 	path := f.server.configFilePath
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatal(errRead)
 	}
 	updated := strings.ReplaceAll(string(raw), "persistent-retry-models: [gpt-6.2-sol]", "persistent-retry-models: []")
 	if updated == string(raw) {
 		t.Fatal("rollback fixture did not remove the model")
 	}
-	if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
-		t.Fatal(err)
+	if errWrite := os.WriteFile(path, []byte(updated), 0600); errWrite != nil {
+		t.Fatal(errWrite)
 	}
-	cfg, err := config.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
 	}
 	// Apply the parsed config through the same public Core and server entry
 	// points used by the service reload path (no watcher timing dependency).

@@ -350,6 +350,7 @@ type CodexConfig struct {
 	// Defaults to "0" (unlimited time, relying purely on the 48-frame and 1MB byte bounds).
 	// When set (e.g. "20s"), the upstream attempt is canceled once the time ceiling is reached
 	// without business output, allowing the conductor to retry it instead of hanging the client.
+	// The Codex HTTP SSE persistent-retry pilot uses the caller context and bounded buffering instead.
 	StreamBootstrapTimeout string `yaml:"stream-bootstrap-timeout,omitempty" json:"stream-bootstrap-timeout,omitempty"`
 	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
 	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`

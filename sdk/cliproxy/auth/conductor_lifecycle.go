@@ -706,7 +706,11 @@ func (m *Manager) updateInternalLocked(ctx context.Context, base, auth *Auth, mo
 			return nil, false, false, fmt.Errorf("persist meta auth: %w", errPersist)
 		}
 		// Ordinary persistence failures remain non-fatal, but never silent.
-		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+		if mode == updateModeRefresh && auth.Provider == "codex" {
+			credentialRefreshLogEntry(ctx, auth).Warn("failed to persist refreshed credential")
+		} else {
+			log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("failed to persist updated auth %s (%s): %v", auth.Provider, auth.ID, errPersist)
+		}
 	}
 	if m.authEpochs[auth.ID] != auth.RegistrationEpoch {
 		m.mu.Unlock()

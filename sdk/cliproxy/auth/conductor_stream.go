@@ -1154,8 +1154,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 	var upstreamErr error
 	didRefreshOnUnauthorized := false
 	readBootstrap := func(attemptCtx context.Context, cancelAttempt context.CancelFunc, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
-		timeout := m.streamBootstrapTimeout()
-		buffered, closed, errBootstrap := readStreamBootstrapWithTimeout(attemptCtx, ch, timeout, pilotCodex(ctx, provider))
+		pilot := pilotCodex(ctx, provider)
+		var timeout time.Duration
+		if !pilot {
+			timeout = m.streamBootstrapTimeout()
+		}
+		buffered, closed, errBootstrap := readStreamBootstrapWithTimeout(attemptCtx, ch, timeout, pilot)
 		var timeoutErr *Error
 		if errors.As(errBootstrap, &timeoutErr) && timeoutErr != nil && timeoutErr.Code == "stream_bootstrap_timeout" {
 			cancelAttempt()

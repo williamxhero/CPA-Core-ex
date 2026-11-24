@@ -24,6 +24,8 @@ import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 )
 
 const persistentPilotModel = "gpt-6.2-sol"
@@ -42,6 +44,11 @@ func newPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock p
 
 func newConfiguredPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock persistentPilotClock, slots int, pilotYAML string, upstream http.HandlerFunc, options ...ServerOption) *inventoryHarness {
 	t.Helper()
+	return newPersistentPilotHTTPWithYAML(t, allowlist, retries, clock, slots, 1, pilotYAML, upstream, options...)
+}
+
+func newPersistentPilotHTTPWithYAML(t *testing.T, allowlist string, retries int, clock persistentPilotClock, slots, credentials int, pilotYAML string, upstream http.HandlerFunc, options ...ServerOption) *inventoryHarness {
+	t.Helper()
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	caller := sha256.Sum256([]byte(sdkaccess.DefaultAccessProviderName + "\x00open"))
 	other := sha256.Sum256([]byte(sdkaccess.DefaultAccessProviderName + "\x00second-pilot"))
@@ -58,7 +65,7 @@ multimedia:
 routing:
   retry:
     request-retry: 1
-    max-retry-credentials: 1
+    max-retry-credentials: %d
     upstream-error-retry-limit: %d
   provider-scheduling:
     mode: enforce
@@ -67,13 +74,13 @@ routing:
     persistent-retry-models: %s
     resources:
       %q: {funding: subscription, max-concurrent: %d}
-%s`, filepath.ToSlash(filepath.Join(dir, "auth")), retries, caller, other, allowlist, persistentPilotPrimaryResource, slots, pilotYAML)
-	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
-		t.Fatal(err)
+%s`, filepath.ToSlash(filepath.Join(dir, "auth")), credentials, retries, caller, other, allowlist, persistentPilotPrimaryResource, slots, pilotYAML)
+	if errWrite := os.WriteFile(path, []byte(yaml), 0600); errWrite != nil {
+		t.Fatal(errWrite)
 	}
-	cfg, err := config.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
 	}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.SetConfig(cfg) // Same initial snapshot as the service builder.
@@ -82,8 +89,8 @@ routing:
 	s := NewServer(cfg, manager, sdkaccess.NewManager(), path, options...)
 	f := &inventoryHarness{t: t, server: s, manager: manager}
 	t.Cleanup(func() {
-		if err := s.Stop(context.Background()); err != nil {
-			t.Error(err)
+		if errStop := s.Stop(context.Background()); errStop != nil {
+			t.Error(errStop)
 		}
 	})
 	addPersistentPilotCodex(t, f, "primary", "20", upstream)
@@ -131,13 +138,13 @@ func servePersistentPilot(ctx context.Context, f *inventoryHarness, w http.Respo
 func persistentPilotStart(w http.ResponseWriter, id string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":%q,\"created_at\":1712345678,\"status\":\"in_progress\"}}\n\n", id)
-	fmt.Fprintf(w, "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":%q,\"status\":\"in_progress\"}}\n\n", id)
+	writePilotEvent(w, `{"type":"response.created","response":{"created_at":1712345678,"status":"in_progress"}}`, "response.id", id)
+	writePilotEvent(w, `{"type":"response.in_progress","response":{"status":"in_progress"}}`, "response.id", id)
 	w.(http.Flusher).Flush()
 }
 
 func persistentPilotFail(w http.ResponseWriter, id string) {
-	fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":%q,\"status\":\"failed\",\"error\":{\"code\":\"upstream_unavailable\",\"message\":\"RAW-FAILURE-CANARY\"}}}\n\n", id)
+	writePilotEvent(w, `{"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_unavailable","message":"RAW-FAILURE-CANARY"}}}`, "response.id", id)
 }
 
 func persistentPilotSucceed(w http.ResponseWriter, text string) {
@@ -145,8 +152,132 @@ func persistentPilotSucceed(w http.ResponseWriter, text string) {
 }
 
 func persistentPilotSucceedWithID(w http.ResponseWriter, id, text string) {
-	fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":%q,\"output_index\":0,\"content_index\":0}\n\n", text)
-	fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":%q,\"status\":\"completed\",\"output\":[]}}\n\n", id)
+	writePilotEvent(w, `{"type":"response.output_text.delta","output_index":0,"content_index":0}`, "delta", text)
+	writePilotEvent(w, `{"type":"response.completed","response":{"status":"completed","output":[]}}`, "response.id", id)
+}
+
+func writePilotEvent(w http.ResponseWriter, fixture, path, value string) {
+	fmt.Fprintf(w, "data: %s\n\n", setPilotFixtureField(fixture, path, value))
+}
+
+func setPilotFixtureField(fixture, path, value string) string {
+	doc := ojson.NewDocString(fixture)
+	_ = doc.Set(path, value)
+	return doc.String()
+}
+
+func pilotFixtureWithContent(fixture, text string) string {
+	path := "input"
+	if ojson.Get(fixture, "messages").Exists() {
+		path = "messages.0.content"
+	}
+	return setPilotFixtureField(fixture, path, text)
+}
+
+type pilotCloseErrorBody struct{ io.ReadCloser }
+
+func (body pilotCloseErrorBody) Close() error {
+	if errClose := body.ReadCloser.Close(); errClose != nil {
+		return errClose
+	}
+	return fmt.Errorf("raw upstream cleanup: CLOSE-CANARY")
+}
+
+func TestProviderSchedulingPersistentPilotCleanupCapture(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	logger := log.StandardLogger()
+	hooks := logger.ReplaceHooks(log.LevelHooks{})
+	hook := logtest.NewLocal(logger)
+	t.Cleanup(func() { logger.ReplaceHooks(hooks) })
+	logs := t.TempDir()
+	var sends atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, newProviderBudgetClock(time.Now(), false), func(w http.ResponseWriter, _ *http.Request) {
+		sends.Add(1)
+		persistentPilotStart(w, "resp-preamble-CANARY")
+		writePilotEvent(w, `{"type":"response.failed","response":{"error":{"message":"BODY-CANARY"}}}`, "response.error.code", "thinking_signature_invalid")
+	}, WithRequestLoggerFactory(func(*config.Config, string) logging.RequestLogger {
+		return logging.NewFileRequestLogger(true, logs, logs, 10)
+	}))
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+	f.manager.SetRoundTripperProvider(gateFixedTransport{rt: nativeFundingTestTransport(func(r *http.Request) (*http.Response, error) {
+		resp, errRoundTrip := transport.RoundTrip(r)
+		if errRoundTrip == nil {
+			resp.Body = pilotCloseErrorBody{resp.Body}
+		}
+		return resp, errRoundTrip
+	})})
+	w := callPersistentPilot(ctx, f, "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY"}`)
+	trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+	if w.Code != 400 || sends.Load() != 1 || ojson.Get(trace, "send_count").Int() != 1 ||
+		ojson.Get(trace, "retry_stop_reason").String() != "upstream_validation" || strings.Contains(w.Body.String()+trace, "CANARY") {
+		t.Fatalf("wrong rejection after cleanup: status=%d sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace)
+	}
+	entries, errRead := os.ReadDir(logs)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if len(entries) != 0 {
+		t.Fatal("pilot cleanup produced a request capture")
+	}
+	var closeReported bool
+	for _, entry := range hook.AllEntries() {
+		closeReported = closeReported || entry.Message == "Codex response body close failed"
+		if strings.Contains(entry.Message+fmt.Sprint(entry.Data), "CANARY") {
+			t.Fatal("pilot cleanup leaked canary material into application logs")
+		}
+	}
+	if !closeReported {
+		t.Fatal("body close failure was not reported")
+	}
+}
+
+func TestProviderSchedulingPersistentPilotIgnoresPostConnectBootstrapTimer(t *testing.T) {
+	for _, buffering := range []bool{false, true} {
+		t.Run(fmt.Sprint(buffering), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+			defer cancel()
+			started, release := make(chan struct{}), make(chan struct{})
+			var sends atomic.Int32
+			yaml := fmt.Sprintf("upstream:\n  codex: {stream-bootstrap-buffering: %t, stream-bootstrap-timeout: 20ms}\n", buffering)
+			f := newConfiguredPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, newProviderBudgetClock(time.Now(), false), 1, yaml, func(w http.ResponseWriter, req *http.Request) {
+				sends.Add(1)
+				persistentPilotStart(w, "resp-slow")
+				close(started)
+				select {
+				case <-release:
+					persistentPilotSucceedWithID(w, "resp-slow", "slow-response-delivered")
+				case <-req.Context().Done():
+				}
+			})
+			result := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				result <- callPersistentPilot(ctx, f, "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"slow"}`)
+			}()
+			select {
+			case <-started:
+			case <-ctx.Done():
+				t.Fatal("upstream did not start")
+			}
+			// Hold the real producer open well beyond the configured network timer.
+			timer := time.NewTimer(150 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case w := <-result:
+				trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+				t.Fatalf("bootstrap timer ended live stream: status=%d body=%s trace=%s", w.Code, w.Body, trace)
+			case <-timer.C:
+			}
+			close(release)
+			w := awaitPilotResult(t, ctx, result)
+			trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+			if w.Code != 200 || sends.Load() != 1 || !strings.Contains(w.Body.String(), "slow-response-delivered") ||
+				ojson.Get(trace, "send_count").Int() != 1 || ojson.Get(trace, "terminal.code").String() != "succeeded" {
+				t.Fatalf("stream did not complete after producer resumed: status=%d sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace)
+			}
+		})
+	}
 }
 
 func TestProviderSchedulingPersistentPilotDeadlineBeforeRecovery(t *testing.T) {
@@ -380,13 +511,13 @@ func TestProviderSchedulingPersistentPilotHalfOpenRelease(t *testing.T) {
 				persistentPilotStart(w, id)
 				persistentPilotSucceedWithID(w, id, "result-"+text)
 			})
-			a := startPilotRequest(ctx, f, tc.path, strings.Replace(tc.body, "hello", "request-A", 1))
+			a := startPilotRequest(ctx, f, tc.path, pilotFixtureWithContent(tc.body, "request-A"))
 			aTimer := awaitPilotTimer(t, ctx, clock, a)
 			assertPersistentPilotStepWait(t, aTimer.at.Sub(clock.Now()), time.Second)
 			bRecorder := httptest.NewRecorder()
 			b := make(chan *httptest.ResponseRecorder, 1)
 			go func() {
-				servePersistentPilot(ctx, f, bRecorder, tc.path, strings.Replace(tc.body, "hello", "request-B", 1), "open")
+				servePersistentPilot(ctx, f, bRecorder, tc.path, pilotFixtureWithContent(tc.body, "request-B"), "open")
 				b <- bRecorder
 			}()
 			bTimer := awaitPilotTimer(t, ctx, clock, b)
@@ -541,7 +672,7 @@ func TestProviderSchedulingPersistentPilotFirstSendAfterOrdinaryCooldown(t *test
 	bRecorder := httptest.NewRecorder()
 	b := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		servePersistentPilot(ctx, f, bRecorder, path, strings.Replace(persistentPilotChat, "hello", "request-B", 1), "open")
+		servePersistentPilot(ctx, f, bRecorder, path, pilotFixtureWithContent(persistentPilotChat, "request-B"), "open")
 		b <- bRecorder
 	}()
 	var timer persistentPilotTimer
@@ -578,7 +709,7 @@ func TestProviderSchedulingPersistentPilotFirstSendAfterOrdinaryCooldown(t *test
 
 func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 	const path = "/v1/chat/completions"
-	for _, scenario := range []string{"trusted-hint", "healthy-backup", "backup-wakes-waiter", "cancel", "no-route", "ineligible-backup", "confirmed-quota"} {
+	for _, scenario := range []string{"trusted-hint", "healthy-backup", "backup-wakes-waiter", "cancel", "no-route", "operational-suspension", "ineligible-backup", "unscoped-quota"} {
 		t.Run(scenario, func(t *testing.T) {
 			ctx, stop := context.WithTimeout(t.Context(), 10*time.Second)
 			defer stop()
@@ -589,10 +720,14 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 			clock.moveTo(start)
 			var primary, backup atomic.Int32
 			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, _ *http.Request) {
-				if scenario == "confirmed-quota" {
-					primary.Add(1)
+				if scenario == "unscoped-quota" && primary.Add(1) == 1 {
 					w.WriteHeader(http.StatusTooManyRequests)
 					fmt.Fprint(w, `{"error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":300}}`)
+					return
+				}
+				if scenario == "unscoped-quota" {
+					persistentPilotStart(w, "resp-quota-recovered")
+					persistentPilotSucceed(w, "quota-envelope-first-send")
 					return
 				}
 				w.Header().Set("Retry-After", "300")
@@ -616,19 +751,22 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 				}
 				return trace.Raw
 			}
-			if scenario == "confirmed-quota" {
-				assertResult(call(), http.StatusTooManyRequests, 1, "quota_exhausted")
+			if scenario == "unscoped-quota" {
+				// Unlike WHAMAuthority's confirmed quota gate, this envelope can
+				// neither stop B nor establish a 300s retry deadline.
+				assertResult(call(), http.StatusTooManyRequests, 1, "retry_limit")
 				b := startPilotRequest(ctx, f, path, persistentPilotChat)
-				select {
-				case <-clock.timers:
-					t.Fatal("a quota reset estimate opened a first-send wait")
-				case w := <-b:
-					trace := assertResult(w, http.StatusServiceUnavailable, 0, "quota_exhausted")
-					if primary.Load() != 1 || ojson.Get(trace, "last_recovery_wait").Exists() {
-						t.Fatalf("quota-blocked request sent or waited: %s", trace)
-					}
-				case <-ctx.Done():
-					t.Fatal("quota-blocked request did not return")
+				timer := awaitPilotTimer(t, ctx, clock, b)
+				assertPersistentPilotStepWait(t, timer.at.Sub(start), time.Second)
+				if primary.Load() != 1 {
+					t.Fatal("B sent before transient backoff expired")
+				}
+				clock.moveTo(timer.at)
+				close(timer.fire)
+				w := awaitPilotResult(t, ctx, b)
+				trace := assertResult(w, http.StatusOK, 1, "")
+				if primary.Load() != 2 || !strings.Contains(w.Body.String(), "quota-envelope-first-send") || !ojson.Get(trace, "last_recovery_wait").Exists() {
+					t.Fatalf("B did not recover its first send: status=%d body=%s trace=%s", w.Code, w.Body, trace)
 				}
 				return
 			}
@@ -641,6 +779,15 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 				updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) { a.Disabled = true })
 				if trace := assertResult(call(), http.StatusServiceUnavailable, 0, "manual_disabled"); ojson.Get(trace, "last_recovery_wait").Exists() || ojson.Get(trace, "terminal.code").String() != "no_available_route" {
 					t.Fatalf("disabled route caused a wait: %s", trace)
+				}
+				return
+			case "operational-suspension":
+				updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) {
+					a.Disabled, a.Status = true, coreauth.StatusDisabled
+					a.LastError = &coreauth.Error{Code: "tos_violation"}
+				})
+				if trace := assertResult(call(), http.StatusServiceUnavailable, 0, "tos_violation"); ojson.Get(trace, "last_recovery_wait").Exists() || strings.Contains(trace, "manual_disabled") {
+					t.Fatalf("wrong suspension evidence: %s", trace)
 				}
 				return
 			case "healthy-backup", "backup-wakes-waiter", "ineligible-backup":
@@ -667,7 +814,7 @@ func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 
 			bCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
-			b := startPilotRequest(bCtx, f, path, strings.Replace(persistentPilotChat, "hello", "request-B", 1))
+			b := startPilotRequest(bCtx, f, path, pilotFixtureWithContent(persistentPilotChat, "request-B"))
 			timer := awaitPilotTimer(t, ctx, clock, b)
 			if timer.at.Sub(start) != 300*time.Second || primary.Load() != 1 || backup.Load() != 0 {
 				t.Fatalf("wrong initial wait: %v primary=%d backup=%d", timer.at.Sub(start), primary.Load(), backup.Load())
@@ -792,6 +939,80 @@ func TestProviderSchedulingPersistentPilotWaitsForCapacity(t *testing.T) {
 	}
 }
 
+func TestProviderSchedulingPersistentPilotRefreshLogsOpaqueCredential(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	logger := log.StandardLogger()
+	level, hooks := logger.GetLevel(), logger.ReplaceHooks(log.LevelHooks{})
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.DebugLevel)
+	t.Cleanup(func() { logger.SetLevel(level); logger.ReplaceHooks(hooks) })
+	var sends, renewals atomic.Int32
+	usePilotRefreshIssuer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/oauth/token" {
+			t.Errorf("unexpected issuer path %s", r.URL.Path)
+		}
+		renewals.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"error":"invalid_grant","error_description":"GRANT-CANARY"}`)
+	})
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, newProviderBudgetClock(time.Now(), false), func(w http.ResponseWriter, _ *http.Request) {
+		sends.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":{"code":"token_expired","message":"UPSTREAM-CANARY"}}`)
+	})
+	const file = "FILE-CANARY@example.test.json"
+	primary, ok := f.manager.GetByID(t.Name() + "/primary")
+	if !ok {
+		t.Fatal("missing primary credential")
+	}
+	updatePilotAuth(t, f, primary.ID, func(a *coreauth.Auth) { a.Disabled = true })
+	primary.ID, primary.Index, primary.FileName = file, "", file
+	delete(primary.Attributes, "api_key")
+	primary.Metadata = map[string]any{"type": "codex", "access_token": "ACCESS-CANARY", "refresh_token": "REFRESH-CANARY"}
+	if _, errRegister := f.manager.Register(coreauth.WithSkipPersist(ctx), primary); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	registry.GetGlobalRegistry().RegisterClient(file, "codex", []*registry.ModelInfo{{ID: persistentPilotModel}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(file) })
+	hook.Reset() // Observe the request and refresh, not fixture registration.
+	w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
+	trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+	if w.Code != 502 || sends.Load() != 1 || renewals.Load() != 1 || ojson.Get(trace, "send_count").Int() != 1 ||
+		ojson.Get(trace, "retry_stop_reason").String() != "upstream_authentication_required" || strings.Contains(w.Body.String()+trace, "CANARY") {
+		t.Fatalf("wrong refresh result: status=%d sends=%d renewals=%d trace=%s", w.Code, sends.Load(), renewals.Load(), trace)
+	}
+	var correlated bool
+	for _, entry := range hook.AllEntries() {
+		if strings.Contains(entry.Message, "refresh") && entry.Data["credential_ref"] != nil {
+			correlated = true
+		}
+		if strings.Contains(entry.Message+fmt.Sprint(entry.Data), "CANARY") {
+			t.Fatal("credential refresh leaked canary material to application logs")
+		}
+	}
+	if !correlated {
+		t.Fatal("missing opaque credential reference in refresh logs")
+	}
+}
+
+func usePilotRefreshIssuer(t *testing.T, handler http.HandlerFunc) {
+	t.Helper()
+	issuer, network := quotaTLS(t, handler)
+	transport := issuer.Client().Transport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.TLSClientConfig.ServerName = "chatgpt.com"
+	transport.DialContext = func(ctx context.Context, protocol, addr string) (net.Conn, error) {
+		if addr != "auth.openai.com:443" {
+			return (&net.Dialer{}).DialContext(ctx, protocol, addr)
+		}
+		return network.DialContext(ctx, protocol, addr)
+	}
+	previous := http.DefaultTransport
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = previous; transport.CloseIdleConnections() })
+}
+
 func TestProviderSchedulingPersistentPilotWaitsForActualRefresh(t *testing.T) {
 	for _, outcome := range []string{"renewed", "invalid-grant"} {
 		t.Run(outcome, func(t *testing.T) {
@@ -800,7 +1021,7 @@ func TestProviderSchedulingPersistentPilotWaitsForActualRefresh(t *testing.T) {
 			clock := newManualPersistentPilotClock()
 			entered, release := make(chan struct{}), make(chan struct{})
 			var inference, renewals atomic.Int32
-			issuer, network := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			usePilotRefreshIssuer(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/oauth/token" || renewals.Add(1) != 1 {
 					t.Error("unexpected OAuth request")
 					w.WriteHeader(500)
@@ -818,19 +1039,7 @@ func TestProviderSchedulingPersistentPilotWaitsForActualRefresh(t *testing.T) {
 					return
 				}
 				fmt.Fprint(w, `{"access_token":"renewed-CANARY","refresh_token":"new-grant-CANARY","expires_in":3600}`)
-			}))
-			transport := issuer.Client().Transport.(*http.Transport).Clone()
-			transport.Proxy = nil
-			transport.TLSClientConfig.ServerName = "chatgpt.com"
-			transport.DialContext = func(ctx context.Context, protocol, addr string) (net.Conn, error) {
-				if addr != "auth.openai.com:443" {
-					return (&net.Dialer{}).DialContext(ctx, protocol, addr)
-				}
-				return network.DialContext(ctx, protocol, addr)
-			}
-			previous := http.DefaultTransport
-			http.DefaultTransport = transport
-			t.Cleanup(func() { http.DefaultTransport = previous; transport.CloseIdleConnections() })
+			})
 			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, r *http.Request) {
 				inference.Add(1)
 				if r.Header.Get("Authorization") != "Bearer renewed-CANARY" {
@@ -917,6 +1126,45 @@ func TestProviderSchedulingPersistentPilotFiniteSameRouteBudget(t *testing.T) {
 	}
 }
 
+func TestProviderSchedulingPersistentPilotExplicitBudgetOverridesCredentialRetry(t *testing.T) {
+	for _, limit := range []int{-1, 1} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			clock := newProviderBudgetClock(time.Now(), true)
+			var sends atomic.Int32
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", limit, clock, func(w http.ResponseWriter, _ *http.Request) {
+				if sends.Add(1) <= 2 {
+					http.Error(w, "temporary failure", http.StatusBadGateway)
+					return
+				}
+				persistentPilotStart(w, "resp-recovered")
+				persistentPilotSucceedWithID(w, "resp-recovered", "recovered-after-two")
+			})
+			a, ok := f.manager.GetByID(t.Name() + "/primary")
+			if !ok {
+				t.Fatal("missing primary credential")
+			}
+			a.Metadata = map[string]any{"request_retry": 0}
+			if _, errUpdate := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); errUpdate != nil {
+				t.Fatal(errUpdate)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+			defer cancel()
+			w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
+			trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+			wantStatus, wantSends, wantStop := 200, int32(3), ""
+			if limit == 1 {
+				wantStatus, wantSends, wantStop = 502, 2, "retry_limit"
+			}
+			gotResult := strings.Contains(w.Body.String(), "recovered-after-two")
+			if w.Code != wantStatus || gotResult != (limit == -1) || sends.Load() != wantSends ||
+				ojson.Get(trace, "retry_policy.upstream_error_retry_limit").Int() != int64(limit) ||
+				ojson.Get(trace, "send_count").Int() != int64(wantSends) || ojson.Get(trace, "retry_stop_reason").String() != wantStop {
+				t.Fatalf("wrong budget outcome: status=%d sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace)
+			}
+		})
+	}
+}
+
 func TestProviderSchedulingPersistentPilotTerminalRateLimitBudget(t *testing.T) {
 	clock := newProviderBudgetClock(time.Now(), true)
 	var attempts atomic.Int32
@@ -993,6 +1241,8 @@ func TestProviderSchedulingPersistentPilotQuotaEvidenceControlsRetry(t *testing.
 	for _, tc := range []struct {
 		name         string
 		body         string
+		status       int
+		legacy       bool
 		recover      bool
 		wantStatus   int
 		wantSends    int32
@@ -1001,28 +1251,35 @@ func TestProviderSchedulingPersistentPilotQuotaEvidenceControlsRetry(t *testing.
 		wantStop     string
 		wantSource   string
 	}{
-		{name: "bare 429", body: `{"error":{"message":"temporary upstream rejection"}}`, recover: true, wantStatus: http.StatusOK, wantSends: 2, wantWaits: 1, wantCategory: "transient_rate_limit", wantSource: "local_backoff"},
-		{name: "authoritative quota 429", body: quotaBody, wantStatus: http.StatusTooManyRequests, wantSends: 1, wantStop: "quota_exhausted"},
+		{name: "bare 429", body: `{"error":{"message":"temporary upstream rejection"}}`, status: 429, recover: true, wantStatus: 200, wantSends: 2, wantWaits: 1, wantCategory: "transient_rate_limit", wantSource: "local_backoff"},
+		{name: "unscoped quota 429", body: quotaBody, status: 429, recover: true, wantStatus: 200, wantSends: 2, wantWaits: 1, wantCategory: "transient_rate_limit", wantSource: "local_backoff"},
+		{name: "unscoped quota on 502", body: quotaBody, status: 502, recover: true, wantStatus: 200, wantSends: 2, wantWaits: 1, wantCategory: "transient_upstream", wantSource: "local_backoff"},
+		{name: "legacy quota 429", body: quotaBody, status: 429, legacy: true, wantStatus: 429, wantSends: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := newProviderBudgetClock(time.Now(), true)
 			var attempts atomic.Int32
-			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+			allowlist := "[gpt-6.2-sol]"
+			if tc.legacy {
+				allowlist = "[]"
+			}
+			f := newPersistentPilotHTTP(t, allowlist, -1, clock, func(w http.ResponseWriter, _ *http.Request) {
 				n := attempts.Add(1)
 				if tc.recover && n > 1 {
 					persistentPilotStart(w, "resp-success")
-					persistentPilotSucceed(w, "recovered-bare-429")
+					persistentPilotSucceed(w, "recovered-without-quota-authority")
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusTooManyRequests)
+				w.WriteHeader(tc.status)
 				fmt.Fprint(w, tc.body)
 			})
 			ctx, cancel := context.WithTimeout(coreauth.WithRequestBudget(t.Context()), 10*time.Second)
 			defer cancel()
 			w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
 			trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
-			if w.Code != tc.wantStatus || attempts.Load() != tc.wantSends || len(clock.waits) != tc.wantWaits || ojson.Get(trace, "send_count").Int() != int64(tc.wantSends) {
+			if w.Code != tc.wantStatus || attempts.Load() != tc.wantSends || len(clock.waits) != tc.wantWaits || ojson.Get(trace, "send_count").Int() != int64(tc.wantSends) ||
+				(tc.recover && !strings.Contains(w.Body.String(), "recovered-without-quota-authority")) {
 				t.Fatalf("unexpected retry pacing: status=%d sends=%d waits=%d body=%s trace=%s", w.Code, attempts.Load(), len(clock.waits), w.Body, trace)
 			}
 			if category := ojson.Get(trace, "upstream_category").String(); category != tc.wantCategory {
@@ -1061,7 +1318,7 @@ func TestProviderSchedulingPersistentPilotTerminalEvidence(t *testing.T) {
 					return
 				}
 				persistentPilotStart(w, "resp-hidden-CANARY")
-				fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":%q,\"message\":\"UPSTREAM-CANARY\"}}}\n\n", tc.code)
+				writePilotEvent(w, `{"type":"response.failed","response":{"error":{"message":"UPSTREAM-CANARY"}}}`, "response.error.code", tc.code)
 			}, WithRequestLoggerFactory(func(*config.Config, string) logging.RequestLogger {
 				return logging.NewFileRequestLogger(true, logs, logs, 10)
 			}))
@@ -1100,12 +1357,14 @@ func TestProviderSchedulingPersistentPilotStructuredFailureScope(t *testing.T) {
 		primary, backup              int32
 		waits                        int
 		primaryFailsFirst            bool
+		credentials                  int
 	}{
-		{"model_denial_is_route_local", `{"error":{"type":"invalid_request_error","code":"model_not_found","param":"model","message":"RAW-CANARY"}}`, "", "backup-success", 404, 200, 1, 1, 0, false},
-		{"explicit_overload_is_transient", `{"error":{"type":"invalid_request_error","code":"server_is_overloaded","param":"model","message":"RAW-CANARY"}}`, "", "primary-recovered", 503, 200, 2, 0, 1, false},
-		{"specific_validation_without_param_is_terminal", `{"error":{"type":"invalid_request_error","code":"string_above_max_length","param":null,"message":"RAW-CANARY"}}`, "upstream_validation", "invalid_request", 400, 400, 1, 0, 0, false},
-		{"unknown_code_with_param_remains_recoverable", `{"error":{"type":"invalid_request_error","code":"unknown_rejection","param":"model","message":"RAW-CANARY"}}`, "", "primary-recovered", 400, 200, 2, 0, 1, false},
-		{"route_rejection_does_not_discard_prior_transient", `{"error":{"type":"permission_error","code":"permission_denied","message":"RAW-CANARY"}}`, "", "primary-recovered", 403, 200, 2, 1, 1, true},
+		{"model_denial_is_route_local", `{"error":{"type":"invalid_request_error","code":"model_not_found","param":"model","message":"RAW-CANARY"}}`, "", "backup-success", 404, 200, 1, 1, 0, false, 1},
+		{"explicit_overload_is_transient", `{"error":{"type":"invalid_request_error","code":"server_is_overloaded","param":"model","message":"RAW-CANARY"}}`, "", "primary-recovered", 503, 200, 2, 0, 1, false, 1},
+		{"specific_validation_without_param_is_terminal", `{"error":{"type":"invalid_request_error","code":"string_above_max_length","param":null,"message":"RAW-CANARY"}}`, "upstream_validation", "invalid_request", 400, 400, 1, 0, 0, false, 1},
+		{"unknown_code_with_param_remains_recoverable", `{"error":{"type":"invalid_request_error","code":"unknown_rejection","param":"model","message":"RAW-CANARY"}}`, "", "primary-recovered", 400, 200, 2, 0, 1, false, 1},
+		{"route_rejection_does_not_discard_prior_transient", `{"error":{"type":"permission_error","code":"permission_denied","message":"RAW-CANARY"}}`, "", "primary-recovered", 403, 200, 2, 1, 1, true, 1},
+		{"same_round_rejection_does_not_discard_prior_transient", `{"error":{"type":"permission_error","code":"permission_denied","message":"RAW-CANARY"}}`, "", "primary-recovered", 403, 200, 2, 1, 1, true, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clock := newProviderBudgetClock(time.Now(), true)
@@ -1115,7 +1374,7 @@ func TestProviderSchedulingPersistentPilotStructuredFailureScope(t *testing.T) {
 				w.WriteHeader(tc.status)
 				fmt.Fprint(w, tc.envelope)
 			}
-			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+			f := newPersistentPilotHTTPWithYAML(t, "[gpt-6.2-sol]", -1, clock, 1, tc.credentials, "", func(w http.ResponseWriter, _ *http.Request) {
 				if primary.Add(1) == 1 {
 					if tc.primaryFailsFirst {
 						http.Error(w, "RAW-CANARY", http.StatusBadGateway)
@@ -1158,22 +1417,23 @@ func TestProviderSchedulingPersistentPilotStructuredFailureScope(t *testing.T) {
 func TestProviderSchedulingPersistentPilotUnclassifiedUpstreamRecovers(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		fail func(http.ResponseWriter)
+		fail func(*testing.T, http.ResponseWriter)
 	}{
-		{"ordinary-403", func(w http.ResponseWriter) { http.Error(w, "RAW-FAILURE-CANARY", 403) }},
-		{"unrecognized-422", func(w http.ResponseWriter) {
+		{"ordinary-403", func(_ *testing.T, w http.ResponseWriter) { http.Error(w, "RAW-FAILURE-CANARY", 403) }},
+		{"unrecognized-422", func(_ *testing.T, w http.ResponseWriter) {
 			http.Error(w, `{"error":{"code":"unknown_rejection","message":"RAW-FAILURE-CANARY"}}`, 422)
 		}},
-		{"unknown-stream-failure", func(w http.ResponseWriter) {
+		{"unknown-stream-failure", func(_ *testing.T, w http.ResponseWriter) {
 			persistentPilotStart(w, "resp-hidden-CANARY")
 			fmt.Fprint(w, "data: {\"type\":\"response.failed\",\"response\":{\"status_code\":403,\"error\":{\"code\":\"unrecognized\",\"message\":\"RAW-FAILURE-CANARY\"}}}\n\n")
 		}},
-		{"disconnected-after-preamble", func(w http.ResponseWriter) {
+		{"disconnected-after-preamble", func(t *testing.T, w http.ResponseWriter) {
 			// An incomplete chunked HTTP response, not a terminal SSE event.
 			persistentPilotStart(w, "resp-hidden-CANARY")
-			conn, _, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				panic(err)
+			conn, _, errHijack := w.(http.Hijacker).Hijack()
+			if errHijack != nil {
+				t.Error(errHijack)
+				return
 			}
 			_ = conn.Close()
 		}},
@@ -1183,7 +1443,7 @@ func TestProviderSchedulingPersistentPilotUnclassifiedUpstreamRecovers(t *testin
 			var sends atomic.Int32
 			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
 				if sends.Add(1) == 1 {
-					tc.fail(w)
+					tc.fail(t, w)
 					return
 				}
 				persistentPilotStart(w, "resp-success")
@@ -1280,7 +1540,7 @@ func TestProviderSchedulingPersistentPilotChatIncident(t *testing.T) {
 			})
 			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 			defer cancel()
-			w := callPersistentPilot(ctx, f, "/v1/chat/completions", strings.Replace(persistentPilotChat, persistentPilotModel, model, 1))
+			w := callPersistentPilot(ctx, f, "/v1/chat/completions", setPilotFixtureField(persistentPilotChat, "model", model))
 			raw := w.Body.String()
 			if model != persistentPilotModel {
 				if attempts.Load() != 1 || len(clock.waits) != 0 || strings.Contains(raw, "recovered-on-fourth") {

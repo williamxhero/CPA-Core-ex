@@ -32,10 +32,9 @@ func TestProviderSchedulingPersistentPilotWHAMAuthority(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	reset := now.Add(3 * time.Hour).Unix()
 	weeklyReset := now.Add(5 * 24 * time.Hour).Unix()
-	windows := fmt.Sprintf(`"primary_window":{"used_percent":100,"reset_at":%d,"limit_window_seconds":18000},"secondary_window":{"used_percent":25,"reset_at":%d,"limit_window_seconds":604800}`, reset, weeklyReset)
 	upstream, network := quotaTLS(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Header.Get("Authorization")
-		phase := phase.Load()
+		currentPhase := phase.Load()
 		w.Header().Set("Date", now.Format(http.TimeFormat))
 		switch r.URL.Path {
 		case "/backend-api/wham/usage":
@@ -43,19 +42,26 @@ func TestProviderSchedulingPersistentPilotWHAMAuthority(t *testing.T) {
 			if key != "Bearer wham-A-CANARY" || r.Header.Get("Chatgpt-Account-Id") != "acct-A-CANARY" {
 				t.Error("quota read addressed the wrong account")
 			}
-			switch phase {
-			case 0:
-				// Same plan window, but balance is unknown. Not evidence of double zero.
-				fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,%s},"additional_rate_limits":[]}`, windows)
-			case 1:
-				w.Header().Set("Date", now.Add(time.Second).Format(http.TimeFormat))
-				fmt.Fprintf(w, `{"rate_limit":{"allowed":false,"limit_reached":true,%s},"additional_rate_limits":[],"credits":{"has_credits":false,"unlimited":false,"balance":"0"}}`, windows)
-			case 2, 3:
-				if phase == 3 {
-					w.Header().Set("Date", now.Add(2*time.Second).Format(http.TimeFormat))
-				}
-				fmt.Fprintf(w, `{"rate_limit":{"allowed":true,"limit_reached":false,%s},"additional_rate_limits":[],"credits":{"has_credits":false,"unlimited":false,"balance":"0"}}`, strings.Replace(windows, `"used_percent":100`, `"used_percent":25`, 1))
+			doc := ojson.NewDocString(`{"rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100,"limit_window_seconds":18000},"secondary_window":{"used_percent":25,"limit_window_seconds":604800}},"additional_rate_limits":[]}`)
+			_ = doc.Set("rate_limit.primary_window.reset_at", reset)
+			_ = doc.Set("rate_limit.secondary_window.reset_at", weeklyReset)
+			// In phase zero the balance is unknown, not evidence of double zero.
+			if currentPhase != 0 {
+				_ = doc.SetRaw("credits", `{"has_credits":false,"unlimited":false,"balance":"0"}`)
 			}
+			if currentPhase >= 2 {
+				_ = doc.Set("rate_limit.allowed", true)
+				_ = doc.Set("rate_limit.limit_reached", false)
+				_ = doc.Set("rate_limit.primary_window.used_percent", 25)
+			}
+			if currentPhase == 1 || currentPhase == 3 {
+				offset := time.Second
+				if currentPhase == 3 {
+					offset = 2 * time.Second
+				}
+				w.Header().Set("Date", now.Add(offset).Format(http.TimeFormat))
+			}
+			fmt.Fprint(w, doc.String())
 		case "/backend-api/codex/responses":
 			switch key {
 			case "Bearer wham-A-CANARY":
@@ -72,10 +78,12 @@ func TestProviderSchedulingPersistentPilotWHAMAuthority(t *testing.T) {
 					w.Header().Set("X-Codex-Primary-Window-Minutes", "300")
 					w.Header().Set("X-Codex-Primary-Reset-At", fmt.Sprint(reset))
 					w.WriteHeader(429)
-					fmt.Fprintf(w, `{"error":{"type":"usage_limit_reached","limit_window_minutes":300,"resets_at":%d,"message":"RAW-CANARY"}}`, reset)
+					doc := ojson.NewDocString(`{"error":{"type":"usage_limit_reached","limit_window_minutes":300,"message":"RAW-CANARY"}}`)
+					_ = doc.Set("error.resets_at", reset)
+					fmt.Fprint(w, doc.String())
 					return
 				}
-				if phase == 4 && sendsA.Load() == 4 {
+				if currentPhase == 4 && sendsA.Load() == 4 {
 					// The server received the request but sent no response headers.
 					conn, _, err := w.(http.Hijacker).Hijack()
 					if err != nil {
@@ -109,9 +117,12 @@ func TestProviderSchedulingPersistentPilotWHAMAuthority(t *testing.T) {
 		label    string
 		priority int
 	}{{"A", 20}, {"B", 10}} {
-		data := fmt.Sprintf(`{"type":"codex","access_token":"wham-%s-CANARY","account_id":"acct-%s-CANARY","priority":%d}`, f.label, f.label, f.priority)
-		if err := os.WriteFile(filepath.Join(authDir, f.label+".json"), []byte(data), 0600); err != nil {
-			t.Fatal(err)
+		doc := ojson.NewDocString(`{"type":"codex"}`)
+		_ = doc.Set("access_token", "wham-"+f.label+"-CANARY")
+		_ = doc.Set("account_id", "acct-"+f.label+"-CANARY")
+		_ = doc.Set("priority", f.priority)
+		if errWrite := os.WriteFile(filepath.Join(authDir, f.label+".json"), doc.Bytes(), 0600); errWrite != nil {
+			t.Fatal(errWrite)
 		}
 	}
 	path := filepath.Join(dir, "config.yaml")
@@ -132,12 +143,12 @@ routing:
     callers: [%x]
     persistent-retry-models: [gpt-6.2-sol]
 `, filepath.ToSlash(authDir), caller)
-	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
-		t.Fatal(err)
+	if errWrite := os.WriteFile(path, []byte(yaml), 0600); errWrite != nil {
+		t.Fatal(errWrite)
 	}
-	cfg, err := config.LoadConfig(path)
-	if err != nil {
-		t.Fatal(err)
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatal(errLoad)
 	}
 	store := &sdkauth.FileTokenStore{}
 	store.SetBaseDir(authDir)
@@ -145,8 +156,8 @@ routing:
 	m.SetConfig(cfg)
 	clock := newProviderBudgetClock(now, true)
 	m.SetContinuityClockForTest(clock)
-	if err := m.Load(ctx); err != nil {
-		t.Fatal(err)
+	if errLoadAuth := m.Load(ctx); errLoadAuth != nil {
+		t.Fatal(errLoadAuth)
 	}
 	m.RegisterExecutor(runtimeexecutor.NewCodexAutoExecutor(cfg))
 	tr := upstream.Client().Transport.(*http.Transport).Clone()
@@ -156,8 +167,8 @@ routing:
 	t.Cleanup(tr.CloseIdleConnections)
 	s := NewServer(cfg, m, sdkaccess.NewManager(), path)
 	t.Cleanup(func() {
-		if err := s.Stop(context.Background()); err != nil {
-			t.Error(err)
+		if errStop := s.Stop(context.Background()); errStop != nil {
+			t.Error(errStop)
 		}
 	})
 	s.mgmt.SetQuotaNetwork(network)
@@ -198,8 +209,8 @@ routing:
 	readQuota := func() resource.QuotaObservation {
 		t.Helper()
 		var roster struct{ Sources []resource.QuotaSource }
-		if err := json.Unmarshal(f.request("credential-quota/sources", 200), &roster); err != nil {
-			t.Fatal(err)
+		if errDecode := json.Unmarshal(f.request("credential-quota/sources", 200), &roster); errDecode != nil {
+			t.Fatal(errDecode)
 		}
 		for _, source := range roster.Sources {
 			if source.SubjectID == primary.ResourceIdentity.Targets[0].ResourceID {

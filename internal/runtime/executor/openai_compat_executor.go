@@ -1368,7 +1368,6 @@ type statusErr struct {
 	transientTransport  bool
 	persistentQuotaGate bool
 	pilotCodexFailure   cliproxyauth.PilotCodexFailure
-	pilotQuotaUnproven  bool
 	tosViolation        bool
 	tosAppealURL        string
 	tosAppealURLText    string

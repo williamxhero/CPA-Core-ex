@@ -7,6 +7,9 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
 func newPersistentBackoffTest(t *testing.T, start time.Time) (*Manager, *fakeContinuityClock, *routeReservation, context.Context, func() RequestBudgetSnapshot) {
@@ -24,6 +27,68 @@ func newPersistentBackoffTest(t *testing.T, start time.Time) (*Manager, *fakeCon
 	return m, clock, r, ctx, func() RequestBudgetSnapshot {
 		snapshot, _ := RequestBudgetSnapshotFromContext(ctx)
 		return snapshot
+	}
+}
+
+func TestPersistentRetryReservationReleasedBeforeRecheck(t *testing.T) {
+	for _, temporary := range []bool{true, false} {
+		name := "unchanged_local_failure"
+		if temporary {
+			name = "reservation_released"
+		}
+		t.Run(name, func(t *testing.T) {
+			m, _, _, ctx, snapshot := newPersistentBackoffTest(t, time.Unix(1_800_000_000, 0))
+			const resourceID = "fee222e4-6116-4cd5-9578-23265074d937"
+			m.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{
+				ProviderScheduling: internalconfig.ProviderSchedulingConfig{Resources: map[string]internalconfig.ProviderSchedulingResource{resourceID: {MaxConcurrent: 1}}},
+			}})
+			m.SetRetryConfig(1, 0, 1)
+			m.RegisterExecutor(schedulerTestExecutor{provider: "codex"})
+			a := &Auth{ID: t.Name(), Provider: "codex", Status: StatusActive, ResourceIdentity: &resource.Binding{Targets: []resource.Target{{ResourceID: resourceID}}}}
+			if _, errRegister := m.Register(WithSkipPersist(ctx), a); errRegister != nil {
+				t.Fatal(errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(a.ID, "codex", []*registry.ModelInfo{{ID: persistentRetryPilotModel}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+			b := requestBudgetFromContext(ctx)
+			b.persistentRetry, b.persistentLimit, b.Attempts, b.UpstreamCategory = true, -1, 1, string(upstreamCategoryTransient)
+			providers := []string{"codex"}
+			req := executor.Request{Model: persistentRetryPilotModel}
+			opts := executor.Options{Metadata: map[string]any{}}
+			calls := 0
+			result, err := runScheduledExecution(m, ctx, providers, req, opts, nil, func(ctx context.Context, opts executor.Options, _, _ int, _ *int) (string, error) {
+				calls++
+				if calls == 1 {
+					return "", markUpstreamExecutionAttemptWithProvider(persistentTestFailure(), "codex")
+				}
+				if !temporary {
+					return "", newNoAvailableRouteError(req.Model)
+				}
+				if calls == 2 {
+					otherOpts := executor.Options{Metadata: map[string]any{}}
+					if _, _, _, errPick := m.pickScheduledRoute(t.Context(), providers, req.Model, otherOpts, nil); errPick != nil {
+						t.Fatal(errPick)
+					}
+					other := takeRouteReservation(otherOpts)
+					if other == nil {
+						t.Fatal("other request did not reserve the slot")
+					}
+					_, _, _, errPick := m.pickScheduledRoute(ctx, providers, req.Model, opts, nil)
+					other.release()
+					if _, ok := errPick.(scheduledUnavailablePick); !ok {
+						t.Fatalf("expected temporary pick miss, got %v", errPick)
+					}
+					return "", errPick
+				}
+				return "recovered", nil
+			})
+			if temporary && (err != nil || result != "recovered" || calls != 3 || snapshot().Round != 1) {
+				t.Fatalf("released slot did not recover in the same round: result=%q err=%v calls=%d accounting=%+v", result, err, calls, snapshot())
+			}
+			if !temporary && (err == nil || calls != 2 || snapshot().RetryStopReason != "local_dispatch_rejected") {
+				t.Fatalf("unchanged local rejection must not retry: err=%v calls=%d accounting=%+v", err, calls, snapshot())
+			}
+		})
 	}
 }
 

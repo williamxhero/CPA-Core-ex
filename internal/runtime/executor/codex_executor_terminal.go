@@ -192,7 +192,9 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 	if !cliproxyauth.PersistentRetryPilot(ctx) {
 		return err
 	}
-	if err.persistentQuotaGate || (!err.pilotQuotaUnproven && httpStatus != 0 && isCodexUsageLimitError(body)) {
+	// A usage-limit envelope on its own does not establish which permitted
+	// funding sources are blocked. Only the native scoped gate proves a stop.
+	if err.persistentQuotaGate {
 		err.pilotCodexFailure = cliproxyauth.PilotCodexQuota
 		return err
 	}
@@ -204,7 +206,6 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 		err.code = status
 	}
 	if isCodexUsageLimitError(body) {
-		err.code = http.StatusTooManyRequests // The window rejection is real, even when exhaustion is unproven.
 		err.credentialScoped = false
 	}
 	code := strings.ToLower(strings.TrimSpace(codexErrorCodeOf(body)))

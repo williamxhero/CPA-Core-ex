@@ -2,9 +2,7 @@ package auth
 
 import (
 	"context"
-	"net/http"
 	"sync"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -48,12 +46,8 @@ func (m *Manager) pilotStreamGate(ctx context.Context, r *routeReservation, call
 		}
 		close(a.returned)
 	}()
-	var deadline <-chan time.Time
-	if timeout := m.streamBootstrapTimeout(); timeout > 0 {
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		deadline = timer.C
-	}
+	// The provider may already be connected while waiting to return its stream.
+	// Only the request context can cancel a live pilot attempt based on time.
 	select {
 	case <-a.returned:
 		return a.stream, a.err
@@ -68,8 +62,6 @@ func (m *Manager) pilotStreamGate(ctx context.Context, r *routeReservation, call
 			a.canceledBootstrap = true
 			return nil, ctx.Err()
 		}
-	case <-deadline:
-		return nil, &Error{Code: "stream_bootstrap_timeout", Message: "provider did not create a stream before bootstrap timeout", Retryable: true, HTTPStatus: http.StatusGatewayTimeout}
 	}
 }
 

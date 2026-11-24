@@ -1660,7 +1660,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		tried[authID] = struct{}{}
 		homeExcludedAuthIDs[authID] = struct{}{}
 	}
-	if !homeMode {
+	// The explicit pilot limit is enforced at the shared business-send
+	// boundary. Legacy credential retry overrides must not veto that policy.
+	budget := requestBudgetFromContext(ctx)
+	if !homeMode && (budget == nil || !budget.pilotExplicitLimit) {
 		for authID := range m.requestRetryRoundExclusions(retryRound, defaultRequestRetry) {
 			tried[authID] = struct{}{}
 		}
@@ -1860,6 +1863,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 				if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "no_execution_models"); errEnd != nil {
 					return nil, errEnd
 				}
+			} else if PersistentRetryPilot(ctx) {
+				// Our own release wakes availability observers, but cannot make
+				// this selection executable. Preserve the local dispatch failure
+				// instead of misreporting the ensuing empty pick as contention.
+				lastErr = newNoAvailableRouteError(routeModel)
 			}
 			continue
 		}

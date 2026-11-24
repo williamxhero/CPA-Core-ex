@@ -1202,16 +1202,23 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if alreadyTried || !authHasRefreshCredential(auth) || hasUnauthorizedAuthFailure(auth) {
 		return auth, false
 	}
-	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
+	entry := credentialRefreshLogEntry(ctx, auth)
+	entry.Debug("refreshing credentials after upstream authentication rejection")
 	refreshed, errRefresh := m.refreshAuthForRequest(ctx, auth.ID, failedToken)
 	if errRefresh != nil || refreshed == nil {
-		log.Debugf("credential refresh before fallback failed for %s (%s): %v", auth.Provider, auth.ID, errRefresh)
+		entry.Debug("credential refresh before fallback did not produce a credential")
 		return auth, false
 	}
 	if failedToken != "" && authAccessTokenForRequest(ctx, refreshed, clientHeaders...) == failedToken && (refreshed.RejectedAccessToken == failedToken || refreshed.RejectedSIWCAccessToken == failedToken) {
 		return auth, false
 	}
 	return refreshed, true
+}
+
+func credentialRefreshLogEntry(ctx context.Context, auth *Auth) *log.Entry {
+	return logEntryWithRequestID(ctx).WithFields(log.Fields{
+		"provider": auth.Provider, "credential_ref": auth.LogReference(),
+	})
 }
 
 func invalidGrantBackoffDuration(failures int) time.Duration {
@@ -1484,7 +1491,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		}
 	}
 	if refreshCanceled {
-		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		credentialRefreshLogEntry(ctx, auth).Debug("credential refresh canceled or deferred")
 		backoff := time.Second
 		if errors.Is(err, codex.ErrSIWCRefreshDeferred) {
 			backoff = refreshCheckInterval
@@ -1524,7 +1531,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			}
 		}
 	}
-	log.WithFields(log.Fields{"provider": auth.Provider, "success": err == nil}).Debug("credential refresh completed")
+	credentialRefreshLogEntry(ctx, auth).WithField("success", err == nil).Debug("credential refresh completed")
 	if err != nil {
 		unauthorized := isUnauthorizedError(err)
 		invalidGrant := isInvalidGrantError(err)
@@ -1788,7 +1795,11 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	saved, errUpdate := m.UpdateRefreshedAuth(refreshCommitCtx, base, updated)
 	if errUpdate != nil {
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
-		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		if auth.Provider == "codex" {
+			credentialRefreshLogEntry(ctx, auth).Warn("persist refreshed auth failed")
+		} else {
+			log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
+		}
 		return nil, errUpdate
 	}
 	if saved == nil {

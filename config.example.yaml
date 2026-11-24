@@ -525,6 +525,7 @@ upstream:
     # commit when that first token arrives).
     # When unset or set to "0", "0s", "none", "unlimited", "disabled", "off", or "never", no time ceiling
     # is applied, and buffering relies purely on the 48-frame and 1MB byte budget.
+    # The Codex HTTP SSE persistent-retry pilot uses the caller context and bounded buffering instead.
     # Default: "0" (unlimited)
     stream-bootstrap-timeout: "0"
     # When true, enable opt-in compatibility for orphan Codex delegation outputs.

@@ -55,6 +55,7 @@ type requestBudget struct {
 	enforced            bool
 	persistentRetry     bool
 	persistentLimit     int
+	pilotExplicitLimit  bool
 	waiting             bool
 	deadline            time.Time
 	configuredWait      time.Duration
@@ -157,7 +158,7 @@ func (m *Manager) setupRequestBudget(ctx context.Context, req executor.Request, 
 		_, b.maxCredentials, _ = m.retrySettings()
 		b.configuredWait = m.runtimeConfigSnapshot().ProviderSchedulingWait()
 		b.now = m.getContinuityClock().Now
-		b.persistentLimit, b.persistentRetry = m.persistentRetryLimit(ctx, req, opts)
+		b.persistentLimit, b.persistentRetry, b.pilotExplicitLimit = m.persistentRetryLimit(ctx, req, opts)
 		if b.persistentRetry {
 			recordRoutingRetryPolicy(b.trace.Load(), string(opts.SourceFormat), b.persistentLimit, m.runtimeConfigSnapshot().Routing.ProviderScheduling.PersistentRetry)
 		}
@@ -648,7 +649,12 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		attempted := b.credentialSnapshot()
 		ctxRound := seedScheduledRoundExclusions(ctx, attempted)
 		room := maxCredentials == 0 || b.routeCount() < maxCredentials
+		var pickWake <-chan struct{}
+		var pickErr error
 		if room && (first || m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready) {
+			if b.persistentRetry {
+				pickWake = m.providerSchedulingWake.watch()
+			}
 			result, err := execute(ctxRound, withAttemptedAuthTracker(opts, make(map[string]struct{})), s.Round, roundLimit, &homeLimit)
 			if err == nil {
 				return result, nil
@@ -672,13 +678,10 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			if hasUpstreamExecutionAttempt(err) || roundCause == nil {
 				roundCause = err
 			}
+			pickErr = err
 			if persistentRoundPending {
-				persistentRoundPending = false
 				after, _ := RequestBudgetSnapshotFromContext(ctx)
-				if after.Attempts == s.Attempts && m.scheduledOpportunity(ctx, providers, model, opts, nil, roundCause).ready {
-					b.setRetryStop(retryStopNoRecoveryRoute)
-					break
-				}
+				persistentRoundPending = after.Attempts == s.Attempts
 			}
 			if !budgetCanRepeat(ctx) {
 				b.setRetryStop(retryStopReplayUnsafe)
@@ -762,10 +765,14 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				if err != nil {
 					return zero, err
 				}
-				if proceed && (!opportunity.ready || errors.As(roundCause, &unavailable)) {
+				if proceed && (!opportunity.ready || scheduledPickChanged(roundCause, pickWake)) {
 					first = true
 					roundCause = nil
 					continue
+				}
+				if opportunity.ready {
+					b.setRetryStop(retryStopLocalDispatch)
+					break
 				}
 				if !opportunity.at.IsZero() {
 					b.setRetryStop(retryStopDeadlineBeforeRecovery)
@@ -782,9 +789,13 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			b.setRetryStop(blockedBy)
 			break
 		}
-		if b.persistentRetry && (persistentTransient(roundCause) || pilotCodexFailure(roundCause) != "" || current.UpstreamCategory != "") {
+		// Use the ledger's paced Codex failure as evidence even when the last
+		// error is another route's rejection. Other providers' trace categories
+		// do not authorize Codex recovery.
+		pacedPilotFailure := current.UpstreamCategory == string(upstreamCategoryTransient) || current.UpstreamCategory == string(upstreamCategoryTransientRateLimit)
+		if b.persistentRetry && (persistentTransient(roundCause) || pilotCodexFailure(roundCause) != "" || pacedPilotFailure) {
 			fact := pilotCodexFailure(roundCause)
-			recoverable := persistentTransient(roundCause)
+			recoverable := persistentTransient(roundCause) || pacedPilotFailure
 			if b.persistentLimit >= 0 && current.Attempts > b.persistentLimit {
 				if recoverable {
 					b.setRetryStop(retryStopRetryLimit)
@@ -800,6 +811,7 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			if !room && m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
 				alternate := &scheduledAlternateRound{from: s.Round, excluded: attempted}
 				alternateCtx := context.WithValue(ctxRound, scheduledAlternateRoundKey{}, alternate)
+				alternateWake := m.providerSchedulingWake.watch()
 				result, alternateErr := execute(alternateCtx, withAttemptedAuthTracker(opts, make(map[string]struct{})), s.Round+1, roundLimit, &homeLimit)
 				if alternateErr == nil {
 					return result, nil
@@ -817,6 +829,9 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 					continue
 				}
 				if m.scheduledOpportunity(ctx, providers, model, opts, attempted, nil).ready {
+					if scheduledPickChanged(alternateErr, alternateWake) {
+						continue
+					}
 					b.setRetryStop(retryStopLocalDispatch)
 					break
 				}
@@ -861,10 +876,15 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 				}
 				continue
 			}
-			if !b.nextRound(s.Round) {
+			if persistentRoundPending {
+				if pickWake != nil && !scheduledPickChanged(pickErr, pickWake) {
+					b.setRetryStop(retryStopLocalDispatch)
+					break
+				}
+			} else if !b.nextRound(s.Round) {
 				break
 			}
-			// Keep the real error if another request wins the reservation.
+			// Keep the real error and the same round if another request wins the reservation.
 			persistentRoundPending = true
 			first = true
 			continue
@@ -915,6 +935,21 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		return zero, previous
 	}
 	return zero, newNoAvailableRouteError(model)
+}
+
+// Retry an apparent readiness mismatch only after a typed miss and an
+// observed state change. A locally unexecutable route cannot drive a spin.
+func scheduledPickChanged(err error, changed <-chan struct{}) bool {
+	var unavailable scheduledUnavailablePick
+	if !errors.As(err, &unavailable) {
+		return false
+	}
+	select {
+	case <-changed:
+		return true
+	default:
+		return false
+	}
 }
 
 func isHomeDispatchCooldown(err error) bool {

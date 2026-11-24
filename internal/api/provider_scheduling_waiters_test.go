@@ -23,7 +23,7 @@ func pilotWaiter(ctx context.Context, f *inventoryHarness, key, text string) (co
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		w := httptest.NewRecorder()
-		servePersistentPilot(ctx, f, w, pilotResponsesPath, strings.ReplaceAll(pilotResponsesBody, "PAYLOAD", text), key)
+		servePersistentPilot(ctx, f, w, pilotResponsesPath, setPilotFixtureField(pilotResponsesBody, "input", text), key)
 		done <- w
 	}()
 	return ctx, done

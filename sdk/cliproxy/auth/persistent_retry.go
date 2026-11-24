@@ -13,28 +13,26 @@ import (
 
 const persistentRetryPilotModel = "gpt-6.2-sol"
 
-func (m *Manager) persistentRetryLimit(ctx context.Context, req executor.Request, opts executor.Options) (int, bool) {
+func (m *Manager) persistentRetryLimit(ctx context.Context, req executor.Request, opts executor.Options) (limit int, enabled, explicit bool) {
 	if m.HomeEnabled() || !opts.Stream || opts.Alt != "" || executor.DownstreamWebsocket(ctx) || executor.RequiredUpstreamWebsocket(ctx) {
-		return 0, false
+		return 0, false, false
 	}
 	path, _ := opts.Metadata[executor.RequestPathMetadataKey].(string)
 	if !(path == "/v1/chat/completions" && opts.SourceFormat == sdktranslator.FormatOpenAI ||
 		path == "/v1/responses" && opts.SourceFormat == sdktranslator.FormatOpenAIResponse) {
-		return 0, false
+		return 0, false, false
 	}
 	cfg := m.runtimeConfigSnapshot().Routing.ProviderScheduling
 	if req.Model != persistentRetryPilotModel || requestedModelAliasFromOptions(opts, req.Model) != persistentRetryPilotModel ||
 		!slices.Contains(cfg.PersistentRetryModels, persistentRetryPilotModel) {
-		return 0, false
+		return 0, false, false
 	}
-	// Match runScheduledExecution's round authorization: an explicit upstream
-	// limit governs, while the legacy unset sentinel keeps the request-retry
-	// default.
-	limit, _, _ := m.retrySettings()
+	// Snapshot the effective limit and its precedence in the same request ledger.
 	if upstream := m.configuredUpstreamErrorRetryLimit(); upstream != -2 {
-		limit = upstream
+		return upstream, true, true
 	}
-	return limit, true
+	limit, _, _ = m.retrySettings()
+	return limit, true, false
 }
 
 // PersistentRetryPilot reports the enforced request's opt-in pilot scope.

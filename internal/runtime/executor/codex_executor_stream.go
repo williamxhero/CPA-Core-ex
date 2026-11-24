@@ -172,6 +172,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			helps.RecordAPIResponseError(ctx, e.cfg, err)
 		}
 	}
+	clearRejectedReplay := func(status int, body []byte) error {
+		errClear := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, status, body)
+		if errClear != nil && pilot {
+			return cliproxyauth.NewRequestScopedError("Could not invalidate the rejected continuation state.", http.StatusBadGateway)
+		}
+		return errClear
+	}
+	closeBody := func(body io.Closer) {
+		if errClose := body.Close(); errClose != nil {
+			if pilot {
+				helps.LogWithRequestID(ctx).Error("Codex response body close failed")
+			} else {
+				log.Errorf("codex executor: close response body error: %v", errClose)
+			}
+		}
+	}
 	httpClient := helps.NewUtlsHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClientRoundTripOnly(httpClient)
 	buffering := e.cfg != nil && e.cfg.Codex.StreamBootstrapBuffering
@@ -183,7 +199,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	var bootstrapTimeout time.Duration
 	var bootstrapStart time.Time
-	if buffering {
+	if buffering && !pilot {
 		bootstrapTimeout = e.cfg.Codex.StreamBootstrapTimeoutDuration()
 	}
 	// Start the bootstrap clock at response headers, before decoding may read body bytes.
@@ -205,9 +221,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("codex executor: close response body error: %v", errClose)
-		}
+		closeBody(httpResp.Body)
 		if !pilot {
 			helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		}
@@ -218,11 +232,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 			return nil, readErr
 		}
-		if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, data); errClearReplay != nil {
-			if !pilot {
-				return nil, errClearReplay
-			}
-			return nil, cliproxyauth.NewRequestScopedError("Could not invalidate the rejected continuation state.", http.StatusBadGateway)
+		if errClearReplay := clearRejectedReplay(httpResp.StatusCode, data); errClearReplay != nil {
+			return nil, errClearReplay
 		}
 		if !pilot {
 			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
@@ -293,11 +304,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	var bootstrapTimedOut atomic.Bool
 	var bootstrapTimeoutTimer *time.Timer
 
-	closeBootstrapBody := func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("codex executor: close response body error: %v", errClose)
-		}
-	}
+	closeBootstrapBody := func() { closeBody(httpResp.Body) }
 	if buffering && bootstrapTimeout > 0 {
 		bootstrapTimeoutTimer = time.AfterFunc(bootstrapTimeout, func() {
 			bootstrapTimedOut.Store(true)
@@ -362,8 +369,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, 0)
 					}
 					closeBootstrapBody()
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
-						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+					if errClearReplay := clearRejectedReplay(streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+						recordError(errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
 						return nil, errClearReplay
 					}
@@ -398,7 +405,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				if helps.IsCodexTerminalEmptyIncomplete(data, len(outputItemsByIndex)+len(outputItemsFallback), sawOutputDelta) {
 					closeBootstrapBody()
 					streamErr := newCodexEmptyIncompleteStreamError()
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					recordError(streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					// Not an overload rejection, so it keeps its in-stream delivery: flush what is
 					// held and hand the error downstream, matching the websocket executor and the
@@ -575,11 +582,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("codex executor: close response body error: %v", errClose)
-			}
-		}()
+		defer closeBody(httpResp.Body)
 		for scanner.Scan() {
 			if pilotCapReached() {
 				errLimit := startupLimit()
@@ -607,8 +610,8 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if pilot {
 						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, 0)
 					}
-					if errClearReplay := clearCodexReasoningReplayOnInvalidSignature(ctx, replayScope, streamErr.StatusCode(), terminalBody); errClearReplay != nil {
-						helps.RecordAPIResponseError(ctx, e.cfg, errClearReplay)
+					if errClearReplay := clearRejectedReplay(streamErr.StatusCode(), terminalBody); errClearReplay != nil {
+						recordError(errClearReplay)
 						reporter.PublishFailure(ctx, errClearReplay)
 						select {
 						case out <- cliproxyexecutor.StreamChunk{Err: errClearReplay}:
@@ -638,7 +641,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					if pilot {
 						streamErr = codexPilotTransportFailure(streamErr)
 					}
-					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+					recordError(streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:

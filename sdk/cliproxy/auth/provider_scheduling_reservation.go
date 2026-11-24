@@ -230,11 +230,11 @@ func (m *Manager) scheduledRouteIdentity(auth *Auth, routeModel string) string {
 }
 
 // scheduledNextAvailability never picks, reserves, or updates selector state.
-func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time, pilotFirstSend bool) scheduledRetryOpportunity {
+func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time, allowPilotLegacyCooldown bool) scheduledRetryOpportunity {
 	// Subscribe before reading either candidate or reservation state. A change
 	// between the snapshot and the actual wait closes this generation too.
 	opportunity := scheduledRetryOpportunity{changed: m.providerSchedulingWake.watch()}
-	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now, pilotFirstSend)
+	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now, allowPilotLegacyCooldown)
 	hardBinding := scheduledHardAffinity(selector, model, opts)
 	persistent := PersistentRetryPilot(ctx)
 	u := &m.providerSchedulingUse
@@ -317,7 +317,7 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 		}
 		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (pilot || u.available(c.limits)) {
 			// A quota reset estimate schedules rechecks, not inference.
-			if (pilotFirstSend && c.owner != "codex") || (pilot && c.quotaBlocked) {
+			if (allowPilotLegacyCooldown && c.owner != "codex") || (pilot && c.quotaBlocked) {
 				continue
 			}
 			if pilot {
@@ -341,8 +341,12 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 
 func candidateStopReason(c scheduledCandidate) retryStopReason {
 	switch {
+	case slices.Contains(c.reasons, "tos_violation"):
+		return "tos_violation"
 	case slices.Contains(c.reasons, "manual_disabled"):
 		return "manual_disabled"
+	case slices.Contains(c.reasons, "disabled"):
+		return "disabled"
 	case c.quotaBlocked:
 		return "quota_exhausted"
 	case slices.Contains(c.reasons, "inference_admission_blocked"):

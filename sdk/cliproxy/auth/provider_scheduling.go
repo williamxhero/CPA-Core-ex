@@ -158,7 +158,7 @@ func allowsRouteFunding(cfg internalconfig.ProviderSchedulingConfig, caller, fun
 	return (cfg.AllowedFunding == nil || allowedBy(cfg.AllowedFunding)) && (!callerRestricted || allowedBy(cfg.CallerFunding[caller]))
 }
 
-func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time, pilotFirstSend bool) ([]scheduledCandidate, Selector) {
+func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time, allowPilotLegacyCooldown bool) ([]scheduledCandidate, Selector) {
 	cfg := m.runtimeConfigSnapshot().Routing.ProviderScheduling
 	caller := providerSchedulingCaller(ctx)
 	pin := pinnedAuthIDFromMetadata(opts.Metadata)
@@ -243,9 +243,9 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			exp, known := a.AccessTokenExpirationTimeForRequest(ctx, opts.Headers)
 			c.diagnosticExpired = known && !exp.IsZero() && !exp.After(now)
 		}
+		state := existingModelState(a, c.model)
 		if pilotRoute {
 			c.quotaBlocked = hasLiveQuotaCooldown(a, c.model, now)
-			state := existingModelState(a, c.model)
 			if state != nil && state.Status == StatusDisabled {
 				blocked, reason = true, blockReasonDisabled
 			}
@@ -279,15 +279,22 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 			case authBlock != "":
 				c.reasons = append(c.reasons, authBlock)
 			case reason == blockReasonDisabled:
-				c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
+				switch {
+				case isTOSViolationResultError(a.LastError), state != nil && isTOSViolationResultError(state.LastError):
+					c.reasons = appendSchedulingReason(c.reasons, "tos_violation")
+				case a.Disabled:
+					c.reasons = appendSchedulingReason(c.reasons, "manual_disabled")
+				default:
+					c.reasons = appendSchedulingReason(c.reasons, "disabled")
+				}
 			case reason == blockReasonCooldown || !next.IsZero():
 				c.reasons = append(c.reasons, "cooldown")
 				if eligible, nextEligible := retryRoundAvailabilityForAuthForRequest(ctx, a, c.model, now, opts.Headers); eligible && scheduledTrustedRecovery(a, c.model, nextEligible, now) {
 					c.retryAt = nextEligible
-				} else if pilotFirstSend && c.owner == "codex" && reason == blockReasonOther && next.After(now) && !a.credentialRetryAfter.After(now) {
-					// An ordinary caller can leave a live model cooldown without a
-					// Retry-After hint. Only the pilot's first send may wait for it.
-					if state := existingModelState(a, c.model); state != nil && state.Unavailable && state.NextRetryAfter.Equal(next) {
+				} else if allowPilotLegacyCooldown && c.owner == "codex" && reason == blockReasonOther && next.After(now) && !a.credentialRetryAfter.After(now) {
+					// Pilot recovery may wait for a live transient model cooldown
+					// left by an ordinary caller even without a Retry-After hint.
+					if state != nil && state.Unavailable && state.NextRetryAfter.Equal(next) {
 						switch cooldownErrorReason(state.LastError) {
 						case "transient_error", ErrorCodeTransientRateLimit:
 							c.retryAt = next
