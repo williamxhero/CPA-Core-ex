@@ -2,9 +2,14 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,8 +20,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -30,36 +33,52 @@ type persistentPilotClock interface {
 
 func newPersistentPilotHTTP(t *testing.T, allowlist string, retries int, clock persistentPilotClock, upstream http.HandlerFunc) *inventoryHarness {
 	t.Helper()
-	f := newInventoryHarness(t, t.TempDir())
-	cfg, err := config.ParseConfigBytes([]byte(`disable-image-generation: true
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	caller := sha256.Sum256([]byte(sdkaccess.DefaultAccessProviderName + "\x00open"))
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := fmt.Sprintf(`access:
+  api-keys: [open, outside-pilot]
+management:
+  secret-key: test-password
+oauth:
+  auth-dir: %q
+multimedia:
+  disable-image-generation: true
 routing:
+  retry:
+    request-retry: 1
+    max-retry-credentials: 1
+    upstream-error-retry-limit: %d
   provider-scheduling:
     mode: enforce
-    persistent-retry-models: ` + allowlist + "\n"))
+    models: [gpt-6.2-sol, pilot-control-model]
+    callers: [%x]
+    persistent-retry-models: %s
+`, filepath.ToSlash(filepath.Join(dir, "auth")), retries, caller, allowlist)
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.manager.SetConfig(cfg)
-	f.manager.SetRetryConfig(1, 500*time.Millisecond, 0)
-	f.manager.SetUpstreamErrorRetryLimit(retries)
-	f.manager.SetContinuityClockForTest(clock)
-	f.manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
-	for _, a := range f.manager.List() {
-		a.Disabled = true
-		if _, err := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); err != nil {
-			t.Fatal(err)
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg) // Same initial snapshot as the service builder.
+	manager.SetContinuityClockForTest(clock)
+	manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(cfg))
+	s := NewServer(cfg, manager, sdkaccess.NewManager(), path)
+	f := &inventoryHarness{t: t, server: s, manager: manager}
+	t.Cleanup(func() {
+		if err := s.Stop(context.Background()); err != nil {
+			t.Error(err)
 		}
-	}
+	})
 	addPersistentPilotCodex(t, f, "primary", "20", upstream)
-	access := sdkaccess.NewManager()
-	access.SetProviders([]sdkaccess.Provider{schedulingHTTPAccess{}})
-	base := handlers.NewBaseAPIHandlers(&cfg.SDKConfig, f.manager)
-	f.server.engine.POST("/v1/chat/completions", AuthMiddleware(access), openai.NewOpenAIAPIHandler(base).ChatCompletions)
-	f.server.engine.POST("/v1/responses", AuthMiddleware(access), openai.NewOpenAIResponsesAPIHandler(base).Responses)
 	return f
 }
 
-func addPersistentPilotCodex(t *testing.T, f *inventoryHarness, name, priority string, upstream http.HandlerFunc) {
+func addPersistentPilotCodex(t *testing.T, f *inventoryHarness, name, priority string, upstream http.HandlerFunc) string {
 	t.Helper()
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
@@ -78,15 +97,20 @@ func addPersistentPilotCodex(t *testing.T, f *inventoryHarness, name, priority s
 	}
 	registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: persistentPilotModel}, {ID: "pilot-control-model"}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(id) })
+	return id
 }
 
 func callPersistentPilot(ctx context.Context, f *inventoryHarness, path, body string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)).WithContext(ctx)
-	r.Header.Set("Authorization", "Bearer open")
-	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	f.server.engine.ServeHTTP(w, r)
+	servePersistentPilot(ctx, f, w, path, body, "open")
 	return w
+}
+
+func servePersistentPilot(ctx context.Context, f *inventoryHarness, w http.ResponseWriter, path, body, key string) {
+	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)).WithContext(ctx)
+	r.Header.Set("Authorization", "Bearer "+key)
+	r.Header.Set("Content-Type", "application/json")
+	f.server.engine.ServeHTTP(w, r)
 }
 
 func persistentPilotStart(w http.ResponseWriter, id string) {
@@ -102,8 +126,12 @@ func persistentPilotFail(w http.ResponseWriter, id string) {
 }
 
 func persistentPilotSucceed(w http.ResponseWriter, text string) {
+	persistentPilotSucceedWithID(w, "resp-success", text)
+}
+
+func persistentPilotSucceedWithID(w http.ResponseWriter, id, text string) {
 	fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":%q,\"output_index\":0,\"content_index\":0}\n\n", text)
-	fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-success\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":%q,\"status\":\"completed\",\"output\":[]}}\n\n", id)
 }
 
 func TestProviderSchedulingPersistentPilotDeadlineBeforeRecovery(t *testing.T) {
@@ -219,62 +247,361 @@ func TestProviderSchedulingPersistentPilotCancelDuringWait(t *testing.T) {
 	}
 }
 
+type persistentPilotTimer struct {
+	at   time.Time
+	fire chan struct{}
+}
+
+type manualPersistentPilotClock struct {
+	now    atomic.Pointer[time.Time]
+	timers chan persistentPilotTimer
+}
+
+func newManualPersistentPilotClock() *manualPersistentPilotClock {
+	c := &manualPersistentPilotClock{timers: make(chan persistentPilotTimer)}
+	c.moveTo(time.Now())
+	return c
+}
+
+func (c *manualPersistentPilotClock) Now() time.Time     { return *c.now.Load() }
+func (c *manualPersistentPilotClock) moveTo(t time.Time) { c.now.Store(&t) }
+func (c *manualPersistentPilotClock) Wait(ctx context.Context, d time.Duration) error {
+	timer := persistentPilotTimer{at: c.Now().Add(d), fire: make(chan struct{})}
+	select {
+	case c.timers <- timer:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-timer.fire:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func awaitPilotTimer(t *testing.T, ctx context.Context, clock *manualPersistentPilotClock, done <-chan *httptest.ResponseRecorder) persistentPilotTimer {
+	t.Helper()
+	select {
+	case timer := <-clock.timers:
+		return timer
+	case w := <-done:
+		t.Fatalf("original request returned before its route recovered: %d %s", w.Code, w.Body)
+	case <-ctx.Done():
+		t.Fatal("request did not reach a recovery wait")
+	}
+	return persistentPilotTimer{}
+}
+
+func awaitPilotResult(t *testing.T, ctx context.Context, done <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	t.Helper()
+	select {
+	case w := <-done:
+		return w
+	case <-ctx.Done():
+		t.Fatal("request did not finish")
+		return nil
+	}
+}
+
+// Responses can finish writing its completed frame before the execution
+// goroutine publishes the final accounting. Observe the protected receipt
+// until both sides have finished, without sleeping or changing request time.
+func awaitPilotTerminalTrace(t *testing.T, ctx context.Context, f *inventoryHarness, id string) string {
+	t.Helper()
+	for {
+		trace := readSchedulingTraceForTest(t, f, id)
+		if ojson.Get(trace, "terminal").Exists() {
+			return trace
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("missing terminal accounting for %q: %s", id, trace)
+		}
+		runtime.Gosched()
+	}
+}
+
+func startPilotRequest(ctx context.Context, f *inventoryHarness, path, body string) <-chan *httptest.ResponseRecorder {
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- callPersistentPilot(ctx, f, path, body) }()
+	return done
+}
+
 func TestProviderSchedulingPersistentPilotHalfOpenRelease(t *testing.T) {
-	clock := newProviderBudgetClock(time.Now(), true)
-	var attempts atomic.Int32
-	probe, unblock := make(chan struct{}), make(chan struct{})
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, r *http.Request) {
-		switch attempts.Add(1) {
-		case 1:
-			persistentPilotStart(w, "resp-before-probe")
-			persistentPilotFail(w, "resp-before-probe")
+	for _, tc := range []struct{ name, path, body, terminal, sourceFormat string }{
+		{"chat", "/v1/chat/completions", persistentPilotChat, "data: [DONE]", "openai"},
+		{"responses", "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"hello"}`, `"type":"response.completed"`, "openai-response"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newManualPersistentPilotClock()
+			var attempts atomic.Int32
+			probe, unblock := make(chan struct{}), make(chan struct{})
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, r *http.Request) {
+				payload, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("reading upstream request: %v", err)
+					return
+				}
+				text := ojson.GetBytes(payload, "input.0.content.0.text").String()
+				n := attempts.Add(1)
+				if n <= 2 && text != "request-A" || n == 3 && text != "request-B" || n > 3 {
+					t.Errorf("unexpected upstream call %d for %q", n, text)
+				}
+				if n == 1 {
+					w.WriteHeader(http.StatusBadGateway) // No Retry-After in the counterexample.
+					return
+				}
+				if n == 2 {
+					close(probe)
+					select {
+					case <-unblock:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				id := "resp-" + text
+				persistentPilotStart(w, id)
+				persistentPilotSucceedWithID(w, id, "result-"+text)
+			})
+			a := startPilotRequest(ctx, f, tc.path, strings.Replace(tc.body, "hello", "request-A", 1))
+			aTimer := awaitPilotTimer(t, ctx, clock, a)
+			assertPersistentPilotStepWait(t, aTimer.at.Sub(clock.Now()), time.Second)
+			bRecorder := httptest.NewRecorder()
+			b := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				servePersistentPilot(ctx, f, bRecorder, tc.path, strings.Replace(tc.body, "hello", "request-B", 1), "open")
+				b <- bRecorder
+			}()
+			bTimer := awaitPilotTimer(t, ctx, clock, b)
+			// The clock signal synchronizes with the handler setting the header,
+			// before the recorder can receive a response.
+			bID := bRecorder.Header().Get("X-Request-ID")
+			for _, key := range []string{"", "open"} {
+				r := httptest.NewRequest(http.MethodGet, "/v8/management/observability/routing/"+bID, nil)
+				r.RemoteAddr = "127.0.0.1:1234"
+				if key != "" {
+					r.Header.Set("Authorization", "Bearer "+key)
+				}
+				w := httptest.NewRecorder()
+				f.server.engine.ServeHTTP(w, r)
+				if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "send_count") {
+					t.Fatalf("trace readable without admin access: %d %s", w.Code, w.Body)
+				}
+			}
+			trace := ojson.Parse(readSchedulingTraceForTest(t, f, bID))
+			limit := trace.Get("retry_policy.upstream_error_retry_limit")
+			if trace.Get("mode").String() != "enforce" || trace.Get("model").String() != persistentPilotModel ||
+				trace.Get("retry_policy.source_format").String() != tc.sourceFormat || !limit.Exists() || limit.Int() != -1 ||
+				!trace.Get("last_recovery_wait.not_before").Exists() || trace.Get("send_count").Int() != 0 || trace.Get("terminal").Exists() {
+				t.Fatalf("B's effective policy or first-send wait missing from trace: %s", trace.Raw)
+			}
+			if attempts.Load() != 1 || !bTimer.at.Equal(aTimer.at) {
+				t.Fatalf("B did not wait for the existing cooldown: sends=%d A=%v B=%v", attempts.Load(), aTimer.at, bTimer.at)
+			}
+			clock.moveTo(aTimer.at)
+			close(aTimer.fire)
+			select {
+			case <-probe:
+			case <-ctx.Done():
+				t.Fatal("A did not acquire the half-open probe")
+			}
+			close(bTimer.fire)
+			// Keep A blocked until B has actually re-evaluated at the cooldown
+			// boundary and is waiting on the probe, not just its original timer.
+			for {
+				trace := ojson.Parse(readSchedulingTraceForTest(t, f, bID))
+				if trace.Get("last_recovery_wait.probe_pending").Bool() {
+					if trace.Get("send_count").Int() != 0 || trace.Get("terminal").Exists() || attempts.Load() != 2 {
+						t.Fatalf("B dispatched or finished during A's probe: sends=%d trace=%s", attempts.Load(), trace.Raw)
+					}
+					break
+				}
+				select {
+				case w := <-b:
+					t.Fatalf("B returned during A's probe: %d %s", w.Code, w.Body)
+				case <-ctx.Done():
+					t.Fatalf("B did not re-evaluate into a half-open wait: %s", trace.Raw)
+				default:
+					runtime.Gosched()
+				}
+			}
+			close(unblock)
+			var aID string
+			for _, result := range []struct {
+				done       <-chan *httptest.ResponseRecorder
+				own, other string
+				sends      int64
+			}{{a, "request-A", "request-B", 2}, {b, "request-B", "request-A", 1}} {
+				w := awaitPilotResult(t, ctx, result.done)
+				raw := w.Body.String()
+				id := w.Header().Get("X-Request-ID")
+				if result.own == "request-A" {
+					aID = id
+				} else if id != bID || id == aID {
+					t.Fatalf("B lost its original request identity: A=%q B-before=%q B-after=%q", aID, bID, id)
+				}
+				trace := awaitPilotTerminalTrace(t, ctx, f, id)
+				if w.Code != http.StatusOK || strings.Count(raw, "result-"+result.own) != 1 || !strings.Contains(raw, "resp-"+result.own) ||
+					strings.Contains(raw, result.other) || strings.Count(raw, tc.terminal) != 1 || strings.Contains(trace, "CANARY") ||
+					strings.Contains(trace, "request-A") || strings.Contains(trace, "request-B") ||
+					ojson.Get(trace, "send_count").Int() != result.sends || ojson.Get(trace, "terminal.code").String() != "succeeded" {
+					t.Fatalf("wrong independent stream or accounting: status=%d body=%s trace=%s", w.Code, raw, trace)
+				}
+			}
+			if attempts.Load() != 3 {
+				t.Fatalf("expected two A sends and one B send, got %d", attempts.Load())
+			}
+		})
+	}
+}
+
+func updatePilotAuth(t *testing.T, f *inventoryHarness, id string, update func(*coreauth.Auth)) {
+	t.Helper()
+	for _, a := range f.manager.List() {
+		if a.ID == id {
+			update(a)
+			if _, err := f.manager.Update(coreauth.WithSkipPersist(t.Context()), a); err != nil {
+				t.Fatal(err)
+			}
 			return
-		case 2:
-			close(probe)
-			select {
-			case <-unblock:
-			case <-r.Context().Done():
+		}
+	}
+	t.Fatalf("missing upstream fixture %s", id)
+}
+
+func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
+	const path = "/v1/chat/completions"
+	for _, scenario := range []string{"trusted-hint", "healthy-backup", "backup-wakes-waiter", "cancel", "no-route", "ineligible-backup", "confirmed-quota"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx, stop := context.WithTimeout(t.Context(), 10*time.Second)
+			defer stop()
+			clock := newManualPersistentPilotClock()
+			// Leave room to advance five virtual minutes without crossing the
+			// real-time safety deadline used to bound the test.
+			start := clock.Now().Add(-10 * time.Minute)
+			clock.moveTo(start)
+			var primary, backup atomic.Int32
+			f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, _ *http.Request) {
+				if scenario == "confirmed-quota" {
+					primary.Add(1)
+					w.WriteHeader(http.StatusTooManyRequests)
+					fmt.Fprint(w, `{"error":{"type":"usage_limit_reached","message":"You've hit your usage limit.","resets_in_seconds":300}}`)
+					return
+				}
+				w.Header().Set("Retry-After", "300")
+				n := primary.Add(1)
+				if n != 1 && clock.Now().Before(start.Add(300*time.Second)) {
+					t.Errorf("primary sent at %v before 300s", clock.Now().Sub(start))
+				}
+				w.WriteHeader(http.StatusBadGateway)
+			})
+			call := func() *httptest.ResponseRecorder {
+				return awaitPilotResult(t, ctx, startPilotRequest(ctx, f, path, persistentPilotChat))
+			}
+			assertResult := func(w *httptest.ResponseRecorder, status int, sends int64, reason string) string {
+				t.Helper()
+				id := w.Header().Get("X-Request-ID")
+				trace := ojson.Parse(readSchedulingTraceForTest(t, f, id))
+				limit := trace.Get("retry_policy.upstream_error_retry_limit")
+				if (status != 0 && w.Code != status) || !limit.Exists() || limit.Int() != 0 ||
+					trace.Get("send_count").Int() != sends || trace.Get("retry_stop_reason").String() != reason {
+					t.Fatalf("unexpected result: status=%d body=%s trace=%s", w.Code, w.Body, trace.Raw)
+				}
+				return trace.Raw
+			}
+			if scenario == "confirmed-quota" {
+				assertResult(call(), http.StatusTooManyRequests, 1, "")
+				b := startPilotRequest(ctx, f, path, persistentPilotChat)
+				select {
+				case <-clock.timers:
+					t.Fatal("a quota reset estimate opened a first-send wait")
+				case w := <-b:
+					trace := assertResult(w, http.StatusServiceUnavailable, 0, "no_available_route")
+					if primary.Load() != 1 || ojson.Get(trace, "last_recovery_wait").Exists() {
+						t.Fatalf("quota-blocked request sent or waited: %s", trace)
+					}
+				case <-ctx.Done():
+					t.Fatal("quota-blocked request did not return")
+				}
 				return
 			}
-		case 3:
-			close(probe)
-			select {
-			case <-unblock:
-			case <-r.Context().Done():
+			// Prime the shared cooldown. The explicit zero must forbid A's
+			// addition but not B's first send later on the same route.
+			assertResult(call(), http.StatusBadGateway, 1, "retry_limit")
+			primaryID := t.Name() + "/primary"
+			switch scenario {
+			case "no-route":
+				updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) { a.Disabled = true })
+				if trace := assertResult(call(), http.StatusServiceUnavailable, 0, "no_available_route"); ojson.Get(trace, "last_recovery_wait").Exists() || ojson.Get(trace, "terminal.code").String() != "no_available_route" {
+					t.Fatalf("disabled route caused a wait: %s", trace)
+				}
+				return
+			case "healthy-backup", "backup-wakes-waiter", "ineligible-backup":
+				id := addPersistentPilotCodex(t, f, "backup", "10", func(w http.ResponseWriter, _ *http.Request) {
+					backup.Add(1)
+					persistentPilotStart(w, "resp-success")
+					persistentPilotSucceed(w, "backup-result")
+				})
+				if scenario == "healthy-backup" {
+					w := call()
+					trace := assertResult(w, http.StatusOK, 1, "")
+					if primary.Load() != 1 || backup.Load() != 1 || !strings.Contains(w.Body.String(), "backup-result") || ojson.Get(trace, "last_recovery_wait").Exists() {
+						t.Fatalf("healthy backup was not used immediately: primary=%d backup=%d body=%s trace=%s", primary.Load(), backup.Load(), w.Body, trace)
+					}
+					return
+				}
+				if scenario == "ineligible-backup" {
+					// Still a Codex credential, but it doesn't serve this model.
+					registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: "pilot-control-model"}})
+				} else {
+					updatePilotAuth(t, f, id, func(a *coreauth.Auth) { a.Disabled = true })
+				}
+			}
+
+			bCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			b := startPilotRequest(bCtx, f, path, strings.Replace(persistentPilotChat, "hello", "request-B", 1))
+			timer := awaitPilotTimer(t, ctx, clock, b)
+			if timer.at.Sub(start) != 300*time.Second || primary.Load() != 1 || backup.Load() != 0 {
+				t.Fatalf("wrong initial wait: %v primary=%d backup=%d", timer.at.Sub(start), primary.Load(), backup.Load())
+			}
+			if scenario == "backup-wakes-waiter" {
+				clock.moveTo(start.Add(time.Second))
+				updatePilotAuth(t, f, t.Name()+"/backup", func(a *coreauth.Auth) { a.Disabled = false; a.Status = coreauth.StatusActive })
+				w := awaitPilotResult(t, ctx, b)
+				trace := assertResult(w, http.StatusOK, 1, "")
+				if primary.Load() != 1 || backup.Load() != 1 || !strings.Contains(w.Body.String(), "backup-result") || ojson.Get(trace, "wait_ms").Int() != 1000 {
+					t.Fatalf("backup did not wake B early: primary=%d backup=%d body=%s trace=%s", primary.Load(), backup.Load(), w.Body, trace)
+				}
 				return
 			}
-		}
-		persistentPilotStart(w, "resp-success")
-		persistentPilotSucceed(w, "success")
-	})
-	start := func() <-chan *httptest.ResponseRecorder {
-		done := make(chan *httptest.ResponseRecorder, 1)
-		go func() { done <- callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat) }()
-		select {
-		case <-probe:
-		case <-ctx.Done():
-			t.Fatal("expected an upstream send")
-		}
-		return done
-	}
-	done := start()
-	w := callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
-	if w.Code != 503 || attempts.Load() != 2 || !strings.Contains(w.Body.String(), "no_available_route") {
-		t.Fatalf("second caller dispatched during probe: %d sends=%d %s", w.Code, attempts.Load(), w.Body)
-	}
-	close(unblock)
-	if w := <-done; w.Code != 200 {
-		t.Fatalf("probe failed: %d %s", w.Code, w.Body)
-	}
-	probe, unblock = make(chan struct{}), make(chan struct{})
-	done = start()
-	w = callPersistentPilot(ctx, f, "/v1/chat/completions", persistentPilotChat)
-	close(unblock)
-	<-done
-	if w.Code != 200 || attempts.Load() != 4 {
-		t.Fatalf("successful probe did not restore ordinary concurrency: %d sends=%d %s", w.Code, attempts.Load(), w.Body)
+			if scenario == "cancel" {
+				cancel()
+				assertResult(awaitPilotResult(t, ctx, b), 0, 0, "canceled")
+				clock.moveTo(timer.at)
+				close(timer.fire)
+				if primary.Load() != 1 || backup.Load() != 0 {
+					t.Fatalf("canceled B reached upstream: primary=%d backup=%d", primary.Load(), backup.Load())
+				}
+				return
+			}
+			clock.moveTo(start.Add(299 * time.Second))
+			// A same-route generation update is a re-evaluation signal, not
+			// authority to discard the trusted minimum.
+			updatePilotAuth(t, f, primaryID, func(a *coreauth.Auth) { a.Label = "same route, refreshed" })
+			timer = awaitPilotTimer(t, ctx, clock, b)
+			if timer.at.Sub(clock.Now()) != time.Second || primary.Load() != 1 || backup.Load() != 0 {
+				t.Fatalf("route sent early or lost its hint: remaining=%v primary=%d backup=%d", timer.at.Sub(clock.Now()), primary.Load(), backup.Load())
+			}
+			clock.moveTo(timer.at)
+			close(timer.fire)
+			trace := assertResult(awaitPilotResult(t, ctx, b), http.StatusBadGateway, 1, "retry_limit")
+			if primary.Load() != 2 || backup.Load() != 0 || ojson.Get(trace, "wait_ms").Int() != 300000 {
+				t.Fatalf("zero allowed more than B's first send or charged waiting as a send: primary=%d backup=%d trace=%s", primary.Load(), backup.Load(), trace)
+			}
+		})
 	}
 }
 
@@ -291,7 +618,6 @@ func TestProviderSchedulingPersistentPilotPreferBackupWithFiniteBudget(t *testin
 		persistentPilotStart(w, "resp-success")
 		persistentPilotSucceed(w, "available-backup")
 	})
-	f.manager.SetRetryConfig(1, 500*time.Millisecond, 1)
 	w := callPersistentPilot(t.Context(), f, "/v1/chat/completions", persistentPilotChat)
 	if w.Code != 200 || primary.Load() != 1 || backup.Load() != 1 || len(clock.waits) != 0 || !strings.Contains(w.Body.String(), "available-backup") || strings.Contains(w.Body.String(), "resp-primary-failed") {
 		t.Fatalf("expected one additional send to the available backup without waiting: %d primary=%d backup=%d waits=%d %s", w.Code, primary.Load(), backup.Load(), len(clock.waits), w.Body)
@@ -538,6 +864,22 @@ func TestProviderSchedulingPersistentPilotChatIncident(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProviderSchedulingPersistentPilotUnmatchedCaller(t *testing.T) {
+	clock := newProviderBudgetClock(time.Now(), false)
+	var attempts atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	w := httptest.NewRecorder()
+	servePersistentPilot(ctx, f, w, "/v1/chat/completions", persistentPilotChat, "outside-pilot")
+	if w.Code != http.StatusBadGateway || attempts.Load() != 1 || len(clock.waits) != 0 || w.Header().Get("X-Request-ID") != "" {
+		t.Fatalf("unmatched caller entered the pilot: status=%d sends=%d waits=%d body=%s", w.Code, attempts.Load(), len(clock.waits), w.Body)
 	}
 }
 

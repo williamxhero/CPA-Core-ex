@@ -199,8 +199,10 @@ func (m *Manager) scheduledRouteIdentity(auth *Auth, routeModel string) string {
 }
 
 // scheduledNextAvailability never picks, reserves, or updates selector state.
-func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) (bool, time.Time, <-chan struct{}, bool) {
-	changed := m.providerSchedulingWake.watch()
+func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time, pilotFirstSend bool) scheduledRetryOpportunity {
+	// Subscribe before reading either candidate or reservation state. A change
+	// between the snapshot and the actual wait closes this generation too.
+	opportunity := scheduledRetryOpportunity{changed: m.providerSchedulingWake.watch()}
 	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
 	hardBinding := scheduledHardAffinity(selector, model, opts)
 	persistent := PersistentRetryPilot(ctx)
@@ -209,8 +211,6 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 	if persistent {
 		m.providerSchedulingUse.pruneStalePersistentBackoffLocked(scheduledLiveRoutes(candidates), now)
 	}
-	var next time.Time
-	var probePending bool
 	for _, c := range candidates {
 		if hardBinding != "" && c.auth.ID != hardBinding {
 			continue
@@ -218,12 +218,12 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 		if persistent && c.owner == "codex" && len(c.reasons) == 0 {
 			state := m.providerSchedulingUse.backoff[c.routeID]
 			if state.probe != nil {
-				probePending = true
+				opportunity.probePending = true
 				continue
 			}
 			if state.at.After(now) {
-				if next.IsZero() || state.at.Before(next) {
-					next = state.at
+				if opportunity.at.IsZero() || state.at.Before(opportunity.at) {
+					opportunity.at = state.at
 				}
 				continue
 			}
@@ -232,13 +232,18 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 			continue
 		}
 		if len(c.reasons) == 0 {
-			return true, time.Time{}, changed, false
+			return scheduledRetryOpportunity{ready: true, changed: opportunity.changed}
 		}
-		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (next.IsZero() || c.retryAt.Before(next)) {
-			next = c.retryAt
+		if len(c.reasons) == 1 && c.reasons[0] == "cooldown" && c.retryAt.After(now) && (opportunity.at.IsZero() || c.retryAt.Before(opportunity.at)) {
+			// A quota reset estimate is not a transient send opportunity for
+			// a new pilot request. Keep the legacy cooldown decision intact.
+			if pilotFirstSend && (c.owner != "codex" || hasLiveQuotaCooldown(c.auth, c.model, now)) {
+				continue
+			}
+			opportunity.at = c.retryAt
 		}
 	}
-	return false, next, changed, probePending
+	return opportunity
 }
 
 func scheduledLiveRoutes(candidates []scheduledCandidate) map[string]struct{} {

@@ -75,6 +75,12 @@ func (e localNoAvailableRoute) Error() string {
 
 func newNoAvailableRouteError(model string) error { return localNoAvailableRoute{model: model} }
 
+// A failed atomic pick can be re-evaluated against new availability. A
+// selector rejection with a nonempty pool isn't evidence of a recovery.
+type scheduledUnavailablePick struct{ localNoAvailableRoute }
+
+func (e scheduledUnavailablePick) Unwrap() error { return e.localNoAvailableRoute }
+
 type scheduledCandidate struct {
 	auth              *Auth
 	owner             string
@@ -306,9 +312,18 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 				publishSchedulingDecision(ctx, decision)
 			}
 		}
-		if len(available) == 0 {
+		var boundUnavailable bool
+		if persistent {
+			if bound := scheduledHardAffinity(selector, model, opts); bound != "" {
+				boundUnavailable = byID[bound].auth == nil
+			}
+		}
+		if len(available) == 0 || boundUnavailable {
 			u.mu.Unlock()
 			report(nil)
+			if persistent {
+				return nil, nil, "", scheduledUnavailablePick{localNoAvailableRoute{model: model}}
+			}
 			return nil, nil, "", newNoAvailableRouteError(model)
 		}
 		if affinity, ok := selector.(*SessionAffinitySelector); !ok || !affinity.rebindOnNever {

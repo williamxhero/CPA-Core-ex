@@ -26,6 +26,18 @@ type RoutingTerminal struct {
 	Status int    `json:"status"`
 }
 
+// RoutingRetryPolicy is the policy attached to the pilot request ledger, not
+// the configured allowlist or the settings of a subsequent reload.
+type RoutingRetryPolicy struct {
+	SourceFormat            string `json:"source_format"`
+	UpstreamErrorRetryLimit int    `json:"upstream_error_retry_limit"`
+}
+
+type RoutingRecoveryWait struct {
+	NotBefore    *time.Time `json:"not_before,omitempty"`
+	ProbePending bool       `json:"probe_pending,omitempty"`
+}
+
 type RoutingTrace struct {
 	RequestID           string               `json:"request_id"`
 	Model               string               `json:"model"`
@@ -42,6 +54,8 @@ type RoutingTrace struct {
 	UpstreamCategory    string               `json:"upstream_category,omitempty"`
 	UpstreamRetrySource string               `json:"upstream_retry_source,omitempty"`
 	RetryStopReason     string               `json:"retry_stop_reason,omitempty"`
+	RetryPolicy         *RoutingRetryPolicy  `json:"retry_policy,omitempty"`
+	LastRecoveryWait    *RoutingRecoveryWait `json:"last_recovery_wait,omitempty"`
 	Terminal            *RoutingTerminal     `json:"terminal,omitempty"`
 }
 
@@ -161,6 +175,18 @@ func (m *Manager) RoutingTrace(id string) (RoutingTrace, bool) {
 	for i := range view.Stages {
 		view.Stages[i].Candidates = cloneSchedulingRows(view.Stages[i].Candidates)
 	}
+	if view.RetryPolicy != nil {
+		policy := *view.RetryPolicy
+		view.RetryPolicy = &policy
+	}
+	if view.LastRecoveryWait != nil {
+		wait := *view.LastRecoveryWait
+		if wait.NotBefore != nil {
+			at := *wait.NotBefore
+			wait.NotBefore = &at
+		}
+		view.LastRecoveryWait = &wait
+	}
 	if view.Terminal != nil {
 		terminal := *view.Terminal
 		view.Terminal = &terminal
@@ -204,6 +230,29 @@ func catalogRoutingID(raw string) string {
 		return ""
 	}
 	return raw
+}
+
+func recordRoutingRetryPolicy(t *routingTrace, sourceFormat string, limit int) {
+	if t == nil || !t.collect {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data.RetryPolicy = &RoutingRetryPolicy{SourceFormat: sourceFormat, UpstreamErrorRetryLimit: limit}
+}
+
+func recordRoutingRecoveryWait(t *routingTrace, opportunity scheduledRetryOpportunity) {
+	if t == nil || !t.collect || !opportunity.persistentWait {
+		return
+	}
+	wait := &RoutingRecoveryWait{ProbePending: opportunity.probePending}
+	if !opportunity.at.IsZero() {
+		at := opportunity.at.UTC()
+		wait.NotBefore = &at
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data.LastRecoveryWait = wait
 }
 
 func updateRoutingAccounting(t *routingTrace, accounting RequestBudgetSnapshot) {

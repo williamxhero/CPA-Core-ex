@@ -157,6 +157,9 @@ func (m *Manager) setupRequestBudget(ctx context.Context, req executor.Request, 
 		b.configuredWait = m.runtimeConfigSnapshot().ProviderSchedulingWait()
 		b.now = m.getContinuityClock().Now
 		b.persistentLimit, b.persistentRetry = m.persistentRetryLimit(ctx, req, opts)
+		if b.persistentRetry {
+			recordRoutingRetryPolicy(b.trace.Load(), string(opts.SourceFormat), b.persistentLimit)
+		}
 	}
 	return ctx, opts
 }
@@ -451,6 +454,7 @@ func (m *Manager) awaitScheduledRecovery(ctx context.Context, opportunity schedu
 		b.antigravityWaitUsed = true
 		b.UpstreamDecision = "short_wait"
 	}
+	recordRoutingRecoveryWait(b.trace.Load(), opportunity)
 	b.mu.Unlock()
 	executor.NotifyContinuityWaitStart(ctx)
 	defer executor.NotifyContinuityWaitEnd(ctx)
@@ -529,8 +533,7 @@ func (m *Manager) scheduledOpportunity(ctx context.Context, providers []string, 
 		}
 		return scheduledRetryOpportunity{}
 	}
-	ready, next, changed, probePending := m.scheduledNextAvailability(ctx, providers, model, opts, excluded, now)
-	return scheduledRetryOpportunity{ready: ready, at: next, changed: changed, probePending: probePending}
+	return m.scheduledNextAvailability(ctx, providers, model, opts, excluded, now, false)
 }
 
 type scheduledExecution[T any] func(context.Context, executor.Options, int, int, *int) (T, error)
@@ -681,6 +684,28 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 		}
 		current, _ := RequestBudgetSnapshotFromContext(ctx)
 		if b.persistentRetry && current.Attempts == 0 {
+			// Re-enter the same round after a timer or state change. No
+			// reservation or additional send has been spent by this request.
+			// Only a failed pick justifies re-evaluation here, not an
+			// execution preparation failure against an unchanged route.
+			var unavailable scheduledUnavailablePick
+			if errors.As(roundCause, &unavailable) {
+				opportunity := m.scheduledNextAvailability(ctx, providers, model, opts, attempted, m.getContinuityClock().Now(), true)
+				opportunity.persistentWait = true
+				proceed, err := m.awaitScheduledRecovery(ctx, opportunity, maxWait)
+				if err != nil {
+					return zero, err
+				}
+				if proceed {
+					first = true
+					roundCause = nil
+					continue
+				}
+				if !opportunity.at.IsZero() {
+					b.setRetryStop(retryStopDeadlineBeforeRecovery)
+					break
+				}
+			}
 			b.setRetryStop(retryStopNoAvailableRoute)
 			break
 		}
