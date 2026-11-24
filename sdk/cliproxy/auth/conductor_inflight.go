@@ -155,23 +155,27 @@ func (m *Manager) beginInFlight(provider string) *inFlightScope {
 }
 
 // wrapInFlightStreamResult extends an in-flight scope until the returned
-// stream finishes or ctx is canceled, whichever comes first.
-func wrapInFlightStreamResult(result *cliproxyexecutor.StreamResult, scope *inFlightScope, ctx context.Context) *cliproxyexecutor.StreamResult {
-	if result == nil || scope == nil {
-		if scope != nil {
-			scope.end()
-		}
+// stream finishes or ctx is canceled, whichever comes first. onDone releases
+// any request admission at the same boundary, independently of transport teardown.
+func wrapInFlightStreamResult(result *cliproxyexecutor.StreamResult, scope *inFlightScope, ctx context.Context, onDone func()) *cliproxyexecutor.StreamResult {
+	if scope == nil && onDone == nil {
 		return result
+	}
+	finish := func() {
+		scope.end()
+		if onDone != nil {
+			onDone()
+		}
+	}
+	if result == nil {
+		finish()
+		return nil
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
-		// Release the in-flight scope as soon as forwarding stops (stream end
-		// or cancellation). The output channel closes only after the inner
-		// channel is fully drained so callers keep the original happens-before
-		// between stream end and upstream result bookkeeping.
-		defer scope.end()
+		defer close(out)
 		if result.Chunks == nil {
-			close(out)
+			finish()
 			return
 		}
 		forward := true
@@ -181,7 +185,7 @@ func wrapInFlightStreamResult(result *cliproxyexecutor.StreamResult, scope *inFl
 				forward = false
 			case chunk, ok := <-result.Chunks:
 				if !ok {
-					close(out)
+					finish()
 					return
 				}
 				select {
@@ -191,14 +195,12 @@ func wrapInFlightStreamResult(result *cliproxyexecutor.StreamResult, scope *inFl
 				}
 			}
 		}
-		// After cancellation, drain the inner channel on the same goroutine so
-		// the inner stream wrapper finishes its bookkeeping before out closes.
-		// The scope is released explicitly here before the drain can block;
-		// the deferred end above remains as the safety net for other exits.
-		scope.end()
+		// Release admission on cancellation without waiting for the old
+		// attempt's reservation teardown. Drain before closing out so the
+		// original upstream bookkeeping barrier remains intact.
+		finish()
 		for range result.Chunks {
 		}
-		close(out)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: result.Headers, Chunks: out}
 }

@@ -601,7 +601,6 @@ func runScheduledExecution[T any](m *Manager, ctx context.Context, providers []s
 			b.setRetryStop(pilotTraceCapacity)
 			return zero, pilotBackpressure{pilotTraceCapacity}
 		}
-		defer m.leavePilotWait(b)
 		defer func() {
 			finalErr = pilotLifecycleError(ctx, finalErr)
 			switch {

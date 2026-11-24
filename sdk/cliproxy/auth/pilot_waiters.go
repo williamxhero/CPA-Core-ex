@@ -26,14 +26,15 @@ type pilotWaiter struct {
 	ctx    context.Context
 	caller string
 	bytes  int
-	// Only routes this request is eligible to wait for. An older caller
-	// never owns a global turn or blocks an unrelated healthy alternate.
+	// Nil while executing: the request still owns admission (including
+	// its payload charge) but does not participate in route ordering.
 	routes map[string]struct{}
 	since  map[string]time.Time
 }
 
 // All queue operations hold providerSchedulingUse.mu, the same lock as
-// route reservation and recovery state. Queue order is admission order.
+// route reservation and recovery state. Only entries waiting for routes
+// participate in FIFO; a request that needs to wait again joins at the tail.
 func (u *providerSchedulingUse) waiterIndex(b *requestBudget) int {
 	return slices.IndexFunc(u.waiters, func(w pilotWaiter) bool { return w.budget == b })
 }
@@ -48,8 +49,20 @@ func (u *providerSchedulingUse) removeWaiter(b *requestBudget) bool {
 	return true
 }
 
+func (u *providerSchedulingUse) suspendPilotWait(b *requestBudget) bool {
+	i := u.waiterIndex(b)
+	if i == -1 || u.waiters[i].routes == nil {
+		return false
+	}
+	u.waiters[i].routes, u.waiters[i].since = nil, nil
+	return true
+}
+
 func (u *providerSchedulingUse) olderWaiter(b *requestBudget, route string) bool {
 	for _, w := range u.waiters {
+		if w.routes == nil {
+			continue
+		}
 		if w.budget == b {
 			return false
 		}
@@ -103,6 +116,13 @@ func (m *Manager) joinPilotWait(ctx context.Context, opportunity *scheduledRetry
 		i = len(u.waiters)
 		u.waiterBytes += opportunity.bufferBytes
 		u.waiters = append(u.waiters, pilotWaiter{budget: b, ctx: ctx, caller: caller, bytes: opportunity.bufferBytes})
+	} else if u.waiters[i].routes == nil {
+		// Requeue after serving a turn, without reacquiring capacity or
+		// overtaking callers who were waiting during that attempt.
+		w := u.waiters[i]
+		copy(u.waiters[i:], u.waiters[i+1:])
+		i = len(u.waiters) - 1
+		u.waiters[i] = w
 	}
 	w := &u.waiters[i]
 	if !maps.Equal(w.routes, opportunity.routes) {
@@ -145,7 +165,7 @@ func (m *Manager) joinPilotWait(ctx context.Context, opportunity *scheduledRetry
 	return nil
 }
 
-func (m *Manager) leavePilotWait(b *requestBudget) {
+func (m *Manager) releasePilotAdmission(b *requestBudget) {
 	u := &m.providerSchedulingUse
 	u.mu.Lock()
 	removed := u.removeWaiter(b)

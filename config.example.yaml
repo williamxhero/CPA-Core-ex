@@ -198,7 +198,7 @@ routing:
   #     minute-backoff: "60s"                   # Next four probes.
   #     long-backoff: "300s"                    # Remaining probes.
   #     jitter-percent: 20                      # Positive jitter from 0 to this value (0 disables).
-  #     max-waiters: 128                         # Total waiting requests, capped at 512.
+  #     max-waiters: 128                         # Total recovery admissions, capped at 512; held through in-flight attempts.
   #     max-waiters-per-caller: 16
   # The pilot requires enforce mode and an exact model match on Chat Completions or
   # Responses SSE through Codex HTTP. Safe transient recovery follows the client's

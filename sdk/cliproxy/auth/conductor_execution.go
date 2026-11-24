@@ -322,6 +322,9 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 				defer unlock()
 			}
 		}
+		if PersistentRetryPilot(ctx) {
+			defer m.releasePilotAdmission(requestBudgetFromContext(ctx))
+		}
 		response, err := runScheduledExecution(m, ctx, normalized, req, opts, nil, func(ctx context.Context, opts cliproxyexecutor.Options, round, retryLimit int, homeLimit *int) (cliproxyexecutor.Response, error) {
 			_, maxCredentials, _ := m.retrySettings()
 			if m.HomeEnabled() {
@@ -607,10 +610,13 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (result *cliproxyexecutor.StreamResult, err error) {
 	scope := m.beginInFlight("")
 	defer func() {
-		if scope != nil {
-			result = wrapInFlightStreamResult(result, scope, ctx)
-			scope = nil
+		var releaseAdmission func()
+		if PersistentRetryPilot(ctx) {
+			// Recovery rounds and the resulting stream share one admission.
+			b := requestBudgetFromContext(ctx)
+			releaseAdmission = func() { m.releasePilotAdmission(b) }
 		}
+		result = wrapInFlightStreamResult(result, scope, ctx, releaseAdmission)
 	}()
 	ctx = cliproxyexecutor.WithRequestProxyURL(ctx, opts.ProxyURL)
 	req, opts = cliproxysession.Enrich(req, opts)

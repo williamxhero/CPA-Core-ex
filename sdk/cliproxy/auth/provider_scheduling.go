@@ -427,6 +427,7 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			unlock()
 			return nil, nil, "", errCtx
 		}
+		leftQueue := persistent && u.suspendPilotWait(b)
 		persistentCodex := persistent && c.owner == "codex"
 		if len(c.limits) > 0 || persistentCodex {
 			if u.counts == nil {
@@ -453,10 +454,9 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 			}
 			opts.Metadata[routeReservationMetadata] = r
 		}
-		removed := persistent && u.removeWaiter(b)
 		m.mu.RUnlock()
 		unlock()
-		if removed {
+		if leftQueue {
 			m.providerSchedulingWake.signal()
 		}
 		report(c.auth)
