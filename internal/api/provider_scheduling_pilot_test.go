@@ -471,6 +471,96 @@ func updatePilotAuth(t *testing.T, f *inventoryHarness, id string, update func(*
 	t.Fatalf("missing upstream fixture %s", id)
 }
 
+func TestProviderSchedulingPersistentPilotFirstSendAfterOrdinaryCooldown(t *testing.T) {
+	const path = "/v1/chat/completions"
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	guard, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	clock := newManualPersistentPilotClock()
+	// Compare the timer and the HTTP receipt on the same wall-clock basis.
+	clock.moveTo(clock.Now().UTC())
+	var sends atomic.Int32
+	f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 0, clock, func(w http.ResponseWriter, r *http.Request) {
+		if sends.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway) // No Retry-After and no quota signal.
+			return
+		}
+		payload, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading upstream request: %v", err)
+			return
+		}
+		text := ojson.GetBytes(payload, "input.0.content.0.text").String()
+		id := "resp-" + text
+		persistentPilotStart(w, id)
+		persistentPilotSucceedWithID(w, id, "result-"+text)
+	})
+	ordinary := func() <-chan *httptest.ResponseRecorder {
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			w := httptest.NewRecorder()
+			servePersistentPilot(ctx, f, w, path, persistentPilotChat, "outside-pilot")
+			done <- w
+		}()
+		return done
+	}
+	before := time.Now()
+	a := awaitPilotResult(t, guard, ordinary())
+	after := time.Now()
+	if a.Code != http.StatusBadGateway || sends.Load() != 1 || a.Header().Get("Retry-After") != "" || a.Header().Get("X-Request-ID") != "" {
+		t.Fatalf("ordinary A did not return its unhinted 502: status=%d sends=%d headers=%v body=%s", a.Code, sends.Load(), a.Header(), a.Body)
+	}
+	// An ordinary caller arriving during the same cooldown must still fail fast.
+	select {
+	case <-clock.timers:
+		t.Fatal("ordinary caller entered a pilot recovery wait")
+	case w := <-ordinary():
+		if w.Code != http.StatusServiceUnavailable || sends.Load() != 1 || w.Header().Get("X-Request-ID") != "" {
+			t.Fatalf("ordinary caller did not keep its legacy response: status=%d sends=%d headers=%v body=%s", w.Code, sends.Load(), w.Header(), w.Body)
+		}
+	case <-guard.Done():
+		t.Fatal("ordinary caller did not fail fast during cooldown")
+	}
+
+	bRecorder := httptest.NewRecorder()
+	b := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		servePersistentPilot(ctx, f, bRecorder, path, strings.Replace(persistentPilotChat, "hello", "request-B", 1), "open")
+		b <- bRecorder
+	}()
+	var timer persistentPilotTimer
+	select {
+	case w := <-b:
+		trace := readSchedulingTraceForTest(t, f, w.Header().Get("X-Request-ID"))
+		t.Fatalf("pilot B returned instead of waiting for its first send: status=%d total sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace)
+	case timer = <-clock.timers:
+	case <-guard.Done():
+		t.Fatal("pilot B did not enter a recovery wait")
+	}
+	// The legacy cooldown is measured from A's actual failure time, not B's
+	// clock or arrival time. The timer signal also synchronizes the header read.
+	id := bRecorder.Header().Get("X-Request-ID")
+	trace := ojson.Parse(readSchedulingTraceForTest(t, f, id))
+	limit := trace.Get("retry_policy.upstream_error_retry_limit")
+	if timer.at.Before(before.Add(time.Minute)) || timer.at.After(after.Add(time.Minute)) || sends.Load() != 1 ||
+		trace.Get("last_recovery_wait.not_before").String() != timer.at.UTC().Format(time.RFC3339Nano) ||
+		!limit.Exists() || limit.Int() != 0 || trace.Get("send_count").Int() != 0 || trace.Get("terminal").Exists() {
+		t.Fatalf("pilot B did not wait without sending until A's cooldown ended: timer=%v sends=%d trace=%s", timer.at, sends.Load(), trace.Raw)
+	}
+	wait := timer.at.Sub(clock.Now())
+	clock.moveTo(timer.at)
+	close(timer.fire)
+	w := awaitPilotResult(t, guard, b)
+	trace = ojson.Parse(awaitPilotTerminalTrace(t, guard, f, id))
+	if w.Code != http.StatusOK || sends.Load() != 2 || w.Header().Get("X-Request-ID") != id ||
+		strings.Count(w.Body.String(), "result-request-B") != 1 || !strings.Contains(w.Body.String(), "resp-request-B") ||
+		strings.Count(w.Body.String(), "data: [DONE]") != 1 || trace.Get("send_count").Int() != 1 ||
+		trace.Get("wait_ms").Int() != wait.Milliseconds() || trace.Get("terminal.code").String() != "succeeded" {
+		t.Fatalf("pilot B did not complete its own first send: status=%d total sends=%d body=%s trace=%s", w.Code, sends.Load(), w.Body, trace.Raw)
+	}
+}
+
 func TestProviderSchedulingPersistentPilotFirstSendRecovery(t *testing.T) {
 	const path = "/v1/chat/completions"
 	for _, scenario := range []string{"trusted-hint", "healthy-backup", "backup-wakes-waiter", "cancel", "no-route", "ineligible-backup", "confirmed-quota"} {

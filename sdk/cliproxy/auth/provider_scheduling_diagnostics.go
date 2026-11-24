@@ -201,7 +201,7 @@ func (m *Manager) SchedulingCandidateSnapshot(ctx context.Context, providers []s
 }
 
 func (m *Manager) schedulingSnapshot(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) SchedulingDecision {
-	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, m.getContinuityClock().Now())
+	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, m.getContinuityClock().Now(), false)
 	bound := scheduledHardAffinity(selector, model, opts)
 	m.providerSchedulingUse.mu.Lock()
 	available, _ := m.scheduledAvailable(candidates)

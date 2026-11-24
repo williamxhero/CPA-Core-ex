@@ -155,7 +155,7 @@ func allowsRouteFunding(cfg internalconfig.ProviderSchedulingConfig, caller, fun
 	return (cfg.AllowedFunding == nil || allowedBy(cfg.AllowedFunding)) && (!callerRestricted || allowedBy(cfg.CallerFunding[caller]))
 }
 
-func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time) ([]scheduledCandidate, Selector) {
+func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}, now time.Time, pilotFirstSend bool) ([]scheduledCandidate, Selector) {
 	cfg := m.runtimeConfigSnapshot().Routing.ProviderScheduling
 	caller := providerSchedulingCaller(ctx)
 	pin := pinnedAuthIDFromMetadata(opts.Metadata)
@@ -248,6 +248,15 @@ func (m *Manager) scheduledCandidates(ctx context.Context, providers []string, m
 				c.reasons = append(c.reasons, "cooldown")
 				if eligible, nextEligible := retryRoundAvailabilityForAuthForRequest(ctx, a, c.model, now, opts.Headers); eligible && scheduledTrustedRecovery(a, c.model, nextEligible, now) {
 					c.retryAt = nextEligible
+				} else if pilotFirstSend && c.owner == "codex" && reason == blockReasonOther && next.After(now) && !a.credentialRetryAfter.After(now) {
+					// An ordinary caller can leave a live model cooldown without a
+					// Retry-After hint. Only the pilot's first send may wait for it.
+					if state := existingModelState(a, c.model); state != nil && state.Unavailable && state.NextRetryAfter.Equal(next) {
+						switch cooldownErrorReason(state.LastError) {
+						case "transient_error", ErrorCodeTransientRateLimit:
+							c.retryAt = next
+						}
+					}
 				}
 			default:
 				c.reasons = append(c.reasons, "authentication_unavailable")
@@ -289,7 +298,7 @@ func (m *Manager) pickScheduledRoute(ctx context.Context, providers []string, mo
 		}
 		cfg := m.runtimeConfigSnapshot()
 		now := m.getContinuityClock().Now()
-		candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
+		candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now, false)
 		persistent := PersistentRetryPilot(ctx)
 		u := &m.providerSchedulingUse
 		u.mu.Lock()

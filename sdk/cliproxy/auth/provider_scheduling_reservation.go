@@ -203,7 +203,7 @@ func (m *Manager) scheduledNextAvailability(ctx context.Context, providers []str
 	// Subscribe before reading either candidate or reservation state. A change
 	// between the snapshot and the actual wait closes this generation too.
 	opportunity := scheduledRetryOpportunity{changed: m.providerSchedulingWake.watch()}
-	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now)
+	candidates, selector := m.scheduledCandidates(ctx, providers, model, opts, tried, now, pilotFirstSend)
 	hardBinding := scheduledHardAffinity(selector, model, opts)
 	persistent := PersistentRetryPilot(ctx)
 	m.providerSchedulingUse.mu.Lock()
