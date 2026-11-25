@@ -11,22 +11,21 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
-// A manual resume and a fresh positive balance reading are the only two ways to
-// retire the automatic upstream-balance pause. Both act on this one owner and
-// on the exact credential lifecycle it paused; manual disablement, held state,
-// authentication status and every other gate owner stay untouched.
 const (
 	UpstreamBalanceResumeReasonNoPause          = "no_pause"
 	UpstreamBalanceResumeReasonNotPositive      = "not_positive"
 	UpstreamBalanceResumeReasonStale            = "stale"
 	UpstreamBalanceResumeReasonLifecycleChanged = "lifecycle_changed"
 
-	upstreamBalanceManualResumeReason = "manual_resume"
-	upstreamBalancePositiveReadingOp  = "upstream_balance_reading_positive"
-	upstreamBalanceSourceRefPrefix    = "source/"
-	maxUpstreamBalanceSourceID        = 128
-	maxUpstreamBalanceAuthIndex       = 256
+	upstreamBalancePositiveReadingOp = "upstream_balance_reading_positive"
+	upstreamBalanceSourceRefPrefix   = "source/"
+	maxUpstreamBalanceSourceID       = 128
+	maxUpstreamBalanceAuthIndex      = 256
 )
+
+// UpstreamBalanceManualResumeReason is the only operator-supplied resume
+// reason; any other request reason is refused.
+const UpstreamBalanceManualResumeReason = "manual_resume"
 
 // UpstreamBalanceReading is one operator-supplied balance observation. A reading
 // by itself never pauses anything: only a positive reading strictly newer than
@@ -64,9 +63,9 @@ func (c *Catalog) ResumeUpstreamBalance(opID string, b resource.Binding, authInd
 		return resource.GateResult{}, "", ErrConflict
 	}
 	if reason == "" {
-		reason = upstreamBalanceManualResumeReason
+		reason = UpstreamBalanceManualResumeReason
 	}
-	if reason != upstreamBalanceManualResumeReason {
+	if reason != UpstreamBalanceManualResumeReason {
 		return resource.GateResult{}, "", ErrConflict
 	}
 	observedMS := now.UnixMilli()
@@ -83,7 +82,7 @@ func (c *Catalog) ResumeUpstreamBalance(opID string, b resource.Binding, authInd
 	if _, blocked := c.upstreamBalancePauseLocked(b); blocked != "" {
 		return c.upstreamBalanceUnchangedLocked(opID), blocked, nil
 	}
-	result, err := c.applyGateWithPrivateFenceLocked(op, c.upstreamBalanceFenceSlotLocked(b, observedMS), true, upstreamBalanceManualResumeReason)
+	result, err := c.applyGateWithPrivateFenceLocked(op, c.upstreamBalanceFenceSlotLocked(b, observedMS), true, UpstreamBalanceManualResumeReason)
 	if err != nil {
 		return resource.GateResult{}, "", err
 	}
@@ -119,7 +118,7 @@ func (c *Catalog) ObserveUpstreamBalanceReading(opID string, b resource.Binding,
 	if reason != "" {
 		return c.upstreamBalanceUnchangedLocked(opID), reason, nil
 	}
-	slot := upstreamBalanceEvidencePrefix + b.Targets[0].ResourceID
+	slot := upstreamBalanceSlot(b)
 	floor := BalanceGateObservedAtMS(gate.Owner, gate.EvidenceID)
 	if fence := c.upstreamBalanceFenceLocked(slot); fence > floor {
 		floor = fence
@@ -174,7 +173,7 @@ func (c *Catalog) upstreamBalanceFenceLocked(slot string) int64 {
 // The fence only moves forward: replaying an older manual resume must not let a
 // denial it already outran become authoritative again.
 func (c *Catalog) upstreamBalanceFenceSlotLocked(b resource.Binding, observedMS int64) string {
-	slot := upstreamBalanceEvidencePrefix + b.Targets[0].ResourceID
+	slot := upstreamBalanceSlot(b)
 	if observedMS <= c.upstreamBalanceFenceLocked(slot) {
 		return ""
 	}
@@ -192,7 +191,7 @@ func sameUpstreamBalanceOperation(saved, proposed resource.GateOperation) bool {
 	// traffic still matches its receipt. A manual resume also records the moment
 	// the operator decided, which is deliberately not part of that identity.
 	saved.ExpectedRevision, proposed.ExpectedRevision = 0, 0
-	if saved.Reason == upstreamBalanceManualResumeReason && proposed.Reason == upstreamBalanceManualResumeReason {
+	if saved.Reason == UpstreamBalanceManualResumeReason && proposed.Reason == UpstreamBalanceManualResumeReason {
 		saved.EvidenceID, proposed.EvidenceID = "", ""
 	}
 	return reflect.DeepEqual(saved, proposed)

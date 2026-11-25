@@ -404,12 +404,17 @@ func TestUpstreamBalanceFreshPositiveReadingLiftsPause(t *testing.T) {
 
 	opID := uuid.NewString()
 	reading := observeRequest(t, binding, authIndex, opID, freshObservation(t, fence), true, "billing-api")
-	fresh := decodeBalanceResume(t, rig.post(t, f, "observe", reading, 200))
+	firstReading := rig.post(t, f, "observe", reading, 200)
+	fresh := decodeBalanceResume(t, firstReading)
 	if !fresh.Applied || !fresh.Durable || fresh.Revision != paused.Revision+1 {
 		t.Fatalf("a fresh positive reading did not lift the pause: %+v", fresh)
 	}
-	if repeat := rig.post(t, f, "observe", reading, 200); !bytes.Equal(repeat, rig.post(t, f, "observe", reading, 200)) {
-		t.Fatal("observation replay was not idempotent")
+	replay := rig.post(t, f, "observe", reading, 200)
+	if !bytes.Equal(replay, firstReading) {
+		t.Fatalf("observation replay was not idempotent:\n%s\n%s", firstReading, replay)
+	}
+	if replayed := decodeBalanceResume(t, replay); replayed != fresh {
+		t.Fatalf("observation replay changed the gate result: %+v want %+v", replayed, fresh)
 	}
 	if code, raw := rig.postRaw(t, f, "observe", observeRequest(t, binding, authIndex, opID, fence+1, true, "billing-api"), "test-password"); code != 409 || !bytes.Contains(raw, []byte("operation_conflict")) {
 		t.Fatalf("observation opId reuse with different content: status=%d body=%s", code, raw)

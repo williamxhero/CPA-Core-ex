@@ -2310,7 +2310,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	m.observeQuotaExhaustion(ctx, authSnapshot, result)
-	if !result.Success && result.Error != nil && clienterror.IsExplicitBalanceExhaustion(statusCodeFromResult(result.Error), result.Error.Message) {
+	if !result.Success && result.Error != nil && clienterror.IsExplicitBalanceExhaustion(result.Error.Message) {
 		m.observeUpstreamBalanceExhaustion(ctx, authSnapshot, result, observedAt)
 	}
 	if authSnapshot != nil {
