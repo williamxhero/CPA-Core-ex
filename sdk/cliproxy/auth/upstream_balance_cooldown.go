@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
@@ -40,18 +39,8 @@ func clearUpstreamBalanceCooldown(auth *Auth, now, through time.Time) bool {
 		changed = true
 	}
 	if authBalance {
-		// An aggregate error can come from a model. Only release auth-level
-		// deadlines when the auth holds the billing cooldown itself.
-		if wrappedBalance || (auth.LastError.HTTPStatus != http.StatusUnauthorized && !auth.credentialRetryAfter.IsZero()) || len(auth.ModelStates) == 0 {
-			auth.credentialRetryAfter = time.Time{}
-			auth.forceCooldownUntil = time.Time{}
-			auth.quotaForceCooldownUntil = time.Time{}
-			auth.credQuotaForceUntil = time.Time{}
-			auth.nonQuotaCooldownUntil = time.Time{}
-			auth.providerRetryAt = time.Time{}
-			auth.cooldownRecordedSeq = 0
-			clearAggregatedAvailability(auth)
-		}
+		// Only the model states carry the pause layer. Auth-level deadlines may
+		// belong to an earlier authentication failure, so resume never moves them.
 		auth.LastError = nil
 		auth.StatusMessage = ""
 		changed = true
