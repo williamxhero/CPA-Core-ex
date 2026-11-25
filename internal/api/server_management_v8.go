@@ -24,6 +24,8 @@ func (s *Server) registerManagementV8Routes() {
 	}, s.managementAvailabilityMiddleware(), s.mgmt.Middleware(), func(c *gin.Context) {
 		c.Set(management.ConfigV8ContextKey, true)
 	})
+	v8.POST("/inference-gates/upstream-balance/resume", s.mgmt.UpstreamBalanceResume)
+	v8.POST("/inference-gates/upstream-balance/observe", s.mgmt.UpstreamBalanceObserve)
 	v8.POST("/inference-gates/continuity", s.mgmt.InferenceGateContinuity)
 	v8.POST("/inference-gates/quota-auto-stop", s.mgmt.QuotaAutoStop)
 	v8.POST("/inference-gates/quota-auto-stop/status", s.mgmt.QuotaAutoStop)
