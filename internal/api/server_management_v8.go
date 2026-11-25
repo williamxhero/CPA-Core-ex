@@ -33,6 +33,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/inference-gates/providers/funding", s.mgmt.ObserveProviderFunding)
 	v8.GET("/inference-gates/capabilities", s.mgmt.InferenceGateCapabilities)
 	v8.GET("/inference-gates", s.mgmt.InferenceGates)
+	v8.GET("/inference-gates/auto-stop", s.mgmt.InferenceGateAutoStop)
 	v8.POST("/inference-gates/operations", s.mgmt.ApplyInferenceGate)
 	v8.GET("/inference-gates/operations/:opId", s.mgmt.InferenceGateOperation)
 	v8.GET("/resource-capabilities", s.mgmt.ResourceCapabilities)

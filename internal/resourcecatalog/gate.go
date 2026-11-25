@@ -103,6 +103,10 @@ func ValidGateOperation(op resource.GateOperation) bool {
 func (c *Catalog) GateState() (resource.GateState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.gateStateLocked()
+}
+
+func (c *Catalog) gateStateLocked() (resource.GateState, error) {
 	if !c.currentLocked() || !c.gateCurrentLocked() {
 		return resource.GateState{}, ErrUnavailable
 	}
