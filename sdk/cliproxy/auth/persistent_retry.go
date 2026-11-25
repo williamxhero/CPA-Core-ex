@@ -7,11 +7,13 @@ import (
 	"slices"
 
 	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 const persistentRetryPilotModel = "gpt-6.2-sol"
+const explicitBalanceExhaustionKey = "explicit_balance_exhaustion"
 
 func (m *Manager) persistentRetryLimit(ctx context.Context, req executor.Request, opts executor.Options) (limit int, enabled, explicit bool) {
 	if m.HomeEnabled() || !opts.Stream || opts.Alt != "" || executor.DownstreamWebsocket(ctx) || executor.RequiredUpstreamWebsocket(ctx) {
@@ -207,6 +209,13 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 			reservation.validationFailed = true
 		}
 		notePilotRouteRejection(ctx, reservation, err)
+		// Retain the billing decision, not the upstream response text.
+		if clienterror.IsExplicitBalanceExhaustion(result.Error.Message) {
+			if result.Error.Metadata == nil {
+				result.Error.Metadata = make(map[string]string)
+			}
+			result.Error.Metadata[explicitBalanceExhaustionKey] = "1"
+		}
 		// Rules inspected the response before this point. Never persist its text.
 		result.Error.Message = "Codex inference rejected"
 		if fact := pilotCodexFailure(err); fact != "" && result.Error.Code == "" {

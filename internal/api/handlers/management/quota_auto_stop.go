@@ -2,6 +2,8 @@ package management
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -68,14 +70,27 @@ func (h *Handler) observeQuotaExhaustion(ctx context.Context, a *coreauth.Auth, 
 	}
 }
 
-func (h *Handler) observeUpstreamBalanceExhaustion(_ context.Context, a *coreauth.Auth, _ coreauth.Result, observedAt time.Time) {
+func (h *Handler) observeUpstreamBalanceExhaustion(a *coreauth.Auth, observedAt time.Time) {
+	if h.resourceCatalog == nil || a == nil {
+		return
+	}
 	current := h.currentRuntimeSource(a)
 	if current == nil || a.ResourceIdentity == nil || !reflect.DeepEqual(a.ResourceIdentity.Targets, current.ResourceIdentity.Targets) {
 		return
 	}
 	if err := h.resourceCatalog.ObserveUpstreamBalanceExhaustion(*current.ResourceIdentity, current.Index, observedAt); err != nil {
 		log.Warn("Explicit upstream balance pause could not publish")
+		return
 	}
+	// The pause is durable and auditable without the upstream response body.
+	digest := sha256.Sum256([]byte(current.ResourceIdentity.Targets[0].ResourceID))
+	log.WithFields(log.Fields{
+		"resource":     hex.EncodeToString(digest[:8]),
+		"owner":        resourcecatalog.UpstreamBalanceGateOwner,
+		"reason":       resourcecatalog.UpstreamBalanceExhaustedReason,
+		"observedAtMs": observedAt.UnixMilli(),
+		"scope":        "credential",
+	}).Info("Explicit upstream balance pause published")
 }
 
 func (h *Handler) observePluginQuotaRejection(ctx context.Context, a *coreauth.Auth) bool {

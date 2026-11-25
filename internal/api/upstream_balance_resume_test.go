@@ -69,7 +69,7 @@ api-keys:
   openai-compatibility:
     - name: resume-pool
       base-url: %q
-      disable-cooling: true
+      disable-cooling: false
       models: [{name: resume-primary}, {name: resume-secondary}]
       keys: [{api-key: %s}, {api-key: %s}]
     - name: resume-other
@@ -272,6 +272,42 @@ func TestUpstreamBalanceManualResumeRestoresDispatch(t *testing.T) {
 	}
 }
 
+func TestUpstreamBalanceNoPauseReceiptCannotClearNewPause(t *testing.T) {
+	rig := newBalanceResumeRig(t)
+	f := rig.open(t)
+	binding, authIndex := rig.binding(t, f, balanceResumeKeyA)
+	opID := uuid.NewString()
+	body := resumeRequest(t, binding, authIndex, opID, "manual_resume")
+	first := rig.post(t, f, "resume", body, 200)
+	if result := decodeBalanceResume(t, first); result.Applied || result.Reason != "no_pause" || !result.Durable {
+		t.Fatalf("want durable no_pause: %+v", result)
+	}
+	balanceInference(f, "resume-primary")
+	paused := readBalanceGates(t, f)
+	balancePauseFence(t, paused)
+	if repeat := rig.post(t, f, "resume", body, 200); !bytes.Equal(first, repeat) {
+		t.Fatalf("no_pause replay changed after newer rejection:\n%s\n%s", first, repeat)
+	}
+	if after := readBalanceGates(t, f); after.Revision != paused.Revision || balancePauseFence(t, after) != balancePauseFence(t, paused) {
+		t.Fatalf("replay touched the newer pause: %+v", after)
+	}
+	f.close()
+	f = rig.open(t)
+	if repeat := rig.post(t, f, "resume", body, 200); !bytes.Equal(first, repeat) {
+		t.Fatalf("restart changed the historical receipt:\n%s\n%s", first, repeat)
+	}
+	if readback := f.request("inference-gates/operations/"+opID, 200); !bytes.Equal(first, readback) {
+		t.Fatalf("operation readback changed the original response:\n%s\n%s", first, readback)
+	}
+	other, otherIndex := rig.binding(t, f, balanceResumeKeyOther)
+	if code, raw := rig.postRaw(t, f, "resume", resumeRequest(t, other, otherIndex, opID, "manual_resume"), "test-password"); code != 409 || !bytes.Contains(raw, []byte("operation_conflict")) {
+		t.Fatalf("no_pause opId reuse with different content: status=%d body=%s", code, raw)
+	}
+	if w := balanceInference(f, "resume-primary"); w.Code != 200 || rig.count(balanceResumeKeyA) != 1 {
+		t.Fatalf("newer pause no longer blocked the rejected credential: status=%d sends=%d", w.Code, rig.count(balanceResumeKeyA))
+	}
+}
+
 func TestUpstreamBalanceManualResumeConcurrentDuplicatesApplyOnce(t *testing.T) {
 	rig := newBalanceResumeRig(t)
 	f := rig.open(t)
@@ -381,12 +417,24 @@ func TestUpstreamBalanceFreshPositiveReadingLiftsPause(t *testing.T) {
 	binding, authIndex := rig.binding(t, f, balanceResumeKeyA)
 	otherBinding, otherIndex := rig.binding(t, f, balanceResumeKeyOther)
 
-	failed := decodeBalanceResume(t, rig.post(t, f, "observe", observeRequest(t, binding, authIndex, uuid.NewString(), fence+1, false, "billing-api"), 200))
+	negativeID := uuid.NewString()
+	negativeAt := freshObservation(t, fence)
+	negative := observeRequest(t, binding, authIndex, negativeID, negativeAt, false, "billing-api")
+	firstNegative := rig.post(t, f, "observe", negative, 200)
+	failed := decodeBalanceResume(t, firstNegative)
 	if failed.Applied || failed.Reason != "not_positive" {
 		t.Fatalf("a failed reading lifted the pause: %+v", failed)
 	}
+	type staleReceipt struct {
+		request  map[string]any
+		response []byte
+	}
+	staleReceipts := map[string]staleReceipt{}
 	for name, ms := range map[string]int64{"equal": fence, "earlier": fence - 60_000} {
-		stale := decodeBalanceResume(t, rig.post(t, f, "observe", observeRequest(t, binding, authIndex, uuid.NewString(), ms, true, "billing-api"), 200))
+		request := observeRequest(t, binding, authIndex, uuid.NewString(), ms, true, "billing-api")
+		raw := rig.post(t, f, "observe", request, 200)
+		staleReceipts[name] = staleReceipt{request, raw}
+		stale := decodeBalanceResume(t, raw)
 		if stale.Applied || stale.Reason != "stale" {
 			t.Fatalf("%s reading lifted the pause: %+v", name, stale)
 		}
@@ -409,6 +457,17 @@ func TestUpstreamBalanceFreshPositiveReadingLiftsPause(t *testing.T) {
 	if !fresh.Applied || !fresh.Durable || fresh.Revision != paused.Revision+1 {
 		t.Fatalf("a fresh positive reading did not lift the pause: %+v", fresh)
 	}
+	for name, receipt := range staleReceipts {
+		if repeat := rig.post(t, f, "observe", receipt.request, 200); !bytes.Equal(repeat, receipt.response) {
+			t.Fatalf("%s stale reading changed after recovery: %s", name, repeat)
+		}
+	}
+	if repeat := rig.post(t, f, "observe", negative, 200); !bytes.Equal(repeat, firstNegative) {
+		t.Fatalf("negative reading changed after recovery: %s", repeat)
+	}
+	if code, raw := rig.postRaw(t, f, "observe", observeRequest(t, binding, authIndex, negativeID, negativeAt, true, "billing-api"), "test-password"); code != 409 || !bytes.Contains(raw, []byte("operation_conflict")) {
+		t.Fatalf("changing only the available flag: status=%d body=%s", code, raw)
+	}
 	replay := rig.post(t, f, "observe", reading, 200)
 	if !bytes.Equal(replay, firstReading) {
 		t.Fatalf("observation replay was not idempotent:\n%s\n%s", firstReading, replay)
@@ -416,7 +475,7 @@ func TestUpstreamBalanceFreshPositiveReadingLiftsPause(t *testing.T) {
 	if replayed := decodeBalanceResume(t, replay); replayed != fresh {
 		t.Fatalf("observation replay changed the gate result: %+v want %+v", replayed, fresh)
 	}
-	if code, raw := rig.postRaw(t, f, "observe", observeRequest(t, binding, authIndex, opID, fence+1, true, "billing-api"), "test-password"); code != 409 || !bytes.Contains(raw, []byte("operation_conflict")) {
+	if code, raw := rig.postRaw(t, f, "observe", observeRequest(t, binding, authIndex, opID, fence, true, "billing-api"), "test-password"); code != 409 || !bytes.Contains(raw, []byte("operation_conflict")) {
 		t.Fatalf("observation opId reuse with different content: status=%d body=%s", code, raw)
 	}
 	if w := balanceInference(f, "resume-primary"); w.Code != 200 || rig.count(balanceResumeKeyA) != 2 {

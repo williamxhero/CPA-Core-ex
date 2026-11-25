@@ -26,6 +26,7 @@ type GateResult struct {
 	Durable         bool   `json:"durable"`
 	Applied         bool   `json:"applied"`
 	Error           string `json:"error"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 type Gate struct {

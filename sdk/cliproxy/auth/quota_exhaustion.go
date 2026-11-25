@@ -41,12 +41,12 @@ func (m *Manager) observeQuotaExhaustion(ctx context.Context, a *Auth, result Re
 }
 
 type upstreamBalanceExhaustionHolder struct {
-	observe func(context.Context, *Auth, Result, time.Time)
+	observe func(*Auth, time.Time)
 }
 
 // SetUpstreamBalanceExhaustionObserver installs the synchronous, policy-free
 // authority for explicit upstream balance denials.
-func (m *Manager) SetUpstreamBalanceExhaustionObserver(observe func(context.Context, *Auth, Result, time.Time)) {
+func (m *Manager) SetUpstreamBalanceExhaustionObserver(observe func(*Auth, time.Time)) {
 	if observe == nil {
 		m.upstreamBalanceExhaustion.Store(nil)
 		return
@@ -54,8 +54,8 @@ func (m *Manager) SetUpstreamBalanceExhaustionObserver(observe func(context.Cont
 	m.upstreamBalanceExhaustion.Store(&upstreamBalanceExhaustionHolder{observe: observe})
 }
 
-func (m *Manager) observeUpstreamBalanceExhaustion(ctx context.Context, a *Auth, result Result, observedAt time.Time) {
+func (m *Manager) observeUpstreamBalanceExhaustion(a *Auth, observedAt time.Time) {
 	if observer := m.upstreamBalanceExhaustion.Load(); a != nil && observer != nil {
-		observer.observe(ctx, a, result, observedAt)
+		observer.observe(a, observedAt)
 	}
 }

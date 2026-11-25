@@ -10,15 +10,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/resourcecatalog"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
+	log "github.com/sirupsen/logrus"
 )
-
-// UpstreamBalanceResult adds the decision reason to the shared gate ACK shape.
-// A non-applied answer is still a complete, durable-aware read of the ledger.
-type UpstreamBalanceResult struct {
-	resource.GateResult
-	Reason string `json:"reason,omitempty"`
-}
 
 type upstreamBalanceBindingRequest struct {
 	Version   int              `json:"version"`
@@ -40,15 +35,9 @@ func (h *Handler) UpstreamBalanceResume(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_request"})
 		return
 	}
-	if request.Reason != "" && request.Reason != resourcecatalog.UpstreamBalanceManualResumeReason {
-		c.JSON(422, gin.H{"error": "invalid_reason"})
-		return
-	}
-	if !h.upstreamBalanceAuthorityCurrent(c, request.Binding, request.AuthIndex) {
-		return
-	}
-	result, reason, err := h.resourceCatalog.ResumeUpstreamBalance(request.OpID, request.Binding, request.AuthIndex, request.Reason, time.Now())
-	writeUpstreamBalanceResult(c, result, reason, err)
+	h.retireUpstreamBalance(c, resourcecatalog.UpstreamBalanceRetirement{
+		OpID: request.OpID, Binding: request.Binding, AuthIndex: request.AuthIndex, Reason: request.Reason,
+	})
 }
 
 // UpstreamBalanceObserve retires the pause only for a positive reading that is
@@ -58,27 +47,15 @@ func (h *Handler) UpstreamBalanceObserve(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	var request struct {
 		upstreamBalanceBindingRequest
-		Reading *struct {
-			ObservedAtMS int64  `json:"observedAtMs"`
-			Available    bool   `json:"available"`
-			SourceID     string `json:"sourceId"`
-		} `json:"reading"`
+		Reading *resourcecatalog.UpstreamBalanceReading `json:"reading"`
 	}
 	if !decodeUpstreamBalanceRequest(c, &request) || !validUpstreamBalanceBinding(request.upstreamBalanceBindingRequest) || request.Reading == nil {
 		c.JSON(400, gin.H{"error": "invalid_request"})
 		return
 	}
-	now := time.Now()
-	if request.Reading.ObservedAtMS <= 0 || request.Reading.ObservedAtMS > now.UnixMilli() || !resourcecatalog.ValidUpstreamBalanceSourceID(request.Reading.SourceID) {
-		c.JSON(422, gin.H{"error": "invalid_reading"})
-		return
-	}
-	if !h.upstreamBalanceAuthorityCurrent(c, request.Binding, request.AuthIndex) {
-		return
-	}
-	reading := resourcecatalog.UpstreamBalanceReading{ObservedAtMS: request.Reading.ObservedAtMS, Available: request.Reading.Available, SourceID: request.Reading.SourceID}
-	result, reason, err := h.resourceCatalog.ObserveUpstreamBalanceReading(request.OpID, request.Binding, request.AuthIndex, reading, now)
-	writeUpstreamBalanceResult(c, result, reason, err)
+	h.retireUpstreamBalance(c, resourcecatalog.UpstreamBalanceRetirement{
+		OpID: request.OpID, Binding: request.Binding, AuthIndex: request.AuthIndex, Reading: request.Reading,
+	})
 }
 
 func decodeUpstreamBalanceRequest(c *gin.Context, out any) bool {
@@ -90,28 +67,39 @@ func decodeUpstreamBalanceRequest(c *gin.Context, out any) bool {
 
 func validUpstreamBalanceBinding(request upstreamBalanceBindingRequest) bool {
 	return request.Version == 1 && uuid.Validate(request.OpID) == nil && request.AuthIndex != "" &&
-		len(request.AuthIndex) <= 256 && validHistoricalGateBinding(request.Binding)
+		len(request.AuthIndex) <= resourcecatalog.MaxUpstreamBalanceAuthIndex && validHistoricalGateBinding(request.Binding)
 }
 
-// upstreamBalanceAuthorityCurrent verifies the request still describes the live
-// runtime identity. It reads no provider quota: openai-compatible credentials
-// have no quota source at all, and an exhausted one would fail such a read.
-func (h *Handler) upstreamBalanceAuthorityCurrent(c *gin.Context, b resource.Binding, authIndex string) bool {
+// Only a newly committed clear can release routing cooldown. A historical
+// applied receipt must not touch cooldown (or a newer pause) on replay.
+func (h *Handler) retireUpstreamBalance(c *gin.Context, request resourcecatalog.UpstreamBalanceRetirement) {
 	if h.resourceCatalog == nil || h.resourceModeReason() != "" {
 		c.JSON(503, gin.H{"error": "gate_unavailable"})
-		return false
+		return
 	}
-	if _, ok := h.selectedQuota(resource.QuotaQuery{Binding: b, AuthIndex: authIndex}); !ok {
-		c.JSON(409, gin.H{"error": "gate_conflict"})
-		return false
+	now := time.Now()
+	var selected *coreauth.Auth
+	result, cleared, err := h.resourceCatalog.RetireUpstreamBalance(request, now, func() bool {
+		var ok bool
+		selected, ok = h.selectedQuota(resource.QuotaQuery{Binding: request.Binding, AuthIndex: request.AuthIndex})
+		return ok
+	})
+	if cleared {
+		if errReset := h.authManager.ResetUpstreamBalanceCooldown(c.Request.Context(), selected, now); errReset != nil {
+			log.Warn("Upstream balance pause cleared but routing cooldown could not be persisted")
+		}
 	}
-	return true
+	writeUpstreamBalanceResult(c, result, err)
 }
 
-func writeUpstreamBalanceResult(c *gin.Context, result resource.GateResult, reason string, err error) {
+func writeUpstreamBalanceResult(c *gin.Context, result resource.GateResult, err error) {
 	switch {
 	case err == nil:
-		c.JSON(200, UpstreamBalanceResult{GateResult: result, Reason: reason})
+		c.JSON(200, result)
+	case errors.Is(err, resourcecatalog.ErrInvalidBalanceResumeReason):
+		c.JSON(422, gin.H{"error": "invalid_reason"})
+	case errors.Is(err, resourcecatalog.ErrInvalidBalanceReading):
+		c.JSON(422, gin.H{"error": "invalid_reading"})
 	case errors.Is(err, resourcecatalog.ErrOperationConflict):
 		c.JSON(409, gin.H{"error": "operation_conflict"})
 	case errors.Is(err, resourcecatalog.ErrGateRevisionConflict):

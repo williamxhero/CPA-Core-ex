@@ -238,9 +238,10 @@ func TestUpstreamBalanceResumeRejectsDriftedLifecycle(t *testing.T) {
 		result.Applied || reason != UpstreamBalanceResumeReasonLifecycleChanged {
 		t.Fatalf("drifted lifecycle: %+v reason=%q err=%v", result, reason, err)
 	}
-	if result, reason, err := c.ResumeUpstreamBalance(uuid.NewString(), current, "synthetic", "manual_resume", time.Now()); err != nil ||
-		result.Applied || reason != UpstreamBalanceResumeReasonLifecycleChanged {
-		t.Fatalf("drifted lifecycle resume: %+v reason=%q err=%v", result, reason, err)
+	opID := uuid.NewString()
+	first, reason, err := c.ResumeUpstreamBalance(opID, current, "synthetic", "manual_resume", time.Now())
+	if err != nil || first.Applied || !first.Durable || reason != UpstreamBalanceResumeReasonLifecycleChanged {
+		t.Fatalf("drifted lifecycle resume: %+v reason=%q err=%v", first, reason, err)
 	}
 	state, err := c.GateState()
 	if err != nil {
@@ -251,5 +252,15 @@ func TestUpstreamBalanceResumeRejectsDriftedLifecycle(t *testing.T) {
 	}
 	if err := c.AdmitInference(&current, "any-model"); err != nil {
 		t.Fatalf("replacement stayed blocked: %v", err)
+	}
+	// A newer denial now replaces the drifted row with a current pause.
+	if err := c.ObserveUpstreamBalanceExhaustion(current, "synthetic", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if replay, reason, err := c.ResumeUpstreamBalance(opID, current, "synthetic", "manual_resume", time.Now()); err != nil || replay != first || reason != UpstreamBalanceResumeReasonLifecycleChanged {
+		t.Fatalf("drift receipt re-evaluated against a newer pause: %+v reason=%q err=%v", replay, reason, err)
+	}
+	if !errors.Is(c.AdmitInference(&current, "any-model"), ErrGateDenied) {
+		t.Fatal("drift receipt cleared the newer pause")
 	}
 }

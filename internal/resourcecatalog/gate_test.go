@@ -117,3 +117,26 @@ func TestProviderGateDurablePublicationRecovery(t *testing.T) {
 		t.Fatal("recovered provider gate did not deny a current member", err)
 	}
 }
+
+// A pause recorded under an owner this binary does not recognise still blocks
+// the credential: rolling back to an older build must not reopen a paid
+// access point that already proved it has no funds.
+func TestUnknownGateOwnerStillBlocksInference(t *testing.T) {
+	c, _, _, before := publicationFixture(t)
+	var b resource.Binding
+	for _, r := range before.Resources {
+		if r.Kind == "credential" && r.ParentID == "" {
+			b = resource.Binding{Scope: before.Version, Targets: append([]resource.Target{r.Target}, r.SourceBindings...)}
+		}
+	}
+	if len(b.Targets) == 0 {
+		t.Fatal("missing current credential")
+	}
+	op := resource.GateOperation{Version: 1, OpID: "0e2d5b6a-1a49-4c1e-9f3a-2b0f1c7d8e90", Binding: b, Owner: "future.owner.v9", Action: "pause", Subject: "credential", SourceVersion: strings.Repeat("a", 64), AuthIndex: "synthetic", Reason: "unknown_owner_pause", EvidenceID: "evidence"}
+	if _, err := c.ApplyGate(op); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AdmitInference(&b, "any-model"); !errors.Is(err, ErrGateDenied) {
+		t.Fatalf("unknown owner gate did not block: %v", err)
+	}
+}
