@@ -68,6 +68,16 @@ func (h *Handler) observeQuotaExhaustion(ctx context.Context, a *coreauth.Auth, 
 	}
 }
 
+func (h *Handler) observeUpstreamBalanceExhaustion(_ context.Context, a *coreauth.Auth, _ coreauth.Result, observedAt time.Time) {
+	current := h.currentRuntimeSource(a)
+	if current == nil || a.ResourceIdentity == nil || !reflect.DeepEqual(a.ResourceIdentity.Targets, current.ResourceIdentity.Targets) {
+		return
+	}
+	if err := h.resourceCatalog.ObserveUpstreamBalanceExhaustion(*current.ResourceIdentity, current.Index, observedAt); err != nil {
+		log.Warn("Explicit upstream balance pause could not publish")
+	}
+}
+
 func (h *Handler) observePluginQuotaRejection(ctx context.Context, a *coreauth.Auth) bool {
 	current := h.currentRuntimeSource(a)
 	if current == nil || a.ResourceIdentity == nil || !reflect.DeepEqual(a.ResourceIdentity.Targets, current.ResourceIdentity.Targets) {

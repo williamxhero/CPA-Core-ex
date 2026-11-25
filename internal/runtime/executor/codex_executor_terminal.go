@@ -470,7 +470,7 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
-	credentialScoped := isUsageLimit && !modelLevelCooling
+	credentialScoped := isUsageLimit && !modelLevelCooling || clienterror.IsExplicitBalanceExhaustion(statusCode, string(body))
 	// Generic per-minute rate limits (rate_limit_exceeded / "Rate limit exceeded")
 	// are transient and must share the capacity cooldown path. Treating them as
 	// usage quota exhausts the only usable credential and surfaces a premature

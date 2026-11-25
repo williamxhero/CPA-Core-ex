@@ -208,6 +208,7 @@ type Manager struct {
 	codexQuotaRejection       atomic.Pointer[codexQuotaRejectionHolder]
 	pluginQuotaRejection      atomic.Pointer[pluginRejectionObserver]
 	quotaExhaustion           atomic.Pointer[quotaExhaustionHolder]
+	upstreamBalanceExhaustion atomic.Pointer[upstreamBalanceExhaustionHolder]
 	ownedAuthSave             atomic.Pointer[ownedAuthSaveHolder]
 	mu                        sync.RWMutex
 	selectorMu                sync.Mutex

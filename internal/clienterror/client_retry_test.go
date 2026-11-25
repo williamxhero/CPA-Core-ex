@@ -72,6 +72,33 @@ func TestClassifyQuotaErrorCodesWithoutQuotaMessage(t *testing.T) {
 	}
 }
 
+func TestExplicitBalanceCodesAreTerminalQuotaNotHiddenCapacity(t *testing.T) {
+	for _, code := range []string{
+		"INSUFFICIENT_USER_QUOTA", "insufficient_balance", "insufficient_quota", "credit_balance_exhausted",
+		"billing_hard_limit_reached", "insufficient_credits", "no_credits_remaining", "quota_exhausted", "quota_exceeded", "quota exceeded",
+	} {
+		t.Run(code, func(t *testing.T) {
+			body := `{"error":{"code":"` + code + `","message":"model is at capacity"}}`
+			if !IsExplicitBalanceExhaustion(http.StatusBadGateway, body) || Classify(http.StatusBadGateway, body) != FailureQuotaExhausted || IsHiddenClientRetry(body) {
+				t.Fatal("explicit balance code should win over status and transient capacity wording")
+			}
+		})
+	}
+}
+
+func TestExplicitBalanceWordingDistinguishesWindowsAndGenericQuota(t *testing.T) {
+	for _, evidence := range []string{"余额不足", "额度不足", "资金不足", "余额已用尽", "额度已用尽", "所余资金不足", "预扣费额度失败"} {
+		if !IsExplicitBalanceExhaustion(http.StatusForbidden, evidence) {
+			t.Errorf("missed explicit balance denial %q", evidence)
+		}
+	}
+	for _, body := range []string{"额度", "剩余额度", "usage_limit_reached", "invalid_api_key", "temporarily unavailable"} {
+		if IsExplicitBalanceExhaustion(http.StatusTooManyRequests, body) {
+			t.Errorf("non-balance rejection %q triggered a balance pause", body)
+		}
+	}
+}
+
 func TestClassifyTransientUpstreamFailureVariants(t *testing.T) {
 	tests := []struct {
 		name   string

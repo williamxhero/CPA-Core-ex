@@ -1,6 +1,9 @@
 package auth
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type pluginRejectionObserver struct {
 	publish func(context.Context, *Auth) bool
@@ -34,5 +37,25 @@ func (m *Manager) observeQuotaExhaustion(ctx context.Context, a *Auth, result Re
 	}
 	if observer := m.quotaExhaustion.Load(); observer != nil {
 		observer.observe(ctx, a, result)
+	}
+}
+
+type upstreamBalanceExhaustionHolder struct {
+	observe func(context.Context, *Auth, Result, time.Time)
+}
+
+// SetUpstreamBalanceExhaustionObserver installs the synchronous, policy-free
+// authority for explicit upstream balance denials.
+func (m *Manager) SetUpstreamBalanceExhaustionObserver(observe func(context.Context, *Auth, Result, time.Time)) {
+	if observe == nil {
+		m.upstreamBalanceExhaustion.Store(nil)
+		return
+	}
+	m.upstreamBalanceExhaustion.Store(&upstreamBalanceExhaustionHolder{observe: observe})
+}
+
+func (m *Manager) observeUpstreamBalanceExhaustion(ctx context.Context, a *Auth, result Result, observedAt time.Time) {
+	if observer := m.upstreamBalanceExhaustion.Load(); a != nil && observer != nil {
+		observer.observe(ctx, a, result, observedAt)
 	}
 }
