@@ -1583,7 +1583,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var authSnapshot *Auth
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
-	now := time.Now()
+	observedAt := time.Now()
+	now := observedAt
 	useRequestClock := RequestBudgetEnforced(ctx)
 	if useRequestClock {
 		now = m.getContinuityClock().Now()
@@ -2309,6 +2310,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	m.observeQuotaExhaustion(ctx, authSnapshot, result)
+	if !result.Success && result.Error != nil && clienterror.IsExplicitBalanceExhaustion(statusCodeFromResult(result.Error), result.Error.Message) {
+		m.observeUpstreamBalanceExhaustion(ctx, authSnapshot, result, observedAt)
+	}
 	if authSnapshot != nil {
 		m.providerSchedulingWake.signal()
 	}

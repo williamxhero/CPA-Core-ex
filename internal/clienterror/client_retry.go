@@ -58,6 +58,9 @@ func IsHiddenClientRetry(text string) bool {
 		return true
 	}
 	lower := strings.ToLower(raw)
+	if isExplicitBalanceCode(lower) {
+		return false
+	}
 	if isCapacityPressure(lower) {
 		return true
 	}
@@ -101,10 +104,40 @@ func Classify(status int, text string) FailureClass {
 	return FailureUnknown
 }
 
-func isQuotaExhausted(lower string) bool {
+// IsExplicitBalanceExhaustion recognizes billing evidence in a failed upstream
+// response. Providers use different status codes; callers must supply a failure.
+func IsExplicitBalanceExhaustion(_ int, body string) bool {
+	if isExplicitBalanceCode(strings.ToLower(body)) {
+		return true
+	}
 	for _, phrase := range []string{
-		"usage_limit_reached", "insufficient_quota", "credit_balance_exhausted", "billing_hard_limit_reached",
-		"quota exhausted", "quota_exceeded", "quota exceeded",
+		"余额不足", "额度不足", "资金不足", "余额已用尽", "额度已用尽", "所余资金不足", "预扣费额度失败",
+	} {
+		if strings.Contains(body, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func isExplicitBalanceCode(lower string) bool {
+	for _, code := range []string{
+		"insufficient_user_quota", "insufficient_balance", "insufficient_quota", "credit_balance_exhausted",
+		"billing_hard_limit_reached", "insufficient_credits", "no_credits_remaining", "quota_exhausted", "quota_exceeded", "quota exceeded",
+	} {
+		if strings.Contains(lower, code) {
+			return true
+		}
+	}
+	return false
+}
+
+func isQuotaExhausted(lower string) bool {
+	if isExplicitBalanceCode(lower) {
+		return true
+	}
+	for _, phrase := range []string{
+		"usage_limit_reached", "quota exhausted",
 		"usage limit has been reached", "credit balance too low", "insufficient credits",
 		"overage_limit_reached", "no credits remaining", "you've reached your usage limit",
 	} {
