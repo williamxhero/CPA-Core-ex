@@ -228,6 +228,9 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexPermission, http.StatusForbidden
 	case code == "model_not_found", code == "model_not_supported":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexModel, http.StatusNotFound
+	case clienterror.IsExplicitBalanceExhaustion(string(body)):
+		// Unlike a usage window alone, an explicit balance denial is terminal for this credential.
+		err.pilotCodexFailure = cliproxyauth.PilotCodexQuota
 	default:
 		err.pilotCodexFailure = cliproxyauth.PilotCodexRecoverable
 		err.transientRateLimit = err.code == http.StatusTooManyRequests
@@ -470,7 +473,8 @@ func newCodexStatusErrWithCooling(statusCode int, body []byte, modelLevelCooling
 func newCodexStatusErrWithHeadersAndCooling(statusCode int, headers http.Header, body []byte, modelLevelCooling bool) statusErr {
 	errCode := statusCode
 	isUsageLimit := isCodexUsageLimitError(body)
-	credentialScoped := isUsageLimit && !modelLevelCooling || clienterror.IsExplicitBalanceExhaustion(string(body))
+	isExplicitBalanceDenial := clienterror.IsExplicitBalanceExhaustion(string(body))
+	credentialScoped := (isUsageLimit && !modelLevelCooling) || isExplicitBalanceDenial
 	// Generic per-minute rate limits (rate_limit_exceeded / "Rate limit exceeded")
 	// are transient and must share the capacity cooldown path. Treating them as
 	// usage quota exhausts the only usable credential and surfaces a premature

@@ -214,15 +214,21 @@ func (c *Catalog) applyGateWithPrivateFenceLocked(op resource.GateOperation, fen
 		}
 		ledger.Operations[fence] = gateReceipt{Operation: private, Result: result}
 	}
-	next.GateSeal = sealValue(c.key, ledger)
-	raw, _ = json.Marshal(&next)
-	values, errValues := sourceContentValues(c.configPath, c.authDir, c.key)
-	if errValues != nil || c.publish(&next, nil, nil, values) != nil {
-		c.failed = true
-		return resource.GateResult{}, ErrUnavailable
+	if err := c.publishGateStateLocked(&next); err != nil {
+		return resource.GateResult{}, err
 	}
-	c.state = &next
 	return result, nil
+}
+
+func (c *Catalog) publishGateStateLocked(next *diskState) error {
+	next.GateSeal = sealValue(c.key, next.Gates)
+	values, errValues := sourceContentValues(c.configPath, c.authDir, c.key)
+	if errValues != nil || c.publish(next, nil, nil, values) != nil {
+		c.failed = true
+		return ErrUnavailable
+	}
+	c.state = next
+	return nil
 }
 
 func sameGateSubjects(a, b []resource.Target) bool {

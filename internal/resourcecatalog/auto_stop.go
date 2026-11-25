@@ -146,6 +146,11 @@ func (c *Catalog) autoStopProjectionLocked(state resource.GateState) AutoStopPro
 		if gate.Applicability != "current" {
 			continue
 		}
+		// A model-scoped pause leaves the rest of the member routable, so it
+		// must not colour the whole access point as stopped.
+		if gate.Model != "" {
+			continue
+		}
 		index := len(refs)
 		refs = append(refs, autoStopGateRef{gate: gate, observedMS: gateObservedAtMS(gate)})
 		if gate.Subject == "provider" {

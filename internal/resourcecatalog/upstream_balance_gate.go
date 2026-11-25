@@ -10,12 +10,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
-const upstreamBalanceGateOwner = "core.upstream-balance.v1"
+const UpstreamBalanceGateOwner = "core.upstream-balance.v1"
 const upstreamBalanceEvidencePrefix = "upstream-balance/v1/"
 
-// upstreamBalanceExhaustedReason labels the automatic pause and seeds its
+// UpstreamBalanceExhaustedReason labels the automatic pause and seeds its
 // evidence digest.
-const upstreamBalanceExhaustedReason = "upstream_balance_exhausted"
+const UpstreamBalanceExhaustedReason = "upstream_balance_exhausted"
 
 // upstreamBalanceSlot is the private-fence slot a binding's pause and every
 // later retirement share: the primary credential resource id, namespaced so the
@@ -26,7 +26,7 @@ func upstreamBalanceSlot(b resource.Binding) string {
 
 // IsCoreBalanceGateOwner reserves the balance owner and its namespaced variants.
 func IsCoreBalanceGateOwner(owner string) bool {
-	return owner == upstreamBalanceGateOwner || strings.HasPrefix(owner, upstreamBalanceGateOwner+"/")
+	return owner == UpstreamBalanceGateOwner || strings.HasPrefix(owner, UpstreamBalanceGateOwner+"/")
 }
 
 // BalanceGateObservedAtMS returns the observation timestamp from sealed gate
@@ -76,15 +76,15 @@ func (c *Catalog) ObserveUpstreamBalanceExhaustion(b resource.Binding, authIndex
 	}
 	active := false
 	for _, gate := range c.state.Gates.Gates {
-		if gate.Owner == upstreamBalanceGateOwner && gate.Subject != "provider" && gate.Model == "" && sameGateSubjects(gate.Targets, b.Targets) {
+		if gate.Owner == UpstreamBalanceGateOwner && gate.Subject != "provider" && gate.Model == "" && sameGateSubjects(gate.Targets, b.Targets) {
 			active = true
 			break
 		}
 	}
 	op := resource.GateOperation{
 		Version: 1, OpID: uuid.NewString(), ExpectedRevision: c.state.Gates.Revision, Binding: b, AuthIndex: authIndex,
-		SourceVersion: sealValue(c.key, b.Targets), Subject: "credential", Owner: upstreamBalanceGateOwner,
-		Action: "pause", Reason: upstreamBalanceExhaustedReason, EvidenceID: upstreamBalanceEvidence(observedMS, b.Targets, upstreamBalanceExhaustedReason),
+		SourceVersion: sealValue(c.key, b.Targets), Subject: "credential", Owner: UpstreamBalanceGateOwner,
+		Action: "pause", Reason: UpstreamBalanceExhaustedReason, EvidenceID: upstreamBalanceEvidence(observedMS, b.Targets, UpstreamBalanceExhaustedReason),
 	}
 	// Advance the fence even when the original pause needs no new revision.
 	_, err := c.applyGateWithPrivateFenceLocked(op, slot, !active, "")

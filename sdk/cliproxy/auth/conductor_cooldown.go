@@ -1092,6 +1092,22 @@ func dedupeStrings(values []string) []string {
 
 // ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
 func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	return m.resetQuota(ctx, authID, nil, nil)
+}
+
+// ResetUpstreamBalanceCooldown uses the same routing reset as ResetQuota,
+// restricted to balance-derived state on the selected credential lifecycle.
+func (m *Manager) ResetUpstreamBalanceCooldown(ctx context.Context, selected *Auth, through time.Time) error {
+	if selected == nil {
+		return nil
+	}
+	_, _, err := m.resetQuota(ctx, selected.ID, selected, func(auth *Auth, now time.Time) bool {
+		return clearUpstreamBalanceCooldown(auth, now, through)
+	})
+	return err
+}
+
+func (m *Manager) resetQuota(ctx context.Context, authID string, selected *Auth, clear func(*Auth, time.Time) bool) (*Auth, []string, error) {
 	if m == nil {
 		return nil, nil, nil
 	}
@@ -1121,35 +1137,32 @@ func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []strin
 		cooldownRecordsBefore = m.cooldownStateRecordsForAuthLocked(auth, now)
 	}
 
-	for modelKey, state := range auth.ModelStates {
-		if strings.TrimSpace(modelKey) == "" {
-			continue
+	if clear != nil {
+		if auth.RegistrationEpoch != selected.RegistrationEpoch || auth.CredentialVersion != selected.CredentialVersion || !clear(auth, now) {
+			m.mu.Unlock()
+			return nil, nil, nil
 		}
-		models = append(models, modelKey)
-		if state != nil {
+	} else {
+		for modelKey, state := range auth.ModelStates {
+			if strings.TrimSpace(modelKey) == "" {
+				continue
+			}
+			models = append(models, modelKey)
 			resetModelState(state, now)
 		}
-	}
-	if clearCooldownStateForAuth(auth, now) {
-		if len(models) == 0 {
-			models = append(models, registeredModels...)
+		if !clearCooldownStateForAuth(auth, now) && len(auth.ModelStates) > 0 {
+			updateAggregatedAvailability(auth, now)
 		}
-	} else if len(auth.ModelStates) > 0 {
-		updateAggregatedAvailability(auth, now)
-	}
-
-	if len(models) == 0 {
-		models = append(models, registeredModels...)
-	}
-	models = dedupeStrings(models)
-
-	if !auth.Disabled && auth.Status != StatusDisabled && !hasModelError(auth, now) {
-		if !hasUnauthorizedAuthFailure(auth) {
+		if !auth.Disabled && auth.Status != StatusDisabled && !hasModelError(auth, now) && !hasUnauthorizedAuthFailure(auth) {
 			auth.LastError = nil
 			auth.StatusMessage = ""
 			auth.Status = StatusActive
 		}
 	}
+	if len(models) == 0 {
+		models = append(models, registeredModels...)
+	}
+	models = dedupeStrings(models)
 	auth.Generation++
 	auth.UpdatedAt = now
 	snapshot = auth.Clone()
@@ -2310,8 +2323,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Unlock()
 	releaseMutation()
 	m.observeQuotaExhaustion(ctx, authSnapshot, result)
-	if !result.Success && result.Error != nil && clienterror.IsExplicitBalanceExhaustion(result.Error.Message) {
-		m.observeUpstreamBalanceExhaustion(ctx, authSnapshot, result, observedAt)
+	if !result.Success && isUpstreamBalanceError(result.Error) {
+		m.observeUpstreamBalanceExhaustion(authSnapshot, observedAt)
 	}
 	if authSnapshot != nil {
 		m.providerSchedulingWake.signal()

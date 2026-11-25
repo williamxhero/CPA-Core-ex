@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"github.com/MoeForge/moego/json"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers/openai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -151,6 +153,97 @@ api-keys:
 			infer(f, "balance-secondary", true)
 			if count(rotated) != 1 || count(a) != 1 {
 				t.Fatal("credential replacement did not restore dispatch")
+			}
+		})
+	}
+}
+
+func TestPersistentPilotIncidentResponsesPauseWholeCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"negative-balance-with-request-id", 403, `{"error":{"code":"insufficient_user_quota","message":"您在本站点的所余资金不足够了, 剩余额度: ＄-0.026312 (request id: INCIDENT-REQUEST-ID-CANARY)"}}`},
+		{"precharge-denied", 403, `{"error":{"code":"insufficient_user_quota","message":"预扣费额度失败, 用户剩余额度: ＄0.020976, 需要预扣费额度: ＄0.026606"}}`},
+		{"bare-balance-code", 402, `{"code":"INSUFFICIENT_BALANCE"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sends atomic.Int32
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/responses" || r.Header.Get("Authorization") != "Bearer PILOT-BALANCE-CANARY" {
+					t.Error("unexpected pilot destination or credential")
+				}
+				sends.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			t.Cleanup(upstream.Close)
+			dir := t.TempDir()
+			caller := sha256.Sum256([]byte("scheduling-test\x00open"))
+			cfg := fmt.Sprintf(`server: {port: 0}
+management: {secret-key: test-password}
+oauth: {auth-dir: %q}
+resource-catalog: {enabled: true}
+codex: {model-level-cooling: true}
+multimedia: {disable-image-generation: true}
+routing:
+  retry: {upstream-error-retry-limit: 0}
+  provider-scheduling:
+    mode: enforce
+    models: [gpt-6.2-sol]
+    callers: [%x]
+    persistent-retry-models: [gpt-6.2-sol]
+api-keys:
+  codex:
+    - name: pilot-balance
+      base-url: %q
+      models: [{name: gpt-6.2-sol}, {name: pilot-control-model}]
+      keys: [{api-key: PILOT-BALANCE-CANARY}]
+`, filepath.ToSlash(filepath.Join(dir, "auth")), caller, upstream.URL+"/v1")
+			if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0600); err != nil {
+				t.Fatal(err)
+			}
+			open := func() *inventoryHarness {
+				f := newInventoryHarness(t, dir)
+				f.manager.SetConfig(f.server.cfg)
+				f.manager.SetRoundTripperProvider(scopedQuotaTransport{upstream.Client().Transport})
+				f.manager.RegisterExecutor(runtimeexecutor.NewCodexExecutor(f.server.cfg))
+				for _, a := range f.manager.List() {
+					registry.GetGlobalRegistry().RegisterClient(a.ID, a.Provider, []*registry.ModelInfo{{ID: persistentPilotModel}, {ID: "pilot-control-model"}})
+					t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(a.ID) })
+				}
+				access := sdkaccess.NewManager()
+				access.SetProviders([]sdkaccess.Provider{schedulingHTTPAccess{}})
+				h := openai.NewOpenAIAPIHandler(handlers.NewBaseAPIHandlers(&f.server.cfg.SDKConfig, f.manager))
+				f.server.engine.POST("/v1/chat/completions", AuthMiddleware(access), h.ChatCompletions)
+				return f
+			}
+			f := open()
+			path := "/v1/chat/completions"
+			if w := callPersistentPilot(t.Context(), f, path, persistentPilotChat); w.Code < 400 || sends.Load() != 1 {
+				t.Fatalf("fixture did not exercise a rejected upstream send: status=%d sends=%d", w.Code, sends.Load())
+			}
+			wantTarget := f.manager.List()[0].ResourceIdentity.Targets[0]
+			state := readBalanceGates(t, f)
+			if len(state.Gates) != 1 {
+				t.Fatalf("after pilot rejection: got %d durable pauses, want 1", len(state.Gates))
+			}
+			gate := state.Gates[0]
+			if gate.Model != "" || gate.Owner != balanceResumeOwner || gate.Reason != "upstream_balance_exhausted" || gate.Applicability != "current" || len(gate.Targets) != 1 || gate.Targets[0] != wantTarget {
+				t.Fatalf("wrong credential pause: %+v", gate)
+			}
+			f.close()
+			f = open()
+			if after := readBalanceGates(t, f); len(after.Gates) != 1 || after.Gates[0].EvidenceID != gate.EvidenceID || after.Revision != state.Revision {
+				t.Fatalf("restart lost the pilot pause: %+v", after)
+			}
+			for _, model := range []string{persistentPilotModel, "pilot-control-model"} {
+				body := strings.Replace(persistentPilotChat, persistentPilotModel, model, 1)
+				if w := callPersistentPilot(t.Context(), f, path, body); w.Code < 400 || sends.Load() != 1 {
+					t.Fatalf("%s dispatched on a paused credential: status=%d sends=%d", model, w.Code, sends.Load())
+				}
 			}
 		})
 	}
