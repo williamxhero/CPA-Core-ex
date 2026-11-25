@@ -13,8 +13,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
-const upstreamBalanceManualResumeReason = "manual_resume"
-
 // UpstreamBalanceResult adds the decision reason to the shared gate ACK shape.
 // A non-applied answer is still a complete, durable-aware read of the ledger.
 type UpstreamBalanceResult struct {
@@ -42,7 +40,7 @@ func (h *Handler) UpstreamBalanceResume(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid_request"})
 		return
 	}
-	if request.Reason != "" && request.Reason != upstreamBalanceManualResumeReason {
+	if request.Reason != "" && request.Reason != resourcecatalog.UpstreamBalanceManualResumeReason {
 		c.JSON(422, gin.H{"error": "invalid_reason"})
 		return
 	}

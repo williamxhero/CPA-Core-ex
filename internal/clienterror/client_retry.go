@@ -105,8 +105,9 @@ func Classify(status int, text string) FailureClass {
 }
 
 // IsExplicitBalanceExhaustion recognizes billing evidence in a failed upstream
-// response. Providers use different status codes; callers must supply a failure.
-func IsExplicitBalanceExhaustion(_ int, body string) bool {
+// response. Providers use different status codes and the evidence is in the
+// body alone, so the status cannot narrow the answer.
+func IsExplicitBalanceExhaustion(body string) bool {
 	if isExplicitBalanceCode(strings.ToLower(body)) {
 		return true
 	}

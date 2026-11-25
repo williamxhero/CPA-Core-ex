@@ -1,7 +1,6 @@
 package resourcecatalog
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"strconv"
 	"strings"
@@ -13,6 +12,17 @@ import (
 
 const upstreamBalanceGateOwner = "core.upstream-balance.v1"
 const upstreamBalanceEvidencePrefix = "upstream-balance/v1/"
+
+// upstreamBalanceExhaustedReason labels the automatic pause and seeds its
+// evidence digest.
+const upstreamBalanceExhaustedReason = "upstream_balance_exhausted"
+
+// upstreamBalanceSlot is the private-fence slot a binding's pause and every
+// later retirement share: the primary credential resource id, namespaced so the
+// slot cannot collide with a caller-supplied operation id.
+func upstreamBalanceSlot(b resource.Binding) string {
+	return upstreamBalanceEvidencePrefix + b.Targets[0].ResourceID
+}
 
 // IsCoreBalanceGateOwner reserves the balance owner and its namespaced variants.
 func IsCoreBalanceGateOwner(owner string) bool {
@@ -50,18 +60,16 @@ func (c *Catalog) ObserveUpstreamBalanceExhaustion(b resource.Binding, authIndex
 	if len(b.Targets) == 0 || !c.bindingLocked(&b) {
 		return ErrConflict
 	}
-	ids := make([]string, 0, len(b.Targets)+1)
 	for _, target := range b.Targets {
 		if !validID(target.ResourceID) {
 			return ErrConflict
 		}
-		ids = append(ids, target.ResourceID)
 	}
 	observedMS := observedAt.UnixMilli()
 	if observedMS <= 0 || observedAt.After(time.Now()) {
 		return ErrConflict
 	}
-	slot := upstreamBalanceEvidencePrefix + ids[0]
+	slot := upstreamBalanceSlot(b)
 	prior := c.state.Gates.Operations[slot].Operation
 	if observedMS <= BalanceGateObservedAtMS(prior.Owner, prior.EvidenceID) {
 		return nil
@@ -73,12 +81,10 @@ func (c *Catalog) ObserveUpstreamBalanceExhaustion(b resource.Binding, authIndex
 			break
 		}
 	}
-	stamp := strconv.FormatInt(observedMS, 10)
-	digest := sha256.Sum256([]byte(strings.Join(append(ids, stamp), "/")))
 	op := resource.GateOperation{
 		Version: 1, OpID: uuid.NewString(), ExpectedRevision: c.state.Gates.Revision, Binding: b, AuthIndex: authIndex,
 		SourceVersion: sealValue(c.key, b.Targets), Subject: "credential", Owner: upstreamBalanceGateOwner,
-		Action: "pause", Reason: "upstream_balance_exhausted", EvidenceID: upstreamBalanceEvidencePrefix + stamp + "/" + hex.EncodeToString(digest[:16]),
+		Action: "pause", Reason: upstreamBalanceExhaustedReason, EvidenceID: upstreamBalanceEvidence(observedMS, b.Targets, upstreamBalanceExhaustedReason),
 	}
 	// Advance the fence even when the original pause needs no new revision.
 	_, err := c.applyGateWithPrivateFenceLocked(op, slot, !active, "")

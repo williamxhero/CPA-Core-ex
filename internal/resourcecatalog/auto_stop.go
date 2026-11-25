@@ -2,13 +2,12 @@ package resourcecatalog
 
 import (
 	"sort"
+	"strconv"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/resource"
 )
 
-// Auto-stop projection states. They describe the durable gate ledger only: a
-// manual `disabled` or `auto-held` intent is never an automatic pause and is
-// deliberately absent from this projection.
+// Auto-stop projection states. They describe the durable gate ledger only.
 const (
 	AutoStopStateAvailable         = "available"
 	AutoStopStatePaused            = "auto_paused"
@@ -71,20 +70,43 @@ func gateObservedAtMS(g resource.Gate) int64 {
 	return 0
 }
 
-// autoStopGatePauses reports whether one current gate pauses this member. A
-// provider-subject gate covers the whole group; a credential-subject gate only
-// covers the member whose lifecycle it was published against. Both checks are
-// the same identity test routing uses, so a drifted incarnation is not paused.
-func autoStopGatePauses(g resource.Gate, group, member resource.Row) bool {
-	if g.Subject == "provider" {
-		return len(g.Targets) > 0 && sameGateLifecycle(g.Targets[0], group.Target)
+// autoStopGateRef is one current gate with its observation time resolved once,
+// so a wide ledger is not re-decoded per member.
+type autoStopGateRef struct {
+	gate       resource.Gate
+	observedMS int64
+}
+
+// autoStopTargetKey buckets gates by the lifecycle identity that decides
+// coverage — the one sameGateLifecycle compares — so a member only walks the
+// gates that can reach it.
+func autoStopTargetKey(t resource.Target) string {
+	return t.ResourceID + "\x00" + t.Incarnation + "\x00" + strconv.FormatUint(t.IdentityVersion, 10) + "\x00" +
+		strconv.FormatUint(t.CredentialVersion, 10) + "\x00" + strconv.FormatUint(t.MembershipVersion, 10)
+}
+
+// autoStopMemberGateIndexes merges the provider and credential buckets of one
+// member back into ledger order, which is the order reasons have always kept.
+func autoStopMemberGateIndexes(provider, credential []int) []int {
+	if len(provider) == 0 {
+		return credential
 	}
-	for _, t := range g.Targets {
-		if sameGateLifecycle(t, member.Target) {
-			return true
+	if len(credential) == 0 {
+		return provider
+	}
+	merged := make([]int, 0, len(provider)+len(credential))
+	i, j := 0, 0
+	for i < len(provider) && j < len(credential) {
+		if provider[i] <= credential[j] {
+			merged = append(merged, provider[i])
+			i++
+			continue
 		}
+		merged = append(merged, credential[j])
+		j++
 	}
-	return false
+	merged = append(merged, provider[i:]...)
+	return append(merged, credential[j:]...)
 }
 
 // AutoStopProjection publishes the current automatic pauses per provider group.
@@ -117,17 +139,43 @@ func (c *Catalog) autoStopProjectionLocked(state resource.GateState) AutoStopPro
 		}
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].ResourceID < groups[j].ResourceID })
+	refs := make([]autoStopGateRef, 0, len(state.Gates))
+	byProviderTarget := map[string][]int{}
+	byCredentialTarget := map[string][]int{}
+	for _, gate := range state.Gates {
+		if gate.Applicability != "current" {
+			continue
+		}
+		index := len(refs)
+		refs = append(refs, autoStopGateRef{gate: gate, observedMS: gateObservedAtMS(gate)})
+		if gate.Subject == "provider" {
+			if len(gate.Targets) > 0 {
+				key := autoStopTargetKey(gate.Targets[0])
+				byProviderTarget[key] = append(byProviderTarget[key], index)
+			}
+			continue
+		}
+		// A gate naming the same lifecycle twice still pauses the member once.
+		seen := make(map[string]struct{}, len(gate.Targets))
+		for _, target := range gate.Targets {
+			key := autoStopTargetKey(target)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			byCredentialTarget[key] = append(byCredentialTarget[key], index)
+		}
+	}
 	for _, group := range groups {
 		owned := members[group.ResourceID]
 		sort.Slice(owned, func(i, j int) bool { return owned[i].ResourceID < owned[j].ResourceID })
+		providerGates := byProviderTarget[autoStopTargetKey(group.Target)]
 		view := AutoStopProvider{ResourceID: group.ResourceID, MemberCount: len(owned), Reasons: []AutoStopReason{}, Members: make([]AutoStopMember, 0, len(owned))}
 		for _, member := range owned {
 			entry := AutoStopMember{ResourceID: member.ResourceID, State: autoStopMemberStateAvailable, Reasons: []AutoStopReason{}}
-			for _, gate := range state.Gates {
-				if gate.Applicability != "current" || !autoStopGatePauses(gate, group, member) {
-					continue
-				}
-				entry.Reasons = append(entry.Reasons, AutoStopReason{Owner: gate.Owner, Reason: gate.Reason, ObservedAtMS: gateObservedAtMS(gate), ResourceID: member.ResourceID})
+			for _, index := range autoStopMemberGateIndexes(providerGates, byCredentialTarget[autoStopTargetKey(member.Target)]) {
+				ref := refs[index]
+				entry.Reasons = append(entry.Reasons, AutoStopReason{Owner: ref.gate.Owner, Reason: ref.gate.Reason, ObservedAtMS: ref.observedMS, ResourceID: member.ResourceID})
 			}
 			if len(entry.Reasons) > 0 {
 				entry.State = autoStopMemberStatePaused
