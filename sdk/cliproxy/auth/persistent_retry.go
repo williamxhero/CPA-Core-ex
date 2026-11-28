@@ -113,6 +113,13 @@ func (b *requestBudget) setRetryStop(reason retryStopReason) {
 	}
 }
 
+func (b *requestBudget) setUpstreamCode(code string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.UpstreamCode = code
+	updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
+}
+
 // PilotCodexFailure describes facts from the Codex HTTP SSE adapter. It does
 // not authorize a replay or prove that any other route is affected.
 type PilotCodexFailure string
@@ -229,11 +236,7 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 		if hasUpstreamExecutionAttempt(err) {
 			if code := pilotUpstreamCode(err); code != "" {
 				result.upstreamCode = code
-				b := requestBudgetFromContext(ctx)
-				b.mu.Lock()
-				b.UpstreamCode = code
-				updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
-				b.mu.Unlock()
+				requestBudgetFromContext(ctx).setUpstreamCode(code)
 			}
 		}
 		if fact := pilotCodexFailure(err); fact != "" && result.Error.Code == "" {

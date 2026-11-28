@@ -325,13 +325,8 @@ func codexPilotHasExactWireCode(wire []byte, httpStatus int, code string) bool {
 		raw := ojson.GetBytesNoCopy(wire, path)
 		return raw.Type == ojson.String && raw.String() == code
 	}
-	for _, path := range []string{"error.code", "code", "body.error.code"} {
-		raw := ojson.GetBytesNoCopy(wire, path)
-		if strings.TrimSpace(raw.String()) != "" {
-			return raw.Type == ojson.String && raw.String() == code
-		}
-	}
-	return false
+	raw := codexHTTPErrorCodeResult(wire)
+	return raw.Type == ojson.String && raw.String() == code
 }
 
 func codexTerminalErrorPath(eventData []byte, eventType string) string {
@@ -647,12 +642,18 @@ func isCodexTurnRateLimitError(errorBody []byte) bool {
 // codexErrorCodeOf returns the dedicated error code across the layouts the
 // Codex upstream uses.
 func codexErrorCodeOf(errorBody []byte) string {
+	return strings.Clone(strings.TrimSpace(codexHTTPErrorCodeResult(errorBody).String()))
+}
+
+// Select by trimmed content, but keep the original value for exact wire checks.
+func codexHTTPErrorCodeResult(errorBody []byte) ojson.Result {
 	for _, path := range []string{"error.code", "code", "body.error.code"} {
-		if code := strings.TrimSpace(ojson.GetBytesNoCopy(errorBody, path).String()); code != "" {
-			return strings.Clone(code)
+		raw := ojson.GetBytesNoCopy(errorBody, path)
+		if strings.TrimSpace(raw.String()) != "" {
+			return raw
 		}
 	}
-	return ""
+	return ojson.Result{}
 }
 
 // isCodexTransientCapacityError covers every Codex capacity rejection that
