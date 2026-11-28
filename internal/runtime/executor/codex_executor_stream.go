@@ -239,7 +239,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
 		}
 		businessErr := e.codexHTTPBusinessError(ctx, auth, httpResp, data, upstreamBody, baseModel)
-		return nil, codexPilotFailureFacts(ctx, businessErr, httpResp.Header, nil, data, httpResp.StatusCode)
+		return nil, codexPilotFailureFacts(ctx, businessErr, httpResp.Header, nil, data, data, httpResp.StatusCode)
 	}
 
 	bufferedFrames := 0
@@ -366,7 +366,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if pilot {
-						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, 0)
+						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, line[5:], 0)
 					}
 					closeBootstrapBody()
 					if errClearReplay := clearRejectedReplay(streamErr.StatusCode(), terminalBody); errClearReplay != nil {
@@ -608,7 +608,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				eventType := ojson.GetBytesNoCopy(data, "type").String()
 				if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(data, e.modelLevelCooling()); ok {
 					if pilot {
-						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, 0)
+						streamErr = codexPilotFailureFacts(ctx, streamErr, httpResp.Header, parseCodexWebsocketErrorHeaders(data), terminalBody, line[5:], 0)
 					}
 					if errClearReplay := clearRejectedReplay(streamErr.StatusCode(), terminalBody); errClearReplay != nil {
 						recordError(errClearReplay)

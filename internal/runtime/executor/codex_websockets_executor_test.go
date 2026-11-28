@@ -1603,6 +1603,16 @@ func TestBuildCodexResponsesWebsocketURLRequiresHTTPURL(t *testing.T) {
 	}
 }
 
+func TestParseCodexWebsocketErrorNormalizesPaddedTopLevelMessageTooBig(t *testing.T) {
+	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":413,"code":" message_too_big ","message":"size limit"}`))
+	if !ok {
+		t.Fatal("WebSocket error not parsed")
+	}
+	if got := ojson.Get(err.Error(), "error.code").String(); got != "message_too_big" {
+		t.Fatalf("WebSocket code = %q, want message_too_big", got)
+	}
+}
+
 func TestParseCodexWebsocketErrorMarksConnectionLimitRetryable(t *testing.T) {
 	err, ok := parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":{"code":"websocket_connection_limit_reached","message":"too many websockets"},"headers":{"retry-after":"1"}}`))
 	if !ok {

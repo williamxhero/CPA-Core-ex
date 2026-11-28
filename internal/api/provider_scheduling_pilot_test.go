@@ -1497,6 +1497,8 @@ func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
 		{"context_length_exceeded", "context_length_exceeded", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
 		{"context_too_large", "context_too_large", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
 		{"message_too_big", "message_too_big", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
+		{" message_too_big ", "", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"MESSAGE_TOO_BIG", "", "invalid_request", "upstream_validation", "The upstream rejected this request."},
 		{"string_above_max_length", "string_above_max_length", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
 		{"previous_response_not_found", "previous_response_not_found", "invalid_request", "upstream_validation", "The upstream rejected this request."},
 		{"invalid_encrypted_content", "invalid_encrypted_content", "invalid_request", "upstream_validation", "The upstream rejected this request."},
@@ -1504,7 +1506,11 @@ func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
 		{"UNKNOWN-CANARY", "", "upstream_policy", "upstream_policy", "The upstream's policy rejected this request."},
 		{"", "", "upstream_policy", "upstream_policy", "The upstream's policy rejected this request."},
 	} {
-		for _, transport := range []string{"HTTP", "SSE"} {
+		transports := []string{"HTTP", "SSE"}
+		if strings.EqualFold(strings.TrimSpace(tc.code), "message_too_big") {
+			transports = append(transports, "SSE-top-level")
+		}
+		for _, transport := range transports {
 			name := tc.code
 			switch name {
 			case "UNKNOWN-CANARY":
@@ -1532,6 +1538,10 @@ func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
 						return
 					}
 					persistentPilotStart(w, "resp-CANARY")
+					if transport == "SSE-top-level" {
+						_, _ = fmt.Fprintf(w, "data: {\"type\":\"error\",\"error_type\":%q,\"code\":%q,\"message\":\"RAW-CANARY\"}\n\n", kind, tc.code)
+						return
+					}
 					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":%s}\n\n", body.Bytes())
 				})
 				prev := redisqueue.Enabled()

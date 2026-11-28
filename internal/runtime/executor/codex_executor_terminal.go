@@ -188,7 +188,7 @@ func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool
 	return newCodexStatusErrWithHeadersAndCooling(codexTerminalFailureStatus(body), headers, body, modelLevelCooling), body, true
 }
 
-func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHeaders http.Header, body []byte, httpStatus int) statusErr {
+func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHeaders http.Header, body, wire []byte, httpStatus int) statusErr {
 	if !cliproxyauth.PersistentRetryPilot(ctx) {
 		return err
 	}
@@ -221,15 +221,8 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 		code == "previous_response_not_found", code == "invalid_encrypted_content", code == "thinking_signature_invalid":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexInvalid, http.StatusBadRequest
 		// Classification tolerates case and whitespace; evidence must be exact.
-		for _, path := range []string{"error.code", "code", "body.error.code"} {
-			raw := ojson.GetBytesNoCopy(body, path)
-			if strings.TrimSpace(raw.String()) == "" {
-				continue
-			}
-			if raw.Type == ojson.String && raw.String() == code {
-				err.pilotUpstreamCode = code
-			}
-			break
+		if codexPilotHasExactWireCode(wire, httpStatus, code) {
+			err.pilotUpstreamCode = code
 		}
 	case code == "token_revoked", code == "account_deactivated", code == "invalid_api_key", code == "refresh_token_reused", code == "refresh_token_invalidated":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexRevoked, http.StatusUnauthorized
@@ -315,9 +308,48 @@ func codexTerminalFailureStatus(body []byte) int {
 	}
 }
 
+func codexPilotHasExactWireCode(wire []byte, httpStatus int, code string) bool {
+	if httpStatus == 0 {
+		// SSE evidence must come from the same envelope selected by the
+		// terminal parser, not the flattened (and possibly trimmed) body.
+		eventType := helps.CodexResponseEventType(wire)
+		path := codexTerminalErrorPath(wire, eventType)
+		switch {
+		case path != "":
+			path += ".code"
+		case eventType == "error":
+			path = "code"
+		default:
+			return false
+		}
+		raw := ojson.GetBytesNoCopy(wire, path)
+		return raw.Type == ojson.String && raw.String() == code
+	}
+	for _, path := range []string{"error.code", "code", "body.error.code"} {
+		raw := ojson.GetBytesNoCopy(wire, path)
+		if strings.TrimSpace(raw.String()) != "" {
+			return raw.Type == ojson.String && raw.String() == code
+		}
+	}
+	return false
+}
+
+func codexTerminalErrorPath(eventData []byte, eventType string) string {
+	paths := []string{"error", "body.error", "response.error"}
+	if eventType == "response.failed" {
+		paths = []string{"response.error", "error", "body.error"}
+	}
+	for _, path := range paths {
+		node := ojson.GetBytesNoCopy(eventData, path)
+		if node.Exists() && node.Type != ojson.Null {
+			return path
+		}
+	}
+	return ""
+}
+
 func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 	eventType := helps.CodexResponseEventType(eventData)
-	paths := []string{"error", "body.error", "response.error"}
 	switch eventType {
 	case "":
 		// Some relays send an error envelope without a JSON event type.
@@ -326,17 +358,13 @@ func codexTerminalFailureBody(eventData []byte) ([]byte, bool) {
 		if !errorObject.IsObject() || (errorObject.Get("type").String() == "" && errorObject.Get("code").String() == "" && errorObject.Get("message").String() == "") {
 			return nil, false
 		}
-	case "error":
-	case "response.failed":
-		paths = []string{"response.error", "error", "body.error"}
+	case "error", "response.failed":
 	default:
 		return nil, false
 	}
 	var doc *ojson.Doc
-	for _, path := range paths {
-		if doc = codexTerminalErrorBody(eventData, path); doc != nil {
-			break
-		}
+	if path := codexTerminalErrorPath(eventData, eventType); path != "" {
+		doc = codexTerminalErrorBody(eventData, path)
 	}
 	if doc == nil && eventType == "error" {
 		doc = codexTerminalTopLevelErrorBody(eventData)
@@ -426,7 +454,7 @@ func codexTerminalTopLevelErrorBody(eventData []byte) *ojson.Doc {
 		_ = doc.Set("error.message", message)
 	}
 	if code != "" {
-		_ = doc.Set("error.code", ojson.GetBytesNoCopy(eventData, "code").String())
+		_ = doc.Set("error.code", code)
 	}
 	if errorType != "" {
 		_ = doc.Set("error.type", errorType)
