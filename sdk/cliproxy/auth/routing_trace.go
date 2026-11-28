@@ -80,6 +80,7 @@ type RoutingTrace struct {
 	WaitMS              int64                 `json:"wait_ms"`
 	OutputCommitted     bool                  `json:"output_committed"`
 	ReplayUnsafe        bool                  `json:"replay_unsafe"`
+	UpstreamCode        string                `json:"upstream_code,omitempty"`
 	UpstreamCategory    string                `json:"upstream_category,omitempty"`
 	UpstreamRetrySource string                `json:"upstream_retry_source,omitempty"`
 	RetryStopReason     string                `json:"retry_stop_reason,omitempty"`
@@ -378,6 +379,7 @@ func updateRoutingAccounting(t *routingTrace, accounting RequestBudgetSnapshot) 
 	t.data.SendCount, t.data.Round, t.data.RoundSends = accounting.Attempts, accounting.Round, accounting.RoundAttempts
 	t.data.WaitMS = accounting.ActiveWait.Milliseconds()
 	t.data.OutputCommitted, t.data.ReplayUnsafe = accounting.OutputCommitted, accounting.ReplayUnsafe
+	t.data.UpstreamCode = accounting.UpstreamCode
 	t.data.UpstreamCategory = accounting.UpstreamCategory
 	t.data.UpstreamRetrySource = accounting.UpstreamRetrySource
 	t.data.RetryStopReason = accounting.RetryStopReason
@@ -512,8 +514,14 @@ func RoutingErrorForResponse(ctx context.Context, err error) error {
 		fact := pilotCodexFailure(err)
 		failure.Code, failure.Type, failure.Message = string(fact), "server_error", "The upstream service could not complete the request."
 		switch fact {
-		case PilotCodexInvalid, PilotCodexPolicy:
+		case PilotCodexInvalid:
 			failure.Type, failure.Message = "invalid_request_error", "The upstream rejected this request."
+			switch pilotUpstreamCode(err) {
+			case "context_length_exceeded", "context_too_large", "message_too_big", "string_above_max_length":
+				failure.Message = "The input exceeds the model's context or size limit. Shorten it and try again."
+			}
+		case PilotCodexPolicy:
+			failure.Type, failure.Message = "invalid_request_error", "The upstream's policy rejected this request."
 		case PilotCodexAuth, PilotCodexRevoked:
 			failure.status = http.StatusBadGateway
 			failure.Message = "The upstream credential could not authenticate."

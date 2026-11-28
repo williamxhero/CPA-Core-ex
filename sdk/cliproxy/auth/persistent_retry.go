@@ -137,6 +137,14 @@ func pilotCodexFailure(err error) PilotCodexFailure {
 	return ""
 }
 
+func pilotUpstreamCode(err error) string {
+	var fact interface{ PilotUpstreamCode() string }
+	if errors.As(err, &fact) {
+		return fact.PilotUpstreamCode()
+	}
+	return ""
+}
+
 func persistentTransient(err error) bool {
 	if !hasUpstreamExecutionAttempt(err) || upstreamAttemptProviderFromError(err) != "codex" ||
 		isRequestTerminatedError(err) || isRequestStopError(err) || isSchedulerRejectError(err) {
@@ -218,6 +226,16 @@ func (m *Manager) recordPilotStreamResult(ctx context.Context, result Result, au
 		}
 		// Rules inspected the response before this point. Never persist its text.
 		result.Error.Message = "Codex inference rejected"
+		if hasUpstreamExecutionAttempt(err) {
+			if code := pilotUpstreamCode(err); code != "" {
+				result.upstreamCode = code
+				b := requestBudgetFromContext(ctx)
+				b.mu.Lock()
+				b.UpstreamCode = code
+				updateRoutingAccounting(b.trace.Load(), b.RequestBudgetSnapshot)
+				b.mu.Unlock()
+			}
+		}
 		if fact := pilotCodexFailure(err); fact != "" && result.Error.Code == "" {
 			result.Error.Code = string(fact)
 		}

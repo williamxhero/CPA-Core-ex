@@ -19,6 +19,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	runtimeexecutor "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
@@ -1483,6 +1484,92 @@ func TestProviderSchedulingPersistentPilotTerminalEvidence(t *testing.T) {
 				t.Fatal("pilot created a full request/response log")
 			}
 		})
+	}
+}
+
+func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
+	for _, tc := range []struct {
+		code, evidence, public, stop, message string
+	}{
+		{"invalid_prompt", "invalid_prompt", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"invalid_value", "invalid_value", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"unsupported_value", "unsupported_value", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"context_length_exceeded", "context_length_exceeded", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
+		{"context_too_large", "context_too_large", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
+		{"message_too_big", "message_too_big", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
+		{"string_above_max_length", "string_above_max_length", "invalid_request", "upstream_validation", "The input exceeds the model's context or size limit. Shorten it and try again."},
+		{"previous_response_not_found", "previous_response_not_found", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"invalid_encrypted_content", "invalid_encrypted_content", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"thinking_signature_invalid", "thinking_signature_invalid", "invalid_request", "upstream_validation", "The upstream rejected this request."},
+		{"UNKNOWN-CANARY", "", "upstream_policy", "upstream_policy", "The upstream's policy rejected this request."},
+		{"", "", "upstream_policy", "upstream_policy", "The upstream's policy rejected this request."},
+	} {
+		for _, transport := range []string{"HTTP", "SSE"} {
+			name := tc.code
+			switch name {
+			case "UNKNOWN-CANARY":
+				name = "unknown"
+			case "":
+				name = "unstructured"
+			}
+			t.Run(transport+"/"+name, func(t *testing.T) {
+				clock := newProviderBudgetClock(time.Now(), true)
+				var sends atomic.Int32
+				f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", -1, clock, func(w http.ResponseWriter, _ *http.Request) {
+					sends.Add(1)
+					kind := "invalid_request_error"
+					if tc.public == "upstream_policy" {
+						kind = "image_generation_user_error"
+					}
+					body := ojson.NewDocString(`{"error":{"message":"RAW-CANARY invalid_encrypted_content"}}`)
+					_ = body.Set("error.type", kind)
+					if tc.code != "" {
+						_ = body.Set("error.code", tc.code)
+					}
+					if transport == "HTTP" {
+						w.WriteHeader(http.StatusBadRequest)
+						_, _ = w.Write(body.Bytes())
+						return
+					}
+					persistentPilotStart(w, "resp-CANARY")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":%s}\n\n", body.Bytes())
+				})
+				prev := redisqueue.Enabled()
+				redisqueue.SetEnabled(true)
+				t.Cleanup(func() { redisqueue.SetEnabled(prev) })
+				events, unsubscribe := redisqueue.SubscribeErrors()
+				defer unsubscribe()
+				ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+				defer cancel()
+				w := callPersistentPilot(ctx, f, "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY"}`)
+				trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+				var event string
+				select {
+				case payload := <-events:
+					event = string(payload)
+				case <-ctx.Done():
+					t.Fatalf("missing error event: status=%d body=%s trace=%s", w.Code, w.Body, trace)
+				}
+				body := w.Body.String()
+				if w.Code != 400 || sends.Load() != 1 || len(clock.waits) != 0 ||
+					ojson.Get(body, "error.code").String() != tc.public || ojson.Get(body, "error.message").String() != tc.message ||
+					len(ojson.Get(body, "error").Map()) != 5 || ojson.Get(body, "error.upstream_code").Exists() ||
+					ojson.Get(body, "error.type").String() != "invalid_request_error" ||
+					ojson.Get(body, "error.model").String() != "gpt-6.2-sol" ||
+					ojson.Get(body, "error.request_id").String() != w.Header().Get("X-Request-ID") ||
+					ojson.Get(trace, "send_count").Int() != 1 || ojson.Get(trace, "retry_stop_reason").String() != tc.stop ||
+					ojson.Get(event, "code").String() != "request_scoped" || ojson.Get(event, "auth_status.unavailable").Bool() || ojson.Get(event, "auth_status.disabled").Bool() ||
+					strings.Contains(body+trace+event, "CANARY") {
+					t.Fatalf("wrong terminal: status=%d sends=%d body=%s trace=%s event=%s", w.Code, sends.Load(), body, trace, event)
+				}
+				for _, evidence := range []string{trace, event} {
+					got := ojson.Get(evidence, "upstream_code")
+					if got.String() != tc.evidence || got.Exists() != (tc.evidence != "") {
+						t.Fatalf("upstream_code = %q, want %q: %s", got.String(), tc.evidence, evidence)
+					}
+				}
+			})
+		}
 	}
 }
 

@@ -220,6 +220,17 @@ func codexPilotFailureFacts(ctx context.Context, err statusErr, headers, eventHe
 		code == "context_length_exceeded", code == "context_too_large", code == "message_too_big", code == "string_above_max_length",
 		code == "previous_response_not_found", code == "invalid_encrypted_content", code == "thinking_signature_invalid":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexInvalid, http.StatusBadRequest
+		// Classification tolerates case and whitespace; evidence must be exact.
+		for _, path := range []string{"error.code", "code", "body.error.code"} {
+			raw := ojson.GetBytesNoCopy(body, path)
+			if strings.TrimSpace(raw.String()) == "" {
+				continue
+			}
+			if raw.Type == ojson.String && raw.String() == code {
+				err.pilotUpstreamCode = code
+			}
+			break
+		}
 	case code == "token_revoked", code == "account_deactivated", code == "invalid_api_key", code == "refresh_token_reused", code == "refresh_token_invalidated":
 		err.pilotCodexFailure, err.code = cliproxyauth.PilotCodexRevoked, http.StatusUnauthorized
 	case code == "token_expired", code == "unauthorized", kind == "authentication_error":
@@ -415,7 +426,7 @@ func codexTerminalTopLevelErrorBody(eventData []byte) *ojson.Doc {
 		_ = doc.Set("error.message", message)
 	}
 	if code != "" {
-		_ = doc.Set("error.code", code)
+		_ = doc.Set("error.code", ojson.GetBytesNoCopy(eventData, "code").String())
 	}
 	if errorType != "" {
 		_ = doc.Set("error.type", errorType)

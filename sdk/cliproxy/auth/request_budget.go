@@ -40,6 +40,7 @@ type RequestBudgetSnapshot struct {
 	ActiveWait          time.Duration
 	OutputCommitted     bool
 	ReplayUnsafe        bool
+	UpstreamCode        string
 	UpstreamCategory    string
 	pacedStatus         int
 	UpstreamRetryAt     time.Time

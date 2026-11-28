@@ -113,6 +113,8 @@ type Result struct {
 	// cooldown. Zero means unknown (direct MarkResult callers) and is exempt
 	// from the ordering guard.
 	ExecutionSeq uint64
+	// upstreamCode is protected diagnostic evidence for error events only.
+	upstreamCode string
 }
 
 // Selector chooses an auth candidate for execution.

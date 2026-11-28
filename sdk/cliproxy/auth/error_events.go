@@ -9,16 +9,17 @@ import (
 )
 
 type errorEvent struct {
-	Timestamp  time.Time            `json:"timestamp"`
-	Provider   string               `json:"provider,omitempty"`
-	Model      string               `json:"model,omitempty"`
-	AuthID     string               `json:"auth_id,omitempty"`
-	AuthIndex  string               `json:"auth_index"`
-	StatusCode int                  `json:"status_code"`
-	Body       string               `json:"body"`
-	Code       string               `json:"code,omitempty"`
-	Retryable  bool                 `json:"retryable,omitempty"`
-	AuthStatus errorEventAuthStatus `json:"auth_status"`
+	Timestamp    time.Time            `json:"timestamp"`
+	Provider     string               `json:"provider,omitempty"`
+	Model        string               `json:"model,omitempty"`
+	AuthID       string               `json:"auth_id,omitempty"`
+	AuthIndex    string               `json:"auth_index"`
+	StatusCode   int                  `json:"status_code"`
+	Body         string               `json:"body"`
+	Code         string               `json:"code,omitempty"`
+	UpstreamCode string               `json:"upstream_code,omitempty"`
+	Retryable    bool                 `json:"retryable,omitempty"`
+	AuthStatus   errorEventAuthStatus `json:"auth_status"`
 }
 
 type errorEventAuthStatus struct {
@@ -75,6 +76,7 @@ func buildErrorEventPayload(result Result, authSnapshot *Auth) ([]byte, bool) {
 	}
 	if result.Error != nil {
 		event.Code = strings.TrimSpace(result.Error.Code)
+		event.UpstreamCode = result.upstreamCode
 		event.Retryable = result.Error.Retryable
 	}
 	payload, errMarshal := json.Marshal(event)
