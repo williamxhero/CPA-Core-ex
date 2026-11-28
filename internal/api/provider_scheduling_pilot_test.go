@@ -1487,7 +1487,23 @@ func TestProviderSchedulingPersistentPilotTerminalEvidence(t *testing.T) {
 	}
 }
 
+var pilotValidationClients = []struct {
+	name, path, input string
+}{
+	{"responses", "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY"}`},
+	{"chat", "/v1/chat/completions", persistentPilotChat},
+}
+
 func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
+	for _, client := range pilotValidationClients {
+		t.Run(client.name, func(t *testing.T) {
+			testPilotValidationUpstreamCode(t, client.path, client.input)
+		})
+	}
+}
+
+func testPilotValidationUpstreamCode(t *testing.T, path, input string) {
+	t.Helper()
 	for _, tc := range []struct {
 		code, evidence, public, stop, message string
 	}{
@@ -1514,9 +1530,9 @@ func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
 			name := tc.code
 			switch name {
 			case "UNKNOWN-CANARY":
-				name = "unknown"
+				name = "policy-unknown"
 			case "":
-				name = "unstructured"
+				name = "policy-unstructured"
 			}
 			t.Run(transport+"/"+name, func(t *testing.T) {
 				clock := newProviderBudgetClock(time.Now(), true)
@@ -1544,22 +1560,7 @@ func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
 					}
 					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":%s}\n\n", body.Bytes())
 				})
-				prev := redisqueue.Enabled()
-				redisqueue.SetEnabled(true)
-				t.Cleanup(func() { redisqueue.SetEnabled(prev) })
-				events, unsubscribe := redisqueue.SubscribeErrors()
-				defer unsubscribe()
-				ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
-				defer cancel()
-				w := callPersistentPilot(ctx, f, "/v1/responses", `{"model":"gpt-6.2-sol","stream":true,"input":"PAYLOAD-CANARY"}`)
-				trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
-				var event string
-				select {
-				case payload := <-events:
-					event = string(payload)
-				case <-ctx.Done():
-					t.Fatalf("missing error event: status=%d body=%s trace=%s", w.Code, w.Body, trace)
-				}
+				w, trace, event := callPilotValidationWithEvidence(t, f, path, input)
 				body := w.Body.String()
 				if w.Code != 400 || sends.Load() != 1 || len(clock.waits) != 0 ||
 					ojson.Get(body, "error.code").String() != tc.public || ojson.Get(body, "error.message").String() != tc.message ||
@@ -1580,6 +1581,83 @@ func TestProviderSchedulingPilotValidationUpstreamCode(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestProviderSchedulingPilotValidationWithoutStructuredCode(t *testing.T) {
+	for _, client := range pilotValidationClients {
+		for _, tc := range []struct {
+			name, codeField string
+		}{
+			{"non-string", `,"code":["invalid_encrypted_content"]`},
+			{"unknown", `,"code":"UNKNOWN-CANARY"`},
+			{"missing", ""},
+			{"plain-text", ""},
+		} {
+			for _, transport := range []string{"HTTP", "SSE"} {
+				if tc.name == "plain-text" && transport == "SSE" {
+					continue
+				}
+				t.Run(client.name+"/"+transport+"/"+tc.name, func(t *testing.T) {
+					clock := newProviderBudgetClock(time.Now(), true)
+					var sends atomic.Int32
+					raw := "RAW-CANARY invalid_encrypted_content"
+					if tc.name == "non-string" {
+						raw = "RAW-CANARY"
+					}
+					f := newPersistentPilotHTTP(t, "[gpt-6.2-sol]", 1, clock, func(w http.ResponseWriter, _ *http.Request) {
+						if sends.Add(1) > 1 {
+							persistentPilotStart(w, "resp-recovered")
+							persistentPilotSucceed(w, "validation-recovered")
+							return
+						}
+						if tc.name == "plain-text" {
+							http.Error(w, raw, http.StatusBadRequest)
+							return
+						}
+						body := fmt.Sprintf(`{"error":{"type":"invalid_request_error","message":%q%s}}`, raw, tc.codeField)
+						if transport == "HTTP" {
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusBadRequest)
+							_, _ = fmt.Fprint(w, body)
+							return
+						}
+						persistentPilotStart(w, "resp-CANARY")
+						_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":%s}\n\n", body)
+					})
+					w, trace, event := callPilotValidationWithEvidence(t, f, client.path, client.input)
+					body := w.Body.String()
+					if w.Code != http.StatusOK || sends.Load() != 2 || len(clock.waits) != 1 ||
+						!strings.Contains(body, "validation-recovered") || ojson.Get(trace, "send_count").Int() != 2 ||
+						ojson.Get(trace, "terminal.code").String() != "succeeded" || ojson.Get(trace, "retry_stop_reason").String() != "" ||
+						ojson.Get(trace, "upstream_code").Exists() || ojson.Get(event, "upstream_code").Exists() ||
+						ojson.Get(event, "code").String() != "transient_upstream" || ojson.Get(event, "status_code").Int() != http.StatusBadRequest ||
+						strings.Contains(body+trace+event, "CANARY") || strings.Contains(body+trace+event, "invalid_encrypted_content") {
+						t.Fatalf("wrong recovery: status=%d sends=%d waits=%d body=%s trace=%s event=%s", w.Code, sends.Load(), len(clock.waits), body, trace, event)
+					}
+				})
+			}
+		}
+	}
+}
+
+func callPilotValidationWithEvidence(t *testing.T, f *inventoryHarness, path, input string) (*httptest.ResponseRecorder, string, string) {
+	t.Helper()
+	prev := redisqueue.Enabled()
+	redisqueue.SetEnabled(true)
+	defer redisqueue.SetEnabled(prev)
+	events, unsubscribe := redisqueue.SubscribeErrors()
+	defer unsubscribe()
+	ctx, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	w := callPersistentPilot(ctx, f, path, input)
+	trace := awaitPilotTerminalTrace(t, ctx, f, w.Header().Get("X-Request-ID"))
+	select {
+	case payload := <-events:
+		return w, trace, string(payload)
+	case <-ctx.Done():
+		t.Fatalf("missing error event: status=%d body=%s trace=%s", w.Code, w.Body, trace)
+		return nil, "", ""
 	}
 }
 
